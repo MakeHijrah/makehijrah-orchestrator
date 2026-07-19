@@ -31,7 +31,16 @@ app.get("/health", async (_request, reply) => {
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
-    app.log.error(error);
+    const message =
+      error instanceof Error ? error.message : "Unknown health check error";
+
+    app.log.error(
+      {
+        err: error,
+        errorMessage: message,
+      },
+      "Health check failed",
+    );
 
     return reply.status(503).send({
       ok: false,
