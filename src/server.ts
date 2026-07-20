@@ -1,3 +1,4 @@
+import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
@@ -7,6 +8,16 @@ import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
 
 const app = Fastify({
   logger: true,
+});
+
+await app.register(cors, {
+  origin: env.APP_URL,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Authorization",
+    "Content-Type",
+  ],
+  credentials: true,
 });
 
 app.get("/health", async (_request, reply) => {
