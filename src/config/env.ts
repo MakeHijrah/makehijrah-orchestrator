@@ -22,6 +22,20 @@ const envSchema = z.object({
 
   REDIS_URL: z.string().min(1),
 
+  DEFAULT_CONSULTATION_PRICE_CENTS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(15000),
+
+  DEFAULT_CURRENCY: z
+    .string()
+    .trim()
+    .min(3)
+    .max(3)
+    .transform((value) => value.toLowerCase())
+    .default("usd"),
+
   OAUTH_TOKEN_ENCRYPTION_KEY: z
     .string()
     .min(1)
@@ -47,9 +61,7 @@ const envSchema = z.object({
 
   APP_URL: z.string().url(),
 
-  OAUTH_STATE_SECRET: z
-    .string()
-    .min(32),
+  OAUTH_STATE_SECRET: z.string().min(32),
 });
 
 const parsed = envSchema.safeParse(process.env);
