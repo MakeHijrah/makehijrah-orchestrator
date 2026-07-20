@@ -38,6 +38,18 @@ const envSchema = z.object({
           "OAUTH_TOKEN_ENCRYPTION_KEY must be a Base64-encoded 32-byte key.",
       },
     ),
+
+  GOOGLE_CLIENT_ID: z.string().min(1),
+
+  GOOGLE_CLIENT_SECRET: z.string().min(1),
+
+  GOOGLE_REDIRECT_URI: z.string().url(),
+
+  APP_URL: z.string().url(),
+
+  OAUTH_STATE_SECRET: z
+    .string()
+    .min(32),
 });
 
 const parsed = envSchema.safeParse(process.env);
