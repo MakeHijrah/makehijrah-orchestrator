@@ -2,6 +2,8 @@ import {
   getCachedAvailability,
   setCachedAvailability,
 } from "./availability.cache.js";
+import { removeBusySlots } from "./availability.conflicts.js";
+import { getGoogleBusyIntervals } from "./google-freebusy.js";
 import { calculateLocalAvailability } from "./availability.local.js";
 import type { AvailabilityResult } from "./availability.types.js";
 
@@ -22,7 +24,11 @@ export type AvailabilityCalculationResult =
     }
   | {
       ok: false;
-      code: "GOOGLE_ERROR" | "INTERNAL_ERROR";
+      code:
+        | "OAUTH_NOT_CONNECTED"
+        | "OAUTH_REVOKED"
+        | "GOOGLE_ERROR"
+        | "INTERNAL_ERROR";
       message: string;
     };
 
@@ -65,18 +71,43 @@ export const calculateAvailability = async ({
     };
   }
 
-  /*
-   * Google FreeBusy filtering must run here before the result
-   * may be returned or cached.
-   *
-   * Returning localResult.data now would expose slots that may
-   * conflict with the consultant's Google Calendar.
-   */
+  const googleResult = await getGoogleBusyIntervals(
+    consultantId,
+    from,
+    to,
+  );
+
+  if (!googleResult.ok) {
+    return {
+      ok: false,
+      code: googleResult.code,
+      message: googleResult.message,
+    };
+  }
+
+  const availableSlots = removeBusySlots(
+    localResult.data.slots,
+    googleResult.intervals,
+  );
+
+  const completedResult: AvailabilityResult = {
+    consultant_id: consultantId,
+    slots: availableSlots,
+    generated_at: new Date().toISOString(),
+    cache_ttl_seconds: 120,
+  };
+
+  await setCachedAvailability(
+    consultantId,
+    from,
+    to,
+    completedResult,
+  );
+
   return {
-    ok: false,
-    code: "GOOGLE_ERROR",
-    message:
-      "Google Calendar availability checking is not configured yet.",
+    ok: true,
+    data: completedResult,
+    source: "calculated",
   };
 };
 
