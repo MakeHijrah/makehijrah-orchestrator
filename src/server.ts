@@ -3,6 +3,7 @@ import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
 import { supabaseAdmin } from "./lib/supabase.js";
 import { registerAvailabilityRoute } from "./modules/availability/availability.route.js";
+import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
 
 const app = Fastify({
   logger: true,
@@ -12,10 +13,11 @@ app.get("/health", async (_request, reply) => {
   try {
     const redisResponse = await redis.ping();
 
-    const { data: countries, error: supabaseError } = await supabaseAdmin
-      .from("countries")
-      .select("id")
-      .limit(1);
+    const { data: countries, error: supabaseError } =
+      await supabaseAdmin
+        .from("countries")
+        .select("id")
+        .limit(1);
 
     if (supabaseError) {
       app.log.error(
@@ -82,6 +84,7 @@ app.get("/health", async (_request, reply) => {
 });
 
 await registerAvailabilityRoute(app);
+await registerOAuthRoutes(app);
 
 const start = async (): Promise<void> => {
   try {
