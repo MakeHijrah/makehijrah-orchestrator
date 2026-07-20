@@ -32,20 +32,78 @@ await app.register(rateLimit, {
   global: false,
   redis,
   keyGenerator: (request) => request.ip,
-  errorResponseBuilder: (_request, context) => ({
+  errorResponseBuilder: (_request, context) => {
+    const error = new Error(
+      "Too many requests. Please try again shortly.",
+    ) as Error & {
+      statusCode: number;
+      code: string;
+      details: {
+        limit: number;
+        retry_after_seconds: number;
+      };
+    };
+
+    error.statusCode = 429;
+    error.code = "RATE_LIMITED";
+    error.details = {
+      limit: context.max,
+      retry_after_seconds: Math.ceil(
+        context.ttl / 1000,
+      ),
+    };
+
+    return error;
+  },
+});
+
+app.setErrorHandler((error, request, reply) => {
+  const rateLimitError = error as Error & {
+    statusCode?: number;
+    code?: string;
+    details?: unknown;
+  };
+
+  if (
+    rateLimitError.statusCode === 429 &&
+    rateLimitError.code === "RATE_LIMITED"
+  ) {
+    return reply.status(429).send({
+      ok: false,
+      error: {
+        code: "RATE_LIMITED",
+        message:
+          "Too many requests. Please try again shortly.",
+        details: rateLimitError.details,
+      },
+    });
+  }
+
+  request.log.error(
+    {
+      err: error,
+    },
+    "Unhandled request error",
+  );
+
+  return reply.status(
+    rateLimitError.statusCode &&
+      rateLimitError.statusCode >= 400
+      ? rateLimitError.statusCode
+      : 500,
+  ).send({
     ok: false,
     error: {
-      code: "RATE_LIMITED",
+      code:
+        rateLimitError.code ??
+        "INTERNAL_ERROR",
       message:
-        "Too many requests. Please try again shortly.",
-      details: {
-        limit: context.max,
-        retry_after_seconds: Math.ceil(
-          context.ttl / 1000,
-        ),
-      },
+        rateLimitError.statusCode &&
+        rateLimitError.statusCode < 500
+          ? error.message
+          : "An unexpected server error occurred.",
     },
-  }),
+  });
 });
 
 app.get("/health", async (_request, reply) => {
