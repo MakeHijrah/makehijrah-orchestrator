@@ -1,7 +1,7 @@
 import { removeBusySlots } from "../availability/availability.conflicts.js";
 import { calculateLocalAvailability } from "../availability/availability.local.js";
-import { getGoogleBusyIntervals } from "../availability/google-freebusy.js";
 import { getConsultantForAvailability } from "../availability/availability.service.js";
+import { getGoogleBusyIntervals } from "../availability/google-freebusy.js";
 
 type ValidateDraftSlotInput = {
   consultantId: string;
@@ -32,6 +32,20 @@ const SLOT_DURATION_MILLISECONDS =
 const VALIDATION_WINDOW_PADDING_MILLISECONDS =
   24 * 60 * 60 * 1000;
 
+const timestampsMatch = (
+  first: string,
+  second: string,
+): boolean => {
+  const firstTimestamp = Date.parse(first);
+  const secondTimestamp = Date.parse(second);
+
+  return (
+    Number.isFinite(firstTimestamp) &&
+    Number.isFinite(secondTimestamp) &&
+    firstTimestamp === secondTimestamp
+  );
+};
+
 export const validateDraftSlot = async ({
   consultantId,
   startAt,
@@ -42,7 +56,8 @@ export const validateDraftSlot = async ({
     return {
       ok: false,
       code: "SLOT_OUTSIDE_HOURS",
-      message: "The selected consultation time is invalid.",
+      message:
+        "The selected consultation time is invalid.",
     };
   }
 
@@ -50,6 +65,12 @@ export const validateDraftSlot = async ({
     requestedStart.getTime() +
       SLOT_DURATION_MILLISECONDS,
   );
+
+  const requestedStartIso =
+    requestedStart.toISOString();
+
+  const requestedEndIso =
+    requestedEnd.toISOString();
 
   const validationFrom = new Date(
     requestedStart.getTime() -
@@ -118,10 +139,14 @@ export const validateDraftSlot = async ({
   const locallyAvailable =
     localResult.data.slots.some(
       (slot) =>
-        slot.start_at ===
-          requestedStart.toISOString() &&
-        slot.end_at ===
-          requestedEnd.toISOString(),
+        timestampsMatch(
+          slot.start_at,
+          requestedStartIso,
+        ) &&
+        timestampsMatch(
+          slot.end_at,
+          requestedEndIso,
+        ),
     );
 
   if (!locallyAvailable) {
@@ -194,9 +219,8 @@ export const validateDraftSlot = async ({
   const remainingSlots = removeBusySlots(
     [
       {
-        start_at:
-          requestedStart.toISOString(),
-        end_at: requestedEnd.toISOString(),
+        start_at: requestedStartIso,
+        end_at: requestedEndIso,
       },
     ],
     googleResult.intervals,
@@ -213,6 +237,6 @@ export const validateDraftSlot = async ({
 
   return {
     ok: true,
-    endAt: requestedEnd.toISOString(),
+    endAt: requestedEndIso,
   };
 };
