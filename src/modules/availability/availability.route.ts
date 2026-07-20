@@ -12,6 +12,14 @@ export const registerAvailabilityRoute = async (
 ): Promise<void> => {
   app.get(
     "/api/availability",
+    {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
+    },
     async (request, reply) => {
       const parsed = availabilityQuerySchema.safeParse(
         request.query,
