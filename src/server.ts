@@ -1,4 +1,5 @@
 import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
 import Fastify from "fastify";
 import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
@@ -8,16 +9,43 @@ import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
 
 const app = Fastify({
   logger: true,
+  trustProxy: true,
 });
 
 await app.register(cors, {
   origin: env.APP_URL,
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  methods: [
+    "GET",
+    "POST",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
   allowedHeaders: [
     "Authorization",
     "Content-Type",
   ],
   credentials: true,
+});
+
+await app.register(rateLimit, {
+  global: false,
+  redis,
+  keyGenerator: (request) => request.ip,
+  errorResponseBuilder: (_request, context) => ({
+    ok: false,
+    error: {
+      code: "RATE_LIMITED",
+      message:
+        "Too many requests. Please try again shortly.",
+      details: {
+        limit: context.max,
+        retry_after_seconds: Math.ceil(
+          context.ttl / 1000,
+        ),
+      },
+    },
+  }),
 });
 
 app.get("/health", async (_request, reply) => {
