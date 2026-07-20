@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
 import { supabaseAdmin } from "./lib/supabase.js";
+import { registerAvailabilityRoute } from "./modules/availability/availability.route.js";
 
 const app = Fastify({
   logger: true,
@@ -11,10 +12,7 @@ app.get("/health", async (_request, reply) => {
   try {
     const redisResponse = await redis.ping();
 
-    const {
-      data: countries,
-      error: supabaseError,
-    } = await supabaseAdmin
+    const { data: countries, error: supabaseError } = await supabaseAdmin
       .from("countries")
       .select("id")
       .limit(1);
@@ -82,6 +80,8 @@ app.get("/health", async (_request, reply) => {
     });
   }
 });
+
+await registerAvailabilityRoute(app);
 
 const start = async (): Promise<void> => {
   try {
