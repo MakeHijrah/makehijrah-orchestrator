@@ -5,6 +5,7 @@ import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
 import { supabaseAdmin } from "./lib/supabase.js";
 import { registerAvailabilityRoute } from "./modules/availability/availability.route.js";
+import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
 
 const app = Fastify({
@@ -124,6 +125,7 @@ app.get("/health", async (_request, reply) => {
 });
 
 await registerAvailabilityRoute(app);
+await registerDraftConsultationRoute(app);
 await registerOAuthRoutes(app);
 
 const start = async (): Promise<void> => {
