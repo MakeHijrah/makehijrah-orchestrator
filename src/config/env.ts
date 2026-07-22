@@ -22,6 +22,19 @@ const envSchema = z.object({
 
   REDIS_URL: z.string().min(1),
 
+  STRIPE_SECRET_KEY: z
+    .string()
+    .min(1)
+    .refine(
+      (value) =>
+        value.startsWith("sk_test_") ||
+        value.startsWith("sk_live_"),
+      {
+        message:
+          "STRIPE_SECRET_KEY must be a valid Stripe secret key.",
+      },
+    ),
+
   DEFAULT_CONSULTATION_PRICE_CENTS: z.coerce
     .number()
     .int()
@@ -33,7 +46,9 @@ const envSchema = z.object({
     .trim()
     .min(3)
     .max(3)
-    .transform((value) => value.toLowerCase())
+    .transform((value) =>
+      value.toLowerCase(),
+    )
     .default("usd"),
 
   OAUTH_TOKEN_ENCRYPTION_KEY: z
@@ -42,7 +57,12 @@ const envSchema = z.object({
     .refine(
       (value) => {
         try {
-          return Buffer.from(value, "base64").length === 32;
+          return (
+            Buffer.from(
+              value,
+              "base64",
+            ).length === 32
+          );
         } catch {
           return false;
         }
@@ -64,10 +84,13 @@ const envSchema = z.object({
   OAUTH_STATE_SECRET: z.string().min(32),
 });
 
-const parsed = envSchema.safeParse(process.env);
+const parsed =
+  envSchema.safeParse(process.env);
 
 if (!parsed.success) {
-  console.error("Invalid environment configuration:");
+  console.error(
+    "Invalid environment configuration:",
+  );
 
   for (const issue of parsed.error.issues) {
     console.error(
