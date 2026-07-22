@@ -19,6 +19,7 @@
     "@supabase/supabase-js": "^2.57.4",
     "dotenv": "^17.2.2",
     "fastify": "^5.6.1",
+    "fastify-raw-body": "^5.0.0",
     "ioredis": "^5.7.0",
     "luxon": "^3.7.2",
     "stripe": "^22.3.2",
