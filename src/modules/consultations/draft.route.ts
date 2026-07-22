@@ -3,7 +3,7 @@ import {
   sendError,
   sendSuccess,
 } from "../../lib/api-response.js";
-import { requireRole } from "../../lib/auth.js";
+import { resolveBookingClient } from "./booking-client.service.js";
 import { validateDraftSlot } from "./draft-availability.js";
 import { createDraftConsultationRecord } from "./draft.repository.js";
 import { createDraftConsultationSchema } from "./draft.schema.js";
@@ -22,20 +22,6 @@ export const registerDraftConsultationRoute = async (
       },
     },
     async (request, reply) => {
-      const authentication = await requireRole(
-        request,
-        ["client"],
-      );
-
-      if (!authentication.ok) {
-        return sendError(
-          reply,
-          authentication.statusCode,
-          authentication.code,
-          authentication.message,
-        );
-      }
-
       const parsed =
         createDraftConsultationSchema.safeParse(
           request.body,
@@ -119,10 +105,39 @@ export const registerDraftConsultationRoute = async (
         }
       }
 
+      const clientResult =
+        await resolveBookingClient({
+          email: parsed.data.intake.email,
+          fullName:
+            parsed.data.intake.full_name,
+          phoneWhatsapp:
+            parsed.data.intake
+              .phone_whatsapp,
+        });
+
+      if (!clientResult.ok) {
+        request.log.error(
+          {
+            code: clientResult.code,
+            consultantId:
+              parsed.data.consultant_id,
+            startAt: parsed.data.start_at,
+          },
+          "Public booking client resolution failed",
+        );
+
+        return sendError(
+          reply,
+          500,
+          "INTERNAL_ERROR",
+          "The booking account could not be prepared.",
+        );
+      }
+
       const creationResult =
         await createDraftConsultationRecord({
           clientProfileId:
-            authentication.profile.id,
+            clientResult.profileId,
           scheduledEndAt:
             slotValidation.endAt,
           draft: parsed.data,
