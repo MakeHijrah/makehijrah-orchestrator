@@ -4,6 +4,7 @@ import {
   sendSuccess,
 } from "../../lib/api-response.js";
 import { resolveBookingClient } from "./booking-client.service.js";
+import { createCheckoutCapability } from "./checkout-capability.service.js";
 import { validateDraftSlot } from "./draft-availability.js";
 import { createDraftConsultationRecord } from "./draft.repository.js";
 import { createDraftConsultationSchema } from "./draft.schema.js";
@@ -164,6 +165,35 @@ export const registerDraftConsultationRoute = async (
         );
       }
 
+      const capabilityResult =
+        await createCheckoutCapability({
+          consultationId:
+            creationResult.draft
+              .consultationId,
+          holdExpiresAt:
+            creationResult.draft
+              .holdExpiresAt,
+        });
+
+      if (!capabilityResult.ok) {
+        request.log.error(
+          {
+            consultationId:
+              creationResult.draft
+                .consultationId,
+            code: capabilityResult.code,
+          },
+          "Checkout capability creation failed",
+        );
+
+        return sendError(
+          reply,
+          500,
+          "INTERNAL_ERROR",
+          "The booking could not be prepared for payment.",
+        );
+      }
+
       return sendSuccess(reply, {
         consultation_id:
           creationResult.draft
@@ -177,6 +207,8 @@ export const registerDraftConsultationRoute = async (
           creationResult.draft.priceCents,
         currency:
           creationResult.draft.currency,
+        checkout_token:
+          capabilityResult.token,
       });
     },
   );
