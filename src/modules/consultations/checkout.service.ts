@@ -30,7 +30,7 @@ export type CreateStripeCheckoutResult =
   | {
       ok: true;
       checkoutUrl: string;
-      paymentIntentId: string;
+      checkoutSessionId: string;
     }
   | {
       ok: false;
@@ -49,13 +49,19 @@ const calculateHoldExpiration = (
   const createdAtMilliseconds =
     Date.parse(createdAt);
 
-  if (!Number.isFinite(createdAtMilliseconds)) {
+  if (
+    !Number.isFinite(
+      createdAtMilliseconds,
+    )
+  ) {
     return null;
   }
 
   return new Date(
     createdAtMilliseconds +
-      DRAFT_HOLD_MINUTES * 60 * 1000,
+      DRAFT_HOLD_MINUTES *
+        60 *
+        1000,
   ).toISOString();
 };
 
@@ -68,7 +74,9 @@ const loadCheckoutRecord = async (
     }
   | {
       ok: false;
-      code: "NOT_FOUND" | "INTERNAL_ERROR";
+      code:
+        | "NOT_FOUND"
+        | "INTERNAL_ERROR";
       message: string;
     }
 > => {
@@ -89,9 +97,12 @@ const loadCheckoutRecord = async (
       {
         consultationId,
         code: consultationError.code,
-        message: consultationError.message,
-        details: consultationError.details,
-        hint: consultationError.hint,
+        message:
+          consultationError.message,
+        details:
+          consultationError.details,
+        hint:
+          consultationError.hint,
       },
     );
 
@@ -121,7 +132,10 @@ const loadCheckoutRecord = async (
   } = await supabaseAdmin
     .from("consultation_intake")
     .select("email, full_name")
-    .eq("consultation_id", consultationId)
+    .eq(
+      "consultation_id",
+      consultationId,
+    )
     .maybeSingle();
 
   if (intakeError) {
@@ -130,9 +144,12 @@ const loadCheckoutRecord = async (
       {
         consultationId,
         code: intakeError.code,
-        message: intakeError.message,
-        details: intakeError.details,
-        hint: intakeError.hint,
+        message:
+          intakeError.message,
+        details:
+          intakeError.details,
+        hint:
+          intakeError.hint,
       },
     );
 
@@ -196,93 +213,6 @@ const loadCheckoutRecord = async (
   };
 };
 
-const resolvePaymentIntentId = (
-  paymentIntent:
-    | string
-    | Stripe.PaymentIntent
-    | null,
-): string | null => {
-  if (typeof paymentIntent === "string") {
-    return paymentIntent;
-  }
-
-  if (
-    paymentIntent &&
-    typeof paymentIntent.id === "string"
-  ) {
-    return paymentIntent.id;
-  }
-
-  return null;
-};
-
-const storePaymentIntentId = async ({
-  consultationId,
-  paymentIntentId,
-}: {
-  consultationId: string;
-  paymentIntentId: string;
-}): Promise<
-  | {
-      ok: true;
-    }
-  | {
-      ok: false;
-      code:
-        | "INVALID_TRANSITION"
-        | "INTERNAL_ERROR";
-      message: string;
-    }
-> => {
-  const {
-    data,
-    error,
-  } = await supabaseAdmin
-    .from("consultations")
-    .update({
-      stripe_payment_intent_id:
-        paymentIntentId,
-    })
-    .eq("id", consultationId)
-    .eq("status", "draft")
-    .select("id")
-    .maybeSingle();
-
-  if (error) {
-    console.error(
-      "Checkout PaymentIntent storage failed",
-      {
-        consultationId,
-        paymentIntentId,
-        code: error.code,
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-      },
-    );
-
-    return {
-      ok: false,
-      code: "INTERNAL_ERROR",
-      message:
-        "The payment session could not be saved.",
-    };
-  }
-
-  if (!data) {
-    return {
-      ok: false,
-      code: "INVALID_TRANSITION",
-      message:
-        "The consultation is no longer available for payment.",
-    };
-  }
-
-  return {
-    ok: true,
-  };
-};
-
 export const createStripeCheckout =
   async (
     consultationId: string,
@@ -302,7 +232,9 @@ export const createStripeCheckout =
       holdExpiresAt,
     } = checkoutRecordResult.record;
 
-    if (consultation.status !== "draft") {
+    if (
+      consultation.status !== "draft"
+    ) {
       return {
         ok: false,
         code: "INVALID_TRANSITION",
@@ -331,7 +263,7 @@ export const createStripeCheckout =
         ok: false,
         code: "INVALID_TRANSITION",
         message:
-          "Payment has already been started for this consultation.",
+          "Payment has already been authorized for this consultation.",
       };
     }
 
@@ -441,62 +373,11 @@ export const createStripeCheckout =
       };
     }
 
-    const paymentIntentId =
-      resolvePaymentIntentId(
-        checkoutSession.payment_intent,
-      );
-
-    if (!paymentIntentId) {
-      console.error(
-        "Stripe Checkout Session returned no PaymentIntent",
-        {
-          consultationId,
-          checkoutSessionId:
-            checkoutSession.id,
-        },
-      );
-
-      return {
-        ok: false,
-        code: "STRIPE_ERROR",
-        message:
-          "The payment session could not be created.",
-      };
-    }
-
-    const storageResult =
-      await storePaymentIntentId({
-        consultationId,
-        paymentIntentId,
-      });
-
-    if (!storageResult.ok) {
-      try {
-        await stripe.checkout.sessions.expire(
-          checkoutSession.id,
-        );
-      } catch (expirationError) {
-        console.error(
-          "Failed to expire orphaned Stripe Checkout Session",
-          {
-            consultationId,
-            checkoutSessionId:
-              checkoutSession.id,
-            message:
-              expirationError instanceof Error
-                ? expirationError.message
-                : "Unknown Stripe error",
-          },
-        );
-      }
-
-      return storageResult;
-    }
-
     return {
       ok: true,
       checkoutUrl:
         checkoutSession.url,
-      paymentIntentId,
+      checkoutSessionId:
+        checkoutSession.id,
     };
   };
