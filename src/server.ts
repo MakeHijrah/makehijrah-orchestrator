@@ -1,6 +1,7 @@
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import Fastify from "fastify";
+import rawBody from "fastify-raw-body";
 import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
 import { supabaseAdmin } from "./lib/supabase.js";
@@ -8,6 +9,7 @@ import { registerAvailabilityRoute } from "./modules/availability/availability.r
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
+import { registerStripeWebhookRoute } from "./modules/webhooks/stripe-webhook.route.js";
 
 const app = Fastify({
   logger: true,
@@ -26,6 +28,7 @@ await app.register(cors, {
   allowedHeaders: [
     "Authorization",
     "Content-Type",
+    "Stripe-Signature",
   ],
   credentials: true,
 });
@@ -33,7 +36,8 @@ await app.register(cors, {
 await app.register(rateLimit, {
   global: false,
   redis,
-  keyGenerator: (request) => request.ip,
+  keyGenerator: (request) =>
+    request.ip,
   errorResponseBuilder: (
     _request,
     context,
@@ -46,12 +50,21 @@ await app.register(rateLimit, {
         "Too many requests. Please try again shortly.",
       details: {
         limit: context.max,
-        retry_after_seconds: Math.ceil(
-          context.ttl / 1000,
-        ),
+        retry_after_seconds:
+          Math.ceil(
+            context.ttl / 1000,
+          ),
       },
     },
   }),
+});
+
+await app.register(rawBody, {
+  field: "rawBody",
+  global: false,
+  encoding: "utf8",
+  runFirst: true,
+  routes: [],
 });
 
 app.get(
@@ -75,11 +88,14 @@ app.get(
             supabaseError: {
               message:
                 supabaseError.message,
-              code: supabaseError.code,
+              code:
+                supabaseError.code,
               details:
                 supabaseError.details,
-              hint: supabaseError.hint,
-              name: supabaseError.name,
+              hint:
+                supabaseError.hint,
+              name:
+                supabaseError.name,
             },
           },
           "Supabase query returned an error",
@@ -124,27 +140,40 @@ app.get(
         "Health check failed",
       );
 
-      return reply.status(503).send({
-        ok: false,
-        service:
-          "makehijrah-orchestrator",
-        redis:
-          redis.status === "ready"
-            ? "connected"
-            : "disconnected",
-        supabase: "disconnected",
-        environment: env.NODE_ENV,
-        timestamp:
-          new Date().toISOString(),
-      });
+      return reply
+        .status(503)
+        .send({
+          ok: false,
+          service:
+            "makehijrah-orchestrator",
+          redis:
+            redis.status ===
+            "ready"
+              ? "connected"
+              : "disconnected",
+          supabase:
+            "disconnected",
+          environment:
+            env.NODE_ENV,
+          timestamp:
+            new Date()
+              .toISOString(),
+        });
     }
   },
 );
 
-await registerAvailabilityRoute(app);
-await registerDraftConsultationRoute(app);
+await registerAvailabilityRoute(
+  app,
+);
+await registerDraftConsultationRoute(
+  app,
+);
 await registerCheckoutRoute(app);
 await registerOAuthRoutes(app);
+await registerStripeWebhookRoute(
+  app,
+);
 
 const start =
   async (): Promise<void> => {
@@ -165,14 +194,22 @@ const shutdown =
   async (): Promise<void> => {
     await app.close();
 
-    if (redis.status !== "end") {
+    if (
+      redis.status !== "end"
+    ) {
       await redis.quit();
     }
 
     process.exit(0);
   };
 
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+process.on(
+  "SIGTERM",
+  shutdown,
+);
+process.on(
+  "SIGINT",
+  shutdown,
+);
 
 await start();
