@@ -49,19 +49,13 @@ const calculateHoldExpiration = (
   const createdAtMilliseconds =
     Date.parse(createdAt);
 
-  if (
-    !Number.isFinite(
-      createdAtMilliseconds,
-    )
-  ) {
+  if (!Number.isFinite(createdAtMilliseconds)) {
     return null;
   }
 
   return new Date(
     createdAtMilliseconds +
-      DRAFT_HOLD_MINUTES *
-        60 *
-        1000,
+      DRAFT_HOLD_MINUTES * 60 * 1000,
   ).toISOString();
 };
 
@@ -74,27 +68,17 @@ const loadCheckoutRecord = async (
     }
   | {
       ok: false;
-      code:
-        | "NOT_FOUND"
-        | "INTERNAL_ERROR";
+      code: "NOT_FOUND" | "INTERNAL_ERROR";
       message: string;
     }
 > => {
   const {
-    data: consultation,
+    data: consultationData,
     error: consultationError,
   } = await supabaseAdmin
     .from("consultations")
     .select(
-      [
-        "id",
-        "client_profile_id",
-        "status",
-        "price_cents",
-        "currency",
-        "stripe_payment_intent_id",
-        "created_at",
-      ].join(","),
+      "id, client_profile_id, status, price_cents, currency, stripe_payment_intent_id, created_at",
     )
     .eq("id", consultationId)
     .maybeSingle();
@@ -105,10 +89,8 @@ const loadCheckoutRecord = async (
       {
         consultationId,
         code: consultationError.code,
-        message:
-          consultationError.message,
-        details:
-          consultationError.details,
+        message: consultationError.message,
+        details: consultationError.details,
         hint: consultationError.hint,
       },
     );
@@ -121,7 +103,7 @@ const loadCheckoutRecord = async (
     };
   }
 
-  if (!consultation) {
+  if (!consultationData) {
     return {
       ok: false,
       code: "NOT_FOUND",
@@ -130,16 +112,16 @@ const loadCheckoutRecord = async (
     };
   }
 
+  const consultation =
+    consultationData as unknown as CheckoutConsultationRow;
+
   const {
-    data: intake,
+    data: intakeData,
     error: intakeError,
   } = await supabaseAdmin
     .from("consultation_intake")
     .select("email, full_name")
-    .eq(
-      "consultation_id",
-      consultationId,
-    )
+    .eq("consultation_id", consultationId)
     .maybeSingle();
 
   if (intakeError) {
@@ -162,7 +144,7 @@ const loadCheckoutRecord = async (
     };
   }
 
-  if (!intake) {
+  if (!intakeData) {
     console.error(
       "Checkout intake row missing",
       {
@@ -177,6 +159,9 @@ const loadCheckoutRecord = async (
         "The consultation intake could not be loaded.",
     };
   }
+
+  const intake =
+    intakeData as unknown as CheckoutIntakeRow;
 
   const holdExpiresAt =
     calculateHoldExpiration(
@@ -204,10 +189,8 @@ const loadCheckoutRecord = async (
   return {
     ok: true,
     record: {
-      consultation:
-        consultation as CheckoutConsultationRow,
-      intake:
-        intake as CheckoutIntakeRow,
+      consultation,
+      intake,
       holdExpiresAt,
     },
   };
@@ -219,9 +202,7 @@ const resolvePaymentIntentId = (
     | Stripe.PaymentIntent
     | null,
 ): string | null => {
-  if (
-    typeof paymentIntent === "string"
-  ) {
+  if (typeof paymentIntent === "string") {
     return paymentIntent;
   }
 
@@ -321,9 +302,7 @@ export const createStripeCheckout =
       holdExpiresAt,
     } = checkoutRecordResult.record;
 
-    if (
-      consultation.status !== "draft"
-    ) {
+    if (consultation.status !== "draft") {
       return {
         ok: false,
         code: "INVALID_TRANSITION",
@@ -504,8 +483,7 @@ export const createStripeCheckout =
             checkoutSessionId:
               checkoutSession.id,
             message:
-              expirationError instanceof
-              Error
+              expirationError instanceof Error
                 ? expirationError.message
                 : "Unknown Stripe error",
           },
