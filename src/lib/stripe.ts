@@ -1,16 +1,8 @@
 import Stripe from "stripe";
-
-const stripeSecretKey =
-  process.env.STRIPE_SECRET_KEY;
-
-if (!stripeSecretKey) {
-  throw new Error(
-    "STRIPE_SECRET_KEY is not configured",
-  );
-}
+import { env } from "../config/env.js";
 
 export const stripe = new Stripe(
-  stripeSecretKey,
+  env.STRIPE_SECRET_KEY,
   {
     maxNetworkRetries: 2,
     timeout: 20_000,
