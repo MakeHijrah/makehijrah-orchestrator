@@ -35,6 +35,18 @@ const envSchema = z.object({
       },
     ),
 
+  STRIPE_WEBHOOK_SECRET: z
+    .string()
+    .min(1)
+    .refine(
+      (value) =>
+        value.startsWith("whsec_"),
+      {
+        message:
+          "STRIPE_WEBHOOK_SECRET must be a valid Stripe webhook signing secret.",
+      },
+    ),
+
   DEFAULT_CONSULTATION_PRICE_CENTS: z.coerce
     .number()
     .int()
