@@ -4,13 +4,23 @@ import { getGoogleAccessToken } from "../oauth/google-access-token.js";
 const GOOGLE_CALENDAR_EVENTS_ENDPOINT =
   "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 
+const CONFERENCE_POLL_ATTEMPTS = 5;
+const CONFERENCE_POLL_DELAY_MILLISECONDS = 1_000;
+
 type GoogleConferenceEntryPoint = {
   entryPointType?: string;
   uri?: string;
 };
 
+type GoogleConferenceCreateRequest = {
+  status?: {
+    statusCode?: string;
+  };
+};
+
 type GoogleConferenceData = {
   entryPoints?: GoogleConferenceEntryPoint[];
+  createRequest?: GoogleConferenceCreateRequest;
 };
 
 type GoogleCalendarEventResponse = {
@@ -49,6 +59,14 @@ type CreateConsultationCalendarEventInput = {
   clientTimezone: string;
 };
 
+const sleep = async (
+  milliseconds: number,
+): Promise<void> => {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+};
+
 const readMeetLink = (
   event: GoogleCalendarEventResponse,
 ): string | null => {
@@ -70,6 +88,116 @@ const readMeetLink = (
     );
 
   return videoEntryPoint?.uri?.trim() || null;
+};
+
+const loadCalendarEvent = async ({
+  accessToken,
+  googleEventId,
+}: {
+  accessToken: string;
+  googleEventId: string;
+}): Promise<GoogleCalendarEventResponse | null> => {
+  const endpoint = new URL(
+    `${GOOGLE_CALENDAR_EVENTS_ENDPOINT}/${encodeURIComponent(
+      googleEventId,
+    )}`,
+  );
+
+  endpoint.searchParams.set(
+    "conferenceDataVersion",
+    "1",
+  );
+
+  try {
+    const response = await fetch(endpoint, {
+      headers: {
+        Authorization:
+          `Bearer ${accessToken}`,
+      },
+    });
+
+    const data =
+      (await response.json()) as GoogleCalendarEventResponse;
+
+    if (!response.ok) {
+      console.error(
+        "Google Calendar event lookup failed",
+        {
+          googleEventId,
+          status: response.status,
+          code: data.error?.code,
+          message: data.error?.message,
+          googleStatus:
+            data.error?.status,
+        },
+      );
+
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    console.error(
+      "Google Calendar event lookup failed",
+      {
+        googleEventId,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unknown Google Calendar error",
+      },
+    );
+
+    return null;
+  }
+};
+
+const waitForMeetLink = async ({
+  accessToken,
+  googleEventId,
+}: {
+  accessToken: string;
+  googleEventId: string;
+}): Promise<string | null> => {
+  for (
+    let attempt = 0;
+    attempt < CONFERENCE_POLL_ATTEMPTS;
+    attempt += 1
+  ) {
+    if (attempt > 0) {
+      await sleep(
+        CONFERENCE_POLL_DELAY_MILLISECONDS,
+      );
+    }
+
+    const event =
+      await loadCalendarEvent({
+        accessToken,
+        googleEventId,
+      });
+
+    if (!event) {
+      continue;
+    }
+
+    const meetLink =
+      readMeetLink(event);
+
+    if (meetLink) {
+      return meetLink;
+    }
+
+    const status =
+      event.conferenceData
+        ?.createRequest?.status
+        ?.statusCode;
+
+    if (status === "failure") {
+      return null;
+    }
+  }
+
+  return null;
 };
 
 export const createConsultationCalendarEvent =
@@ -209,22 +337,41 @@ export const createConsultationCalendarEvent =
       const googleEventId =
         data.id?.trim();
 
-      const meetLink =
-        readMeetLink(data);
-
-      if (
-        !googleEventId ||
-        !meetLink
-      ) {
+      if (!googleEventId) {
         console.error(
-          "Google Calendar event response was incomplete",
+          "Google Calendar event response had no event ID",
           {
             consultationId,
             consultantId,
-            hasEventId:
-              Boolean(googleEventId),
-            hasMeetLink:
-              Boolean(meetLink),
+          },
+        );
+
+        return {
+          ok: false,
+          code: "GOOGLE_ERROR",
+          message:
+            "The Google Calendar event did not return an event ID.",
+        };
+      }
+
+      const immediateMeetLink =
+        readMeetLink(data);
+
+      const meetLink =
+        immediateMeetLink ??
+        (await waitForMeetLink({
+          accessToken:
+            accessTokenResult.accessToken,
+          googleEventId,
+        }));
+
+      if (!meetLink) {
+        console.error(
+          "Google Calendar event did not produce a Meet link",
+          {
+            consultationId,
+            consultantId,
+            googleEventId,
           },
         );
 
