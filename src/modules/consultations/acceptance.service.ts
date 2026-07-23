@@ -3,6 +3,9 @@ import { stripe } from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import { createConsultationCalendarEvent } from "./google-calendar-event.service.js";
 
+const ACCEPTANCE_WINDOW_MILLISECONDS =
+  48 * 60 * 60 * 1000;
+
 type AcceptanceConsultationRow = {
   id: string;
   consultant_id: string;
@@ -11,12 +14,9 @@ type AcceptanceConsultationRow = {
   scheduled_end_at: string;
   client_timezone: string;
   stripe_payment_intent_id: string | null;
+  payment_authorized_at: string | null;
   google_event_id: string | null;
   meet_link: string | null;
-};
-
-type AcceptanceConsultationRecord = {
-  consultation: AcceptanceConsultationRow;
 };
 
 export type AcceptConsultationResult =
@@ -33,6 +33,7 @@ export type AcceptConsultationResult =
         | "NOT_FOUND"
         | "FORBIDDEN"
         | "INVALID_TRANSITION"
+        | "ACCEPTANCE_EXPIRED"
         | "PAYMENT_NOT_AUTHORIZED"
         | "STRIPE_ERROR"
         | "GOOGLE_ERROR"
@@ -45,7 +46,7 @@ const loadAcceptanceConsultation = async (
 ): Promise<
   | {
       ok: true;
-      record: AcceptanceConsultationRecord;
+      consultation: AcceptanceConsultationRow;
     }
   | {
       ok: false;
@@ -57,7 +58,7 @@ const loadAcceptanceConsultation = async (
     await supabaseAdmin
       .from("consultations")
       .select(
-        "id, consultant_id, status, scheduled_start_at, scheduled_end_at, client_timezone, stripe_payment_intent_id, google_event_id, meet_link",
+        "id, consultant_id, status, scheduled_start_at, scheduled_end_at, client_timezone, stripe_payment_intent_id, payment_authorized_at, google_event_id, meet_link",
       )
       .eq("id", consultationId)
       .maybeSingle();
@@ -93,10 +94,8 @@ const loadAcceptanceConsultation = async (
 
   return {
     ok: true,
-    record: {
-      consultation:
-        data as unknown as AcceptanceConsultationRow,
-    },
+    consultation:
+      data as unknown as AcceptanceConsultationRow,
   };
 };
 
@@ -299,7 +298,6 @@ const finalizeAcceptance = async ({
     (
       data as unknown as
         | Array<{
-            consultation_id: string;
             consultation_status: string;
             google_event_id: string;
             meet_link: string;
@@ -344,7 +342,7 @@ export const acceptConsultation =
     }
 
     const { consultation } =
-      consultationResult.record;
+      consultationResult;
 
     if (
       consultation.consultant_id !==
@@ -391,6 +389,39 @@ export const acceptConsultation =
       };
     }
 
+    const paymentAuthorizedAt =
+      consultation.payment_authorized_at
+        ? Date.parse(
+            consultation.payment_authorized_at,
+          )
+        : Number.NaN;
+
+    if (
+      !Number.isFinite(
+        paymentAuthorizedAt,
+      )
+    ) {
+      return {
+        ok: false,
+        code: "PAYMENT_NOT_AUTHORIZED",
+        message:
+          "The consultation payment authorization is missing.",
+      };
+    }
+
+    if (
+      Date.now() >
+      paymentAuthorizedAt +
+        ACCEPTANCE_WINDOW_MILLISECONDS
+    ) {
+      return {
+        ok: false,
+        code: "ACCEPTANCE_EXPIRED",
+        message:
+          "The consultation acceptance window has expired.",
+      };
+    }
+
     const paymentIntentId =
       consultation
         .stripe_payment_intent_id
@@ -431,19 +462,12 @@ export const acceptConsultation =
       await markAdminAttention({
         consultationId:
           consultation.id,
-        reason:
-          "Payment was captured, but the Google Calendar event could not be created.",
+        reason: "calendar_failed",
       });
 
       return {
         ok: false,
-        code:
-          calendarResult.code ===
-            "OAUTH_NOT_CONNECTED" ||
-          calendarResult.code ===
-            "OAUTH_REVOKED"
-            ? "GOOGLE_ERROR"
-            : calendarResult.code,
+        code: "GOOGLE_ERROR",
         message:
           calendarResult.message,
       };
@@ -465,7 +489,7 @@ export const acceptConsultation =
         consultationId:
           consultation.id,
         reason:
-          "Payment was captured and a Google Calendar event was created, but the consultation could not be confirmed.",
+          "calendar_created_confirmation_failed",
       });
 
       return {
