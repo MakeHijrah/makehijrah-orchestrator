@@ -6,6 +6,7 @@ import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
 import { supabaseAdmin } from "./lib/supabase.js";
 import { registerAvailabilityRoute } from "./modules/availability/availability.route.js";
+import { registerAcceptanceRoute } from "./modules/consultations/acceptance.route.js";
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
@@ -169,8 +170,15 @@ await registerAvailabilityRoute(
 await registerDraftConsultationRoute(
   app,
 );
-await registerCheckoutRoute(app);
-await registerOAuthRoutes(app);
+await registerCheckoutRoute(
+  app,
+);
+await registerOAuthRoutes(
+  app,
+);
+await registerAcceptanceRoute(
+  app,
+);
 await registerStripeWebhookRoute(
   app,
 );
