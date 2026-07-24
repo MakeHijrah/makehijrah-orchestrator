@@ -8,6 +8,7 @@ import { supabaseAdmin } from "./lib/supabase.js";
 import { registerAvailabilityRoute } from "./modules/availability/availability.route.js";
 import { registerAcceptanceRoute } from "./modules/consultations/acceptance.route.js";
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
+import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
 import { registerStripeWebhookRoute } from "./modules/webhooks/stripe-webhook.route.js";
@@ -177,6 +178,9 @@ await registerOAuthRoutes(
   app,
 );
 await registerAcceptanceRoute(
+  app,
+);
+await registerDeclineRoute(
   app,
 );
 await registerStripeWebhookRoute(
