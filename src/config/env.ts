@@ -94,6 +94,12 @@ const envSchema = z.object({
   APP_URL: z.string().url(),
 
   OAUTH_STATE_SECRET: z.string().min(32),
+
+  MANDRILL_API_KEY: z.string().min(1),
+
+  MANDRILL_FROM_EMAIL: z.string().email(),
+
+  MANDRILL_FROM_NAME: z.string().trim().min(1),
 });
 
 const parsed =
