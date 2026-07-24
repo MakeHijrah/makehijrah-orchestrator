@@ -12,6 +12,7 @@ import { registerCompletionRoute } from "./modules/consultations/completion.rout
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
+import { registerRecommendationSendRoute } from "./modules/recommendations/recommendation-send.route.js";
 import { registerStripeWebhookRoute } from "./modules/webhooks/stripe-webhook.route.js";
 
 const app = Fastify({
@@ -185,6 +186,9 @@ await registerDeclineRoute(
   app,
 );
 await registerCompletionRoute(
+  app,
+);
+await registerRecommendationSendRoute(
   app,
 );
 await registerStripeWebhookRoute(
