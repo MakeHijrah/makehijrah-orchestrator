@@ -317,10 +317,10 @@ export const createStripeCheckout =
             },
 
             success_url:
-              `${env.APP_URL}/dashboard` +
-              `?booking=success` +
-              `&cid=${encodeURIComponent(
-                consultation.id,
+              `${env.APP_URL}/login` +
+              `?payment=success` +
+              `&redirect=${encodeURIComponent(
+                "/dashboard",
               )}`,
 
             cancel_url:
