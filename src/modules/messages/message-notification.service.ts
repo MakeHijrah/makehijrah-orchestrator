@@ -233,8 +233,8 @@ const loadParticipantContext = async (
     };
   }
 
-  const consultation =
-    consultationData as ConsultationRow;
+const consultation =
+  consultationData as unknown as ConsultationRow;
 
   if (!consultation.consultant_id) {
     console.warn(
