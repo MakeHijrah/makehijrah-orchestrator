@@ -11,6 +11,11 @@ import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js
 import { registerCompletionRoute } from "./modules/consultations/completion.route.js";
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
+import { registerMessageNotificationRoute } from "./modules/messages/message-notification.route.js";
+import {
+  startMessageNotificationWorker,
+  stopMessageNotificationWorker,
+} from "./modules/messages/message-notification.worker.js";
 import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
 import { registerRecommendationSendRoute } from "./modules/recommendations/recommendation-send.route.js";
 import { registerStripeWebhookRoute } from "./modules/webhooks/stripe-webhook.route.js";
@@ -191,6 +196,9 @@ await registerCompletionRoute(
 await registerRecommendationSendRoute(
   app,
 );
+await registerMessageNotificationRoute(
+  app,
+);
 await registerStripeWebhookRoute(
   app,
 );
@@ -204,6 +212,8 @@ const start =
         port: env.PORT,
         host: "0.0.0.0",
       });
+
+      startMessageNotificationWorker();
     } catch (error) {
       app.log.error(error);
       process.exit(1);
@@ -212,6 +222,8 @@ const start =
 
 const shutdown =
   async (): Promise<void> => {
+    await stopMessageNotificationWorker();
+
     await app.close();
 
     if (
