@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { redis } from "../../lib/redis.js";
 import {
   MESSAGE_NOTIFICATION_DUE_SET,
@@ -16,24 +17,47 @@ let workerInterval:
 
 let cycleRunning = false;
 
+const RELEASE_LOCK_SCRIPT = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+  end
+
+  return 0
+`;
+
+type AcquiredLock = {
+  key: string;
+  token: string;
+};
+
 const acquireLock = async (
   messageId: string,
-): Promise<boolean> => {
-  const lockKey =
+): Promise<AcquiredLock | null> => {
+  const key =
     `${MESSAGE_NOTIFICATION_LOCK_PREFIX}` +
     `${messageId}`;
+
+  const token =
+    randomUUID();
 
   try {
     const result =
       await redis.set(
-        lockKey,
-        "1",
+        key,
+        token,
         "EX",
         LOCK_TTL_SECONDS,
         "NX",
       );
 
-    return result === "OK";
+    if (result !== "OK") {
+      return null;
+    }
+
+    return {
+      key,
+      token,
+    };
   } catch (error) {
     console.error(
       "Message notification lock acquisition failed",
@@ -46,19 +70,21 @@ const acquireLock = async (
       },
     );
 
-    return false;
+    return null;
   }
 };
 
 const releaseLock = async (
   messageId: string,
+  lock: AcquiredLock,
 ): Promise<void> => {
-  const lockKey =
-    `${MESSAGE_NOTIFICATION_LOCK_PREFIX}` +
-    `${messageId}`;
-
   try {
-    await redis.del(lockKey);
+    await redis.eval(
+      RELEASE_LOCK_SCRIPT,
+      1,
+      lock.key,
+      lock.token,
+    );
   } catch (error) {
     console.error(
       "Message notification lock release failed",
@@ -126,12 +152,12 @@ const processDueMessage =
   async (
     messageId: string,
   ): Promise<void> => {
-    const lockAcquired =
+    const lock =
       await acquireLock(
         messageId,
       );
 
-    if (!lockAcquired) {
+    if (!lock) {
       return;
     }
 
@@ -174,6 +200,7 @@ const processDueMessage =
     } finally {
       await releaseLock(
         messageId,
+        lock,
       );
     }
   };
