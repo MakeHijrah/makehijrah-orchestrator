@@ -17,11 +17,68 @@ import {
   createConsultantInvite,
   redeemConsultantInvite,
 } from "./invite.service.js";
+import {
+  listAdminInvites,
+} from "./invite-list.service.js";
 
 export const registerInviteRoutes =
   async (
     app: FastifyInstance,
   ): Promise<void> => {
+    app.get(
+      "/api/admin/invites",
+      async (request, reply) => {
+        const authentication =
+          await requireRole(
+            request,
+            ["admin"],
+          );
+
+        if (!authentication.ok) {
+          return sendError(
+            reply,
+            authentication.statusCode,
+            authentication.code,
+            authentication.message,
+          );
+        }
+
+        const result =
+          await listAdminInvites();
+
+        if (!result.ok) {
+          return sendError(
+            reply,
+            500,
+            "INTERNAL_ERROR",
+            result.message,
+          );
+        }
+
+        return sendSuccess(reply, {
+          invites:
+            result.invites.map(
+              (invite) => ({
+                invite_id:
+                  invite.inviteId,
+                email:
+                  invite.email,
+                status:
+                  invite.status,
+                expires_at:
+                  invite.expiresAt,
+                created_at:
+                  invite.createdAt,
+                used_at:
+                  invite.usedAt,
+                can_create_new:
+                  invite.canCreateNew,
+              }),
+            ),
+        });
+      },
+    );
+
     app.post(
       "/api/admin/invites",
       {
