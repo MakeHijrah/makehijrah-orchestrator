@@ -6,6 +6,14 @@ import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
 import { supabaseAdmin } from "./lib/supabase.js";
 import { registerAvailabilityRoute } from "./modules/availability/availability.route.js";
+import {
+  startAuthorizationTimeoutNotificationWorker,
+  stopAuthorizationTimeoutNotificationWorker,
+} from "./modules/consultations/authorization-timeout-notification.worker.js";
+import {
+  startAuthorizationTimeoutWorker,
+  stopAuthorizationTimeoutWorker,
+} from "./modules/consultations/authorization-timeout.worker.js";
 import { registerAcceptanceRoute } from "./modules/consultations/acceptance.route.js";
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
 import { registerCompletionRoute } from "./modules/consultations/completion.route.js";
@@ -223,6 +231,8 @@ const start =
 
       startMessageNotificationWorker();
       startDeclineNotificationWorker();
+      startAuthorizationTimeoutNotificationWorker();
+      startAuthorizationTimeoutWorker();
     } catch (error) {
       app.log.error(error);
       process.exit(1);
@@ -231,6 +241,8 @@ const start =
 
 const shutdown =
   async (): Promise<void> => {
+    await stopAuthorizationTimeoutWorker();
+    await stopAuthorizationTimeoutNotificationWorker();
     await stopDeclineNotificationWorker();
     await stopMessageNotificationWorker();
 

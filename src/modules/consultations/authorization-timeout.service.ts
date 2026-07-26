@@ -1,6 +1,9 @@
 import type Stripe from "stripe";
 import { stripe } from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
+import {
+  scheduleAuthorizationTimeoutNotification,
+} from "./authorization-timeout-notification.service.js";
 
 const AUTHORIZATION_TIMEOUT_HOURS = 48;
 
@@ -445,6 +448,26 @@ const finalizeAuthorizationTimeout =
     };
   };
 
+const scheduleNotificationBestEffort =
+  async (
+    consultationId: string,
+  ): Promise<void> => {
+    const result =
+      await scheduleAuthorizationTimeoutNotification({
+        consultationId,
+      });
+
+    if (!result.ok) {
+      console.error(
+        "Authorization timeout succeeded but notification scheduling failed",
+        {
+          consultationId,
+          message: result.message,
+        },
+      );
+    }
+  };
+
 export const processAuthorizationTimeout =
   async (
     consultationId: string,
@@ -481,6 +504,10 @@ export const processAuthorizationTimeout =
         "timeout" &&
       consultation.cancelled_at
     ) {
+      await scheduleNotificationBestEffort(
+        consultationId,
+      );
+
       return {
         ok: true,
         consultationId,
@@ -620,6 +647,10 @@ export const processAuthorizationTimeout =
           finalizationResult.message,
       };
     }
+
+    await scheduleNotificationBestEffort(
+      consultationId,
+    );
 
     return {
       ok: true,
