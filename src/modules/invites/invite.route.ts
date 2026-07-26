@@ -131,6 +131,7 @@ export const registerInviteRoutes =
         if (!result.ok) {
           switch (result.code) {
             case "INVITEE_INELIGIBLE":
+            case "ACTIVE_INVITE_EXISTS":
               return sendError(
                 reply,
                 409,

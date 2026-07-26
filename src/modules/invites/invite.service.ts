@@ -51,6 +51,7 @@ export type CreateConsultantInviteResult =
       ok: false;
       code:
         | "INVITEE_INELIGIBLE"
+        | "ACTIVE_INVITE_EXISTS"
         | "INTERNAL_ERROR";
       message: string;
     };
@@ -503,22 +504,42 @@ export const createConsultantInvite =
         });
 
     if (error) {
+      const activeInviteExists =
+        error.message.includes(
+          "ACTIVE_CONSULTANT_INVITE_EXISTS",
+        );
+
       console.error(
         "Consultant invite insert failed",
         {
           inviteId,
           adminProfileId,
           code: error.code,
-          message: error.message,
+          message:
+            activeInviteExists
+              ? "Active consultant invite already exists"
+              : error.message,
           details: error.details,
           hint: error.hint,
         },
       );
 
-      if (authUserCreated) {
+      if (
+        authUserCreated &&
+        !activeInviteExists
+      ) {
         await deleteNewAuthUser(
           profileId,
         );
+      }
+
+      if (activeInviteExists) {
+        return {
+          ok: false,
+          code: "ACTIVE_INVITE_EXISTS",
+          message:
+            "An active consultant invitation already exists for this email.",
+        };
       }
 
       return {
