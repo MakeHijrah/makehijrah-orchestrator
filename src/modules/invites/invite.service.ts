@@ -10,6 +10,11 @@ import type {
   RedeemConsultantInviteInput,
 } from "./invite.schema.js";
 
+type UserRole =
+  | "client"
+  | "consultant"
+  | "admin";
+
 type ConsultantInviteRow = {
   id: string;
   email: string;
@@ -22,15 +27,16 @@ type ConsultantInviteRow = {
   expires_at: string;
 };
 
+type ProvisionedInviteAccount = {
+  profileId: string;
+  authUserCreated: boolean;
+};
+
 type RedeemRpcRow = {
   result_code: string;
   profile_id: string | null;
   consultant_id: string | null;
-  profile_role:
-    | "client"
-    | "consultant"
-    | "admin"
-    | null;
+  profile_role: UserRole | null;
   consultant_is_active: boolean | null;
 };
 
@@ -43,7 +49,9 @@ export type CreateConsultantInviteResult =
     }
   | {
       ok: false;
-      code: "INTERNAL_ERROR";
+      code:
+        | "INVITEE_INELIGIBLE"
+        | "INTERNAL_ERROR";
       message: string;
     };
 
@@ -73,12 +81,6 @@ const normalizeEmail = (
 const buildRawInviteToken = (
   inviteId: string,
 ): string => {
-  /*
-   * The UUID provides a bounded database lookup key.
-   * The random secret provides the required 256 bits of entropy.
-   *
-   * The complete value is treated as the raw invite token.
-   */
   const secret = randomBytes(32).toString(
     "base64url",
   );
@@ -117,6 +119,301 @@ const parseInviteId = (
 const appBaseUrl =
   env.APP_URL.replace(/\/+$/, "");
 
+const findAuthUserByEmail =
+  async (
+    email: string,
+  ): Promise<
+    | {
+        ok: true;
+        userId: string | null;
+      }
+    | {
+        ok: false;
+      }
+  > => {
+    const perPage = 200;
+    let page = 1;
+
+    while (true) {
+      const {
+        data,
+        error,
+      } =
+        await supabaseAdmin.auth.admin.listUsers({
+          page,
+          perPage,
+        });
+
+      if (error) {
+        console.error(
+          "Consultant invite auth-user lookup failed",
+          {
+            message: error.message,
+            status: error.status,
+          },
+        );
+
+        return {
+          ok: false,
+        };
+      }
+
+      const matchedUser =
+        data.users.find(
+          (user) =>
+            normalizeEmail(
+              user.email ?? "",
+            ) === email,
+        );
+
+      if (matchedUser) {
+        return {
+          ok: true,
+          userId: matchedUser.id,
+        };
+      }
+
+      if (data.users.length < perPage) {
+        return {
+          ok: true,
+          userId: null,
+        };
+      }
+
+      page += 1;
+    }
+  };
+
+const loadProfileRole =
+  async (
+    profileId: string,
+  ): Promise<
+    | {
+        ok: true;
+        role: UserRole | null;
+      }
+    | {
+        ok: false;
+      }
+  > => {
+    const { data, error } =
+      await supabaseAdmin
+        .from("profiles")
+        .select("role")
+        .eq("id", profileId)
+        .maybeSingle();
+
+    if (error) {
+      console.error(
+        "Consultant invite profile lookup failed",
+        {
+          profileId,
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        },
+      );
+
+      return {
+        ok: false,
+      };
+    }
+
+    return {
+      ok: true,
+      role:
+        (data?.role as UserRole | undefined) ??
+        null,
+    };
+  };
+
+const waitForProfileRole =
+  async (
+    profileId: string,
+  ): Promise<
+    | {
+        ok: true;
+        role: UserRole;
+      }
+    | {
+        ok: false;
+      }
+  > => {
+    const attempts = 10;
+    const delayMilliseconds = 100;
+
+    for (
+      let attempt = 1;
+      attempt <= attempts;
+      attempt += 1
+    ) {
+      const profileResult =
+        await loadProfileRole(profileId);
+
+      if (!profileResult.ok) {
+        return {
+          ok: false,
+        };
+      }
+
+      if (profileResult.role) {
+        return {
+          ok: true,
+          role: profileResult.role,
+        };
+      }
+
+      if (attempt < attempts) {
+        await new Promise<void>(
+          (resolve) => {
+            setTimeout(
+              resolve,
+              delayMilliseconds,
+            );
+          },
+        );
+      }
+    }
+
+    return {
+      ok: false,
+    };
+  };
+
+const deleteNewAuthUser =
+  async (
+    userId: string,
+  ): Promise<void> => {
+    const { error } =
+      await supabaseAdmin.auth.admin.deleteUser(
+        userId,
+      );
+
+    if (error) {
+      console.error(
+        "Consultant invite Auth-user cleanup failed",
+        {
+          userId,
+          message: error.message,
+          status: error.status,
+        },
+      );
+    }
+  };
+
+const provisionInviteAccount =
+  async (
+    email: string,
+  ): Promise<
+    | {
+        ok: true;
+        account: ProvisionedInviteAccount;
+      }
+    | {
+        ok: false;
+        code:
+          | "INVITEE_INELIGIBLE"
+          | "INTERNAL_ERROR";
+        message: string;
+      }
+  > => {
+    const lookupResult =
+      await findAuthUserByEmail(email);
+
+    if (!lookupResult.ok) {
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The consultant invitation account could not be prepared.",
+      };
+    }
+
+    let profileId =
+      lookupResult.userId;
+
+    let authUserCreated = false;
+
+    if (!profileId) {
+      const {
+        data,
+        error,
+      } =
+        await supabaseAdmin.auth.admin.createUser({
+          email,
+          email_confirm: false,
+        });
+
+      if (error || !data.user) {
+        console.error(
+          "Consultant invite Auth-user creation failed",
+          {
+            message: error?.message,
+            status: error?.status,
+          },
+        );
+
+        return {
+          ok: false,
+          code: "INTERNAL_ERROR",
+          message:
+            "The consultant invitation account could not be prepared.",
+        };
+      }
+
+      profileId = data.user.id;
+      authUserCreated = true;
+    }
+
+    const profileResult =
+      await waitForProfileRole(
+        profileId,
+      );
+
+    if (!profileResult.ok) {
+      if (authUserCreated) {
+        await deleteNewAuthUser(
+          profileId,
+        );
+      }
+
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The consultant invitation profile could not be prepared.",
+      };
+    }
+
+    if (
+      profileResult.role === "admin" ||
+      profileResult.role ===
+        "consultant"
+    ) {
+      if (authUserCreated) {
+        await deleteNewAuthUser(
+          profileId,
+        );
+      }
+
+      return {
+        ok: false,
+        code: "INVITEE_INELIGIBLE",
+        message:
+          "This email cannot receive a consultant invitation.",
+      };
+    }
+
+    return {
+      ok: true,
+      account: {
+        profileId,
+        authUserCreated,
+      },
+    };
+  };
+
 export const createConsultantInvite =
   async ({
     input,
@@ -125,7 +422,26 @@ export const createConsultantInvite =
     input: CreateConsultantInviteInput;
     adminProfileId: string;
   }): Promise<CreateConsultantInviteResult> => {
+    const normalizedEmail =
+      normalizeEmail(input.email);
+
+    const provisioningResult =
+      await provisionInviteAccount(
+        normalizedEmail,
+      );
+
+    if (!provisioningResult.ok) {
+      return provisioningResult;
+    }
+
+    const {
+      profileId,
+      authUserCreated,
+    } =
+      provisioningResult.account;
+
     const inviteId = randomUUID();
+
     const rawToken =
       buildRawInviteToken(inviteId);
 
@@ -150,6 +466,12 @@ export const createConsultantInvite =
         },
       );
 
+      if (authUserCreated) {
+        await deleteNewAuthUser(
+          profileId,
+        );
+      }
+
       return {
         ok: false,
         code: "INTERNAL_ERROR",
@@ -172,9 +494,7 @@ export const createConsultantInvite =
         .from("consultant_invites")
         .insert({
           id: inviteId,
-          email: normalizeEmail(
-            input.email,
-          ),
+          email: normalizedEmail,
           token_hash: tokenHash,
           status: "unused",
           expires_at: expiresAt,
@@ -183,10 +503,6 @@ export const createConsultantInvite =
         });
 
     if (error) {
-      /*
-       * Never include the raw token, token hash, or invited
-       * email in logs.
-       */
       console.error(
         "Consultant invite insert failed",
         {
@@ -198,6 +514,12 @@ export const createConsultantInvite =
           hint: error.hint,
         },
       );
+
+      if (authUserCreated) {
+        await deleteNewAuthUser(
+          profileId,
+        );
+      }
 
       return {
         ok: false,

@@ -72,12 +72,24 @@ export const registerInviteRoutes =
           });
 
         if (!result.ok) {
-          return sendError(
-            reply,
-            500,
-            result.code,
-            result.message,
-          );
+          switch (result.code) {
+            case "INVITEE_INELIGIBLE":
+              return sendError(
+                reply,
+                409,
+                result.code,
+                result.message,
+              );
+
+            case "INTERNAL_ERROR":
+            default:
+              return sendError(
+                reply,
+                500,
+                "INTERNAL_ERROR",
+                result.message,
+              );
+          }
         }
 
         return sendSuccess(
