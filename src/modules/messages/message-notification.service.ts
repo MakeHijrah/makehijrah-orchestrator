@@ -592,28 +592,29 @@ const buildPortalLink = ({
   const baseUrl =
     env.APP_URL.replace(/\/+$/, "");
 
+  let protectedPath: string;
+
   if (
     recipientRole === "client"
   ) {
-    return (
-      `${baseUrl}` +
-      `/dashboard/consultation/` +
-      `${consultationId}`
-    );
-  }
-
-  if (
+    protectedPath =
+      `/dashboard/consultation/${consultationId}`;
+  } else if (
     recipientRole ===
     "consultant"
   ) {
-    return (
-      `${baseUrl}` +
-      `/consultant/consultation/` +
-      `${consultationId}`
-    );
+    protectedPath =
+      `/consultant/consultation/${consultationId}`;
+  } else {
+    return null;
   }
 
-  return null;
+  return (
+    `${baseUrl}/login?redirect=` +
+    encodeURIComponent(
+      protectedPath,
+    )
+  );
 };
 
 const markEmailNotificationSent =
@@ -921,6 +922,47 @@ export const processMessageNotification =
       senderProfile,
       recipientProfile,
     } = profilesResult;
+
+    const {
+      clientProfileId,
+      consultantProfileId,
+    } = participantResult.context;
+
+    const expectedRecipientRole =
+      message.recipient_profile_id ===
+      clientProfileId
+        ? "client"
+        : message.recipient_profile_id ===
+            consultantProfileId
+          ? "consultant"
+          : null;
+
+    if (
+      !expectedRecipientRole ||
+      recipientProfile.role !==
+        expectedRecipientRole
+    ) {
+      console.warn(
+        "Message notification permanently suppressed because the recipient role does not match the consultation participant",
+        {
+          messageId: message.id,
+          consultationId:
+            message.consultation_id,
+          recipientProfileId:
+            recipientProfile.id,
+          recipientRole:
+            recipientProfile.role,
+          expectedRecipientRole,
+        },
+      );
+
+      return {
+        ok: true,
+        action: "remove",
+        outcome:
+          "permanent_failure",
+      };
+    }
 
     const portalLink =
       buildPortalLink({
