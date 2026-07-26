@@ -11,6 +11,7 @@ import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js
 import { registerCompletionRoute } from "./modules/consultations/completion.route.js";
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
+import { registerInviteRoutes } from "./modules/invites/invite.route.js";
 import { registerMessageNotificationRoute } from "./modules/messages/message-notification.route.js";
 import {
   startMessageNotificationWorker,
@@ -197,6 +198,9 @@ await registerRecommendationSendRoute(
   app,
 );
 await registerMessageNotificationRoute(
+  app,
+);
+await registerInviteRoutes(
   app,
 );
 await registerStripeWebhookRoute(
