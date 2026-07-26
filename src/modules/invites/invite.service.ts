@@ -278,9 +278,6 @@ const verifyInviteToken =
       return await argon2.verify(
         tokenHash,
         rawToken,
-        {
-          type: argon2.argon2id,
-        },
       );
     } catch (error) {
       console.error(
