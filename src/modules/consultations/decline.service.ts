@@ -1,6 +1,9 @@
 import type Stripe from "stripe";
 import { stripe } from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
+import {
+  scheduleDeclineNotification,
+} from "./decline-notification.service.js";
 
 type DeclineConsultationRow = {
   id: string;
@@ -281,6 +284,31 @@ const finalizeDecline = async ({
   };
 };
 
+const scheduleNotificationBestEffort =
+  async ({
+    consultationId,
+    declineReason,
+  }: {
+    consultationId: string;
+    declineReason: string | null;
+  }): Promise<void> => {
+    const result =
+      await scheduleDeclineNotification({
+        consultationId,
+        declineReason,
+      });
+
+    if (!result.ok) {
+      console.error(
+        "Decline succeeded but notification scheduling failed",
+        {
+          consultationId,
+          message: result.message,
+        },
+      );
+    }
+  };
+
 export const declineConsultation =
   async ({
     consultationId,
@@ -322,6 +350,12 @@ export const declineConsultation =
         "declined" &&
       consultation.declined_at
     ) {
+      await scheduleNotificationBestEffort({
+        consultationId:
+          consultation.id,
+        declineReason,
+      });
+
       return {
         ok: true,
         consultationId:
@@ -388,6 +422,12 @@ export const declineConsultation =
           finalizationResult.message,
       };
     }
+
+    await scheduleNotificationBestEffort({
+      consultationId:
+        consultation.id,
+      declineReason,
+    });
 
     return {
       ok: true,

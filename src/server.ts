@@ -9,6 +9,10 @@ import { registerAvailabilityRoute } from "./modules/availability/availability.r
 import { registerAcceptanceRoute } from "./modules/consultations/acceptance.route.js";
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
 import { registerCompletionRoute } from "./modules/consultations/completion.route.js";
+import {
+  startDeclineNotificationWorker,
+  stopDeclineNotificationWorker,
+} from "./modules/consultations/decline-notification.worker.js";
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerInviteRoutes } from "./modules/invites/invite.route.js";
@@ -218,6 +222,7 @@ const start =
       });
 
       startMessageNotificationWorker();
+      startDeclineNotificationWorker();
     } catch (error) {
       app.log.error(error);
       process.exit(1);
@@ -226,6 +231,7 @@ const start =
 
 const shutdown =
   async (): Promise<void> => {
+    await stopDeclineNotificationWorker();
     await stopMessageNotificationWorker();
 
     await app.close();
