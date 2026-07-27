@@ -14,6 +14,7 @@ import {
   startAuthorizationTimeoutWorker,
   stopAuthorizationTimeoutWorker,
 } from "./modules/consultations/authorization-timeout.worker.js";
+import { registerAdminConsultationCancelRoute } from "./modules/admin-consultations/admin-consultation-cancel.route.js";
 import { registerAcceptanceRoute } from "./modules/consultations/acceptance.route.js";
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
 import { registerCompletionRoute } from "./modules/consultations/completion.route.js";
@@ -195,6 +196,9 @@ await registerCheckoutRoute(
   app,
 );
 await registerOAuthRoutes(
+  app,
+);
+await registerAdminConsultationCancelRoute(
   app,
 );
 await registerAcceptanceRoute(
