@@ -244,7 +244,7 @@ const refundPayment = async (
   }
 
   if (
-    paymentIntent.status !== "succeeded" &&
+    paymentIntent.status !== "succeeded" ||
     paymentIntent.amount_received <= 0
   ) {
     return {
@@ -570,6 +570,18 @@ export const adminCancelConsultation =
       };
     }
 
+    const calendarResult =
+      await removeCalendarEvent({
+        consultantId:
+          consultation.consultant_id,
+        googleEventId:
+          consultation.google_event_id,
+      });
+
+    if (!calendarResult.ok) {
+      return calendarResult;
+    }
+
     if (refund) {
       if (!paymentIntentId) {
         return {
@@ -670,18 +682,6 @@ export const adminCancelConsultation =
         stripeAction =
           cancelResult.action;
       }
-    }
-
-    const calendarResult =
-      await removeCalendarEvent({
-        consultantId:
-          consultation.consultant_id,
-        googleEventId:
-          consultation.google_event_id,
-      });
-
-    if (!calendarResult.ok) {
-      return calendarResult;
     }
 
     const finalized =
