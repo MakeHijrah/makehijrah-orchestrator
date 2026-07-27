@@ -409,3 +409,128 @@ export const createConsultationCalendarEvent =
       };
     }
   };
+
+export type DeleteConsultationCalendarEventResult =
+  | {
+      ok: true;
+      alreadyDeleted: boolean;
+    }
+  | {
+      ok: false;
+      code:
+        | "OAUTH_NOT_CONNECTED"
+        | "OAUTH_REVOKED"
+        | "GOOGLE_ERROR"
+        | "INTERNAL_ERROR";
+      message: string;
+    };
+
+export const deleteConsultationCalendarEvent =
+  async ({
+    consultantId,
+    googleEventId,
+  }: {
+    consultantId: string;
+    googleEventId: string;
+  }): Promise<DeleteConsultationCalendarEventResult> => {
+    const accessTokenResult =
+      await getGoogleAccessToken(
+        consultantId,
+      );
+
+    if (!accessTokenResult.ok) {
+      return accessTokenResult;
+    }
+
+    const endpoint = new URL(
+      `${GOOGLE_CALENDAR_EVENTS_ENDPOINT}/${encodeURIComponent(
+        googleEventId,
+      )}`,
+    );
+
+    endpoint.searchParams.set(
+      "sendUpdates",
+      "none",
+    );
+
+    try {
+      const response = await fetch(
+        endpoint,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization:
+              `Bearer ${accessTokenResult.accessToken}`,
+          },
+        },
+      );
+
+      if (response.status === 404 ||
+          response.status === 410) {
+        return {
+          ok: true,
+          alreadyDeleted: true,
+        };
+      }
+
+      if (!response.ok) {
+        let message =
+          "Unknown Google Calendar error";
+
+        try {
+          const data = await response.json() as {
+            error?: {
+              message?: string;
+            };
+          };
+
+          message =
+            data.error?.message ??
+            message;
+        } catch {
+          // Ignore malformed Google response bodies.
+        }
+
+        console.error(
+          "Google Calendar event deletion failed",
+          {
+            consultantId,
+            googleEventId,
+            status: response.status,
+            message,
+          },
+        );
+
+        return {
+          ok: false,
+          code: "GOOGLE_ERROR",
+          message:
+            "The Google Calendar event could not be removed.",
+        };
+      }
+
+      return {
+        ok: true,
+        alreadyDeleted: false,
+      };
+    } catch (error) {
+      console.error(
+        "Google Calendar event deletion failed",
+        {
+          consultantId,
+          googleEventId,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unknown Google Calendar error",
+        },
+      );
+
+      return {
+        ok: false,
+        code: "GOOGLE_ERROR",
+        message:
+          "The Google Calendar event could not be removed.",
+      };
+    }
+  };
