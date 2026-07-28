@@ -4,6 +4,9 @@ import { supabaseAdmin } from "../../lib/supabase.js";
 import {
   deleteConsultationCalendarEvent,
 } from "../consultations/google-calendar-event.service.js";
+import {
+  sendAdminCancellationNotifications,
+} from "./admin-consultation-cancel-notification.service.js";
 
 type AdminCancellationRow = {
   id: string;
@@ -706,6 +709,42 @@ export const adminCancelConsultation =
 
     if (!finalized.ok) {
       return finalized;
+    }
+
+    try {
+      const notification =
+        await sendAdminCancellationNotifications({
+          consultationId:
+            consultation.id,
+          refunded:
+            finalized.status === "refunded",
+        });
+
+      if (
+        notification.client === "failed" ||
+        notification.consultant === "failed"
+      ) {
+        console.error(
+          "Admin consultation cancellation completed with notification failures",
+          {
+            consultationId:
+              consultation.id,
+            notification,
+          },
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Admin consultation cancellation completed but notification processing threw",
+        {
+          consultationId:
+            consultation.id,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unknown notification error",
+        },
+      );
     }
 
     return {
