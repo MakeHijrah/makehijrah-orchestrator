@@ -96,6 +96,8 @@ export const calculateLocalAvailability = async ({
       slots: availableSlots,
       generated_at: new Date().toISOString(),
       cache_ttl_seconds: 120,
+      availability_mode: "degraded",
+      calendar_connected: false,
     },
   };
 };

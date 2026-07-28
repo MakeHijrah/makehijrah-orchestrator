@@ -1,6 +1,7 @@
 import type Stripe from "stripe";
 import { stripe } from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
+import { getGoogleAccessToken } from "../oauth/google-access-token.js";
 import { createConsultationCalendarEvent } from "./google-calendar-event.service.js";
 
 const ACCEPTANCE_WINDOW_MILLISECONDS =
@@ -433,6 +434,25 @@ export const acceptConsultation =
         code: "PAYMENT_NOT_AUTHORIZED",
         message:
           "The consultation has no payment authorization.",
+      };
+    }
+
+    const googleAccessResult =
+      await getGoogleAccessToken(
+        consultantId,
+      );
+
+    if (!googleAccessResult.ok) {
+      return {
+        ok: false,
+        code: "GOOGLE_ERROR",
+        message:
+          googleAccessResult.code ===
+            "OAUTH_NOT_CONNECTED" ||
+          googleAccessResult.code ===
+            "OAUTH_REVOKED"
+            ? "Reconnect Google Calendar before accepting consultations."
+            : googleAccessResult.message,
       };
     }
 

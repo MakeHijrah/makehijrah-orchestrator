@@ -39,6 +39,7 @@ export type GoogleFreeBusyResult =
         | "GOOGLE_ERROR"
         | "INTERNAL_ERROR";
       message: string;
+      calendarConnected: boolean;
     };
 
 const isValidBusyPeriod = (
@@ -72,8 +73,15 @@ export const getGoogleBusyIntervals = async (
   if (!accessTokenResult.ok) {
     return {
       ok: false,
-      code: accessTokenResult.code,
-      message: accessTokenResult.message,
+      code:
+        accessTokenResult.code,
+      message:
+        accessTokenResult.message,
+      calendarConnected:
+        accessTokenResult.code !==
+          "OAUTH_NOT_CONNECTED" &&
+        accessTokenResult.code !==
+          "OAUTH_REVOKED",
     };
   }
 
@@ -116,6 +124,7 @@ export const getGoogleBusyIntervals = async (
         code: "GOOGLE_ERROR",
         message:
           "Google Calendar availability could not be checked.",
+        calendarConnected: true,
       };
     }
 
@@ -132,6 +141,7 @@ export const getGoogleBusyIntervals = async (
         code: "GOOGLE_ERROR",
         message:
           "Google Calendar availability could not be checked.",
+        calendarConnected: true,
       };
     }
 
@@ -149,6 +159,7 @@ export const getGoogleBusyIntervals = async (
         code: "GOOGLE_ERROR",
         message:
           "Google Calendar availability could not be checked.",
+        calendarConnected: true,
       };
     }
 
@@ -176,6 +187,7 @@ export const getGoogleBusyIntervals = async (
       code: "GOOGLE_ERROR",
       message:
         "Google Calendar availability could not be checked.",
+      calendarConnected: true,
     };
   }
 };

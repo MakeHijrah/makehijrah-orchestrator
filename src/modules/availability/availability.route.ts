@@ -50,18 +50,6 @@ export const registerAvailabilityRoute = async (
           );
         }
 
-        if (
-          consultantResult.code ===
-          "OAUTH_NOT_CONNECTED"
-        ) {
-          return sendError(
-            reply,
-            409,
-            "OAUTH_NOT_CONNECTED",
-            consultantResult.message,
-          );
-        }
-
         return sendError(
           reply,
           500,
@@ -86,42 +74,6 @@ export const registerAvailabilityRoute = async (
         });
 
       if (!availabilityResult.ok) {
-        if (
-          availabilityResult.code ===
-          "OAUTH_NOT_CONNECTED"
-        ) {
-          return sendError(
-            reply,
-            409,
-            "OAUTH_NOT_CONNECTED",
-            availabilityResult.message,
-          );
-        }
-
-        if (
-          availabilityResult.code ===
-          "OAUTH_REVOKED"
-        ) {
-          return sendError(
-            reply,
-            409,
-            "OAUTH_NOT_CONNECTED",
-            availabilityResult.message,
-          );
-        }
-
-        if (
-          availabilityResult.code ===
-          "GOOGLE_ERROR"
-        ) {
-          return sendError(
-            reply,
-            502,
-            "GOOGLE_ERROR",
-            availabilityResult.message,
-          );
-        }
-
         return sendError(
           reply,
           500,

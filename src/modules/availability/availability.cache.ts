@@ -34,7 +34,12 @@ const isAvailabilityResult = (
     typeof result.consultant_id === "string" &&
     Array.isArray(result.slots) &&
     typeof result.generated_at === "string" &&
-    result.cache_ttl_seconds === CACHE_TTL_SECONDS
+    result.cache_ttl_seconds === CACHE_TTL_SECONDS &&
+    (
+      result.availability_mode === "normal" ||
+      result.availability_mode === "degraded"
+    ) &&
+    typeof result.calendar_connected === "boolean"
   );
 };
 

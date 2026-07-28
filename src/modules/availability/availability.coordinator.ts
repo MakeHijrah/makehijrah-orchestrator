@@ -5,7 +5,9 @@ import {
 import { removeBusySlots } from "./availability.conflicts.js";
 import { getGoogleBusyIntervals } from "./google-freebusy.js";
 import { calculateLocalAvailability } from "./availability.local.js";
-import type { AvailabilityResult } from "./availability.types.js";
+import type {
+  AvailabilityResult,
+} from "./availability.types.js";
 
 type CalculateAvailabilityInput = {
   consultantId: string;
@@ -20,15 +22,13 @@ export type AvailabilityCalculationResult =
   | {
       ok: true;
       data: AvailabilityResult;
-      source: "cache" | "calculated";
+      source:
+        | "cache"
+        | "calculated";
     }
   | {
       ok: false;
-      code:
-        | "OAUTH_NOT_CONNECTED"
-        | "OAUTH_REVOKED"
-        | "GOOGLE_ERROR"
-        | "INTERNAL_ERROR";
+      code: "INTERNAL_ERROR";
       message: string;
     };
 
@@ -40,11 +40,12 @@ export const calculateAvailability = async ({
   from,
   to,
 }: CalculateAvailabilityInput): Promise<AvailabilityCalculationResult> => {
-  const cached = await getCachedAvailability(
-    consultantId,
-    from,
-    to,
-  );
+  const cached =
+    await getCachedAvailability(
+      consultantId,
+      from,
+      to,
+    );
 
   if (cached) {
     return {
@@ -54,48 +55,78 @@ export const calculateAvailability = async ({
     };
   }
 
-  const localResult = await calculateLocalAvailability({
-    consultantId,
-    timezone,
-    workingHours,
-    minimumBookingNoticeHours,
-    from,
-    to,
-  });
+  const localResult =
+    await calculateLocalAvailability({
+      consultantId,
+      timezone,
+      workingHours,
+      minimumBookingNoticeHours,
+      from,
+      to,
+    });
 
   if (!localResult.ok) {
     return {
       ok: false,
       code: "INTERNAL_ERROR",
-      message: localResult.message,
+      message:
+        localResult.message,
     };
   }
 
-  const googleResult = await getGoogleBusyIntervals(
-    consultantId,
-    from,
-    to,
-  );
+  const googleResult =
+    await getGoogleBusyIntervals(
+      consultantId,
+      from,
+      to,
+    );
+
+  const completedResult: AvailabilityResult =
+    googleResult.ok
+      ? {
+          consultant_id:
+            consultantId,
+          slots:
+            removeBusySlots(
+              localResult.data.slots,
+              googleResult.intervals,
+            ),
+          generated_at:
+            new Date().toISOString(),
+          cache_ttl_seconds: 120,
+          availability_mode:
+            "normal",
+          calendar_connected:
+            true,
+        }
+      : {
+          consultant_id:
+            consultantId,
+          slots:
+            localResult.data.slots,
+          generated_at:
+            new Date().toISOString(),
+          cache_ttl_seconds: 120,
+          availability_mode:
+            "degraded",
+          calendar_connected:
+            googleResult
+              .calendarConnected,
+        };
 
   if (!googleResult.ok) {
-    return {
-      ok: false,
-      code: googleResult.code,
-      message: googleResult.message,
-    };
+    console.warn(
+      "Availability running in degraded mode",
+      {
+        consultantId,
+        code:
+          googleResult.code,
+        calendarConnected:
+          googleResult
+            .calendarConnected,
+      },
+    );
   }
-
-  const availableSlots = removeBusySlots(
-    localResult.data.slots,
-    googleResult.intervals,
-  );
-
-  const completedResult: AvailabilityResult = {
-    consultant_id: consultantId,
-    slots: availableSlots,
-    generated_at: new Date().toISOString(),
-    cache_ttl_seconds: 120,
-  };
 
   await setCachedAvailability(
     consultantId,
@@ -106,21 +137,23 @@ export const calculateAvailability = async ({
 
   return {
     ok: true,
-    data: completedResult,
+    data:
+      completedResult,
     source: "calculated",
   };
 };
 
-export const cacheCompletedAvailability = async (
-  consultantId: string,
-  from: string,
-  to: string,
-  result: AvailabilityResult,
-): Promise<void> => {
-  await setCachedAvailability(
-    consultantId,
-    from,
-    to,
-    result,
-  );
-};
+export const cacheCompletedAvailability =
+  async (
+    consultantId: string,
+    from: string,
+    to: string,
+    result: AvailabilityResult,
+  ): Promise<void> => {
+    await setCachedAvailability(
+      consultantId,
+      from,
+      to,
+      result,
+    );
+  };

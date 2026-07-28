@@ -96,17 +96,6 @@ export const validateDraftSlot = async ({
       };
     }
 
-    if (
-      consultantResult.code ===
-      "OAUTH_NOT_CONNECTED"
-    ) {
-      return {
-        ok: false,
-        code: "OAUTH_NOT_CONNECTED",
-        message: consultantResult.message,
-      };
-    }
-
     return {
       ok: false,
       code: "INTERNAL_ERROR",
@@ -186,33 +175,19 @@ export const validateDraftSlot = async ({
     );
 
   if (!googleResult.ok) {
-    if (
-      googleResult.code ===
-        "OAUTH_NOT_CONNECTED" ||
-      googleResult.code === "OAUTH_REVOKED"
-    ) {
-      return {
-        ok: false,
-        code: "OAUTH_NOT_CONNECTED",
-        message:
-          "The consultant's Google Calendar is not connected.",
-      };
-    }
-
-    if (
-      googleResult.code === "GOOGLE_ERROR"
-    ) {
-      return {
-        ok: false,
-        code: "GOOGLE_ERROR",
-        message: googleResult.message,
-      };
-    }
+    console.warn(
+      "Draft slot validated in degraded mode",
+      {
+        consultantId,
+        code: googleResult.code,
+        calendarConnected:
+          googleResult.calendarConnected,
+      },
+    );
 
     return {
-      ok: false,
-      code: "INTERNAL_ERROR",
-      message: googleResult.message,
+      ok: true,
+      endAt: requestedEndIso,
     };
   }
 
