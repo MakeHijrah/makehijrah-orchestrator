@@ -31,6 +31,14 @@ import {
   stopMessageNotificationWorker,
 } from "./modules/messages/message-notification.worker.js";
 import { registerOAuthRoutes } from "./modules/oauth/oauth.route.js";
+import {
+  startOAuthHealthAlertWorker,
+  stopOAuthHealthAlertWorker,
+} from "./modules/oauth/oauth-health-alert.worker.js";
+import {
+  startOAuthHealthWorker,
+  stopOAuthHealthWorker,
+} from "./modules/oauth/oauth-health.worker.js";
 import { registerRecommendationSendRoute } from "./modules/recommendations/recommendation-send.route.js";
 import { registerStripeWebhookRoute } from "./modules/webhooks/stripe-webhook.route.js";
 
@@ -237,6 +245,8 @@ const start =
       startDeclineNotificationWorker();
       startAuthorizationTimeoutNotificationWorker();
       startAuthorizationTimeoutWorker();
+      startOAuthHealthWorker();
+      startOAuthHealthAlertWorker();
     } catch (error) {
       app.log.error(error);
       process.exit(1);
@@ -245,6 +255,8 @@ const start =
 
 const shutdown =
   async (): Promise<void> => {
+    await stopOAuthHealthAlertWorker();
+    await stopOAuthHealthWorker();
     await stopAuthorizationTimeoutWorker();
     await stopAuthorizationTimeoutNotificationWorker();
     await stopDeclineNotificationWorker();

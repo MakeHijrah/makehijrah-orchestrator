@@ -132,6 +132,15 @@ export const getGoogleAccessToken = async (
           .from("oauth_connections")
           .update({
             revoked_at: new Date().toISOString(),
+            health_status: "revoked",
+            last_health_check_at:
+              new Date().toISOString(),
+            health_failure_code:
+              "OAUTH_REVOKED",
+            health_failure_message:
+              "Google Calendar connection is revoked. Reconnection is required.",
+            updated_at:
+              new Date().toISOString(),
           })
           .eq("consultant_id", consultantId)
           .eq("provider", "google");

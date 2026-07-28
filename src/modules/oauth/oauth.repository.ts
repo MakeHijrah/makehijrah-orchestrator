@@ -52,6 +52,13 @@ export const saveGoogleConnection = async ({
         scopes,
         connected_at: now,
         revoked_at: null,
+        health_status: "healthy",
+        last_health_check_at: now,
+        last_health_success_at: now,
+        health_failure_code: null,
+        health_failure_message: null,
+        consultant_notified_at: null,
+        admin_notified_at: null,
         updated_at: now,
       },
       {
