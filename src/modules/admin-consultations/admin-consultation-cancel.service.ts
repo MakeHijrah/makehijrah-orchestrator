@@ -30,7 +30,8 @@ export type AdminCancelConsultationResult =
       calendarAction:
         | "none"
         | "deleted"
-        | "already_deleted";
+        | "already_deleted"
+        | "manual_cleanup_required";
     }
   | {
       ok: false;
@@ -308,7 +309,8 @@ const removeCalendarEvent = async ({
       action:
         | "none"
         | "deleted"
-        | "already_deleted";
+        | "already_deleted"
+        | "manual_cleanup_required";
     }
   | {
       ok: false;
@@ -342,6 +344,16 @@ const removeCalendarEvent = async ({
         message: result.message,
       },
     );
+
+    if (
+      result.code === "OAUTH_REVOKED" ||
+      result.code === "OAUTH_NOT_CONNECTED"
+    ) {
+      return {
+        ok: true,
+        action: "manual_cleanup_required",
+      };
+    }
 
     return {
       ok: false,
