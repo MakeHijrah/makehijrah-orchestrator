@@ -5,6 +5,9 @@ import {
 } from "../../lib/api-response.js";
 import { resolveBookingClient } from "./booking-client.service.js";
 import { createCheckoutCapability } from "./checkout-capability.service.js";
+import {
+  validateDraftConsultantGender,
+} from "./draft-gender-validation.js";
 import { validateDraftSlot } from "./draft-availability.js";
 import { createDraftConsultationRecord } from "./draft.repository.js";
 import { createDraftConsultationSchema } from "./draft.schema.js";
@@ -35,6 +38,48 @@ export const registerDraftConsultationRoute = async (
           "VALIDATION_ERROR",
           "The consultation request is invalid.",
           parsed.error.flatten(),
+        );
+      }
+
+      const genderValidation =
+        await validateDraftConsultantGender({
+          consultantId:
+            parsed.data.consultant_id,
+          preferredConsultantGender:
+            parsed.data.intake.answers
+              .preferred_consultant_gender,
+        });
+
+      if (!genderValidation.ok) {
+        if (
+          genderValidation.code ===
+          "NOT_FOUND"
+        ) {
+          return sendError(
+            reply,
+            404,
+            "NOT_FOUND",
+            genderValidation.message,
+          );
+        }
+
+        if (
+          genderValidation.code ===
+          "VALIDATION_ERROR"
+        ) {
+          return sendError(
+            reply,
+            400,
+            "VALIDATION_ERROR",
+            genderValidation.message,
+          );
+        }
+
+        return sendError(
+          reply,
+          500,
+          "INTERNAL_ERROR",
+          "The selected consultant could not be verified.",
         );
       }
 
