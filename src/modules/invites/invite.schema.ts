@@ -45,6 +45,10 @@ export const redeemConsultantInviteSchema =
               "A valid IANA timezone is required.",
           },
         ),
+      gender: z.enum([
+        "male",
+        "female",
+      ]),
     }),
   });
 

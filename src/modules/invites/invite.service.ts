@@ -773,6 +773,8 @@ export const redeemConsultantInvite =
             input.profile.full_name,
           p_timezone:
             input.profile.timezone,
+          p_gender:
+            input.profile.gender,
         },
       );
 
