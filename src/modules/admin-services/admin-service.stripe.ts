@@ -86,6 +86,11 @@ const toStripeFailure = (
  * Identifies the owning service, the application and the
  * environment on every object the orchestrator creates, so an
  * orphaned resource stays attributable (section 7.5).
+ *
+ * APP_ENV, not NODE_ENV: deployed environments run with
+ * NODE_ENV=production regardless of which environment they are,
+ * so NODE_ENV stamped staging-created objects as "production" and
+ * made the tag useless for attribution.
  */
 const buildMetadata = (
   serviceId: string,
@@ -94,7 +99,7 @@ const buildMetadata = (
     makehijrah_service_id: serviceId,
     application:
       "makehijrah-orchestrator",
-    environment: env.NODE_ENV,
+    environment: env.APP_ENV,
   };
 };
 

@@ -10,6 +10,25 @@ const envSchema = z.object({
     ])
     .default("development"),
 
+  /*
+   * Operational deployment label, independent of NODE_ENV.
+   *
+   * NODE_ENV drives runtime behaviour and stays "production" on
+   * deployed environments. APP_ENV records which environment a
+   * deployment actually is, so an artefact created from a staging
+   * deployment is not stamped "production".
+   *
+   * Deliberately has no default: an unset value would silently
+   * mislabel every Stripe object it reaches, which is the exact
+   * problem this variable exists to fix. It must be set
+   * explicitly per environment.
+   */
+  APP_ENV: z.enum([
+    "local",
+    "staging",
+    "production",
+  ]),
+
   PORT: z.coerce
     .number()
     .int()

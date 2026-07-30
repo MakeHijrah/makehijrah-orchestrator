@@ -22,6 +22,7 @@ import { beforeEach, describe, it } from "node:test";
 
 const testEnv: Record<string, string> = {
   NODE_ENV: "test",
+  APP_ENV: "staging",
   SUPABASE_URL: "https://stripe-webhook-test.supabase.co",
   SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
   REDIS_URL: "redis://127.0.0.1:6379",

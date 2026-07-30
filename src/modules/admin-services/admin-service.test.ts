@@ -16,6 +16,7 @@ import { beforeEach, describe, it } from "node:test";
 
 const testEnv: Record<string, string> = {
   NODE_ENV: "test",
+  APP_ENV: "staging",
   SUPABASE_URL: "https://admin-services-test.supabase.co",
   SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
   REDIS_URL: "redis://127.0.0.1:6379",
@@ -1110,7 +1111,12 @@ describe("admin services: create", () => {
 
       assert.ok(metadata.makehijrah_service_id);
       assert.equal(metadata.application, "makehijrah-orchestrator");
-      assert.equal(metadata.environment, "test");
+      /*
+       * APP_ENV, not NODE_ENV. NODE_ENV is "test" in this suite,
+       * so asserting "staging" proves the metadata follows the
+       * operational label rather than the runtime mode.
+       */
+      assert.equal(metadata.environment, "staging");
     }
   });
 
