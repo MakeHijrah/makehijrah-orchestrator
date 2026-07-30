@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import Fastify from "fastify";
 import rawBody from "fastify-raw-body";
+import { buildCorsOptions } from "./config/cors.js";
 import { env } from "./config/env.js";
 import { redis } from "./lib/redis.js";
 import { supabaseAdmin } from "./lib/supabase.js";
@@ -49,22 +50,10 @@ const app = Fastify({
   trustProxy: true,
 });
 
-await app.register(cors, {
-  origin: env.APP_URL,
-  methods: [
-    "GET",
-    "POST",
-    "PATCH",
-    "DELETE",
-    "OPTIONS",
-  ],
-  allowedHeaders: [
-    "Authorization",
-    "Content-Type",
-    "Stripe-Signature",
-  ],
-  credentials: true,
-});
+await app.register(
+  cors,
+  buildCorsOptions(env.APP_URL),
+);
 
 await app.register(rateLimit, {
   global: false,
