@@ -1,0 +1,1187 @@
+MakeHijrah Relocation OS v1.0
+
+PROJECT_LOCK.md
+
+Status: Locked for MVP executionOwner: MakeHijrahLead Architect: DaveBuilder: TroySenior Consultant: BobVersion: v1.0Rule: This document governs the build. Any deviation requires written approval from Dave. Major architecture changes require Bob review.
+
+1. Project Definition
+
+MakeHijrah Relocation OS v1.0 is a consultation-led booking and upsell platform.
+
+The MVP exists to prove this business loop:
+
+Client books consultation → consultant accepts → payment captures → Google Calendar + Meet link created → consultation happens → consultant recommends services → admin sends recommendation → client sees recommended service card.
+
+Nothing outside this loop ships in v1.0.
+
+2. Non-Negotiable Architecture
+
+Frontend
+
+Lovable
+
+Responsibilities:
+
+UI shell
+
+booking form
+
+public consultation page
+
+client dashboard
+
+consultant dashboard
+
+admin dashboard
+
+mock data layer first
+
+later: Supabase reads
+
+later: orchestrator endpoint calls
+
+Lovable must not own backend orchestration.
+
+Lovable must not create or manage the database.
+
+Lovable must not use Lovable Cloud for this project.
+
+Database, Auth, and Storage
+
+Supabase, created independently of Lovable
+
+Responsibilities:
+
+Postgres database
+
+Supabase Auth with email OTP
+
+Row Level Security
+
+Supabase Storage
+
+public media bucket
+
+independently run migrations
+
+Supabase is not managed by Lovable.
+
+The database is created directly in Supabase using the frozen SQL migrations.
+
+Backend Orchestrator
+
+Node.js + Express or Fastify on Railway
+
+Responsibilities:
+
+Stripe Checkout with manual capture
+
+Stripe webhooks
+
+Stripe payment capture/cancel
+
+Google OAuth
+
+encrypted Google refresh-token handling
+
+Google FreeBusy availability
+
+Redis FreeBusy cache
+
+Google Calendar event creation
+
+Google Meet link generation
+
+consultant accept/decline
+
+admin cancellation/refund
+
+admin invite creation
+
+recommendation send action
+
+BullMQ jobs
+
+48-hour authorization timeout
+
+draft expiry
+
+email notifications through Resend
+
+Redis
+
+Railway Redis
+
+Responsibilities:
+
+BullMQ job queue
+
+FreeBusy cache
+
+job deduplication
+
+timeout/background job support
+
+3. Locked Data Model
+
+Exactly 15 tables for MVP:
+
+profiles
+
+consultants
+
+consultant_invites
+
+countries
+
+consultant_countries
+
+oauth_connections
+
+consultations
+
+consultation_intake
+
+consultation_notes
+
+services
+
+service_recommendations
+
+service_requests
+
+payments
+
+messages
+
+giveaways
+
+No extra tables during MVP.
+
+No extra statuses during MVP.
+
+No service workflow engine.
+
+No document vault.
+
+No payout system.
+
+4. Locked Consultation Statuses
+
+consultations.status may only use:
+
+draft
+
+payment_authorized
+
+pending_acceptance
+
+confirmed
+
+declined
+
+admin_attention
+
+completed
+
+cancelled
+
+authorization_cancelled
+
+captured
+
+refunded
+
+All consultation creation and status transitions go through the Node orchestrator.
+
+Lovable must never write to consultations.
+
+5. Locked Service Request Statuses
+
+service_requests.status may only use:
+
+pending
+
+active
+
+completed
+
+cancelled
+
+All extra service detail goes into details_jsonb.
+
+No workflow steps table.
+
+No workflow templates.
+
+No drag-and-drop service pipeline.
+
+6. Locked Recommendation Statuses
+
+service_recommendations.status may only use:
+
+proposed
+
+sent
+
+Flow:
+
+Consultant proposes recommendations.
+
+Admin reviews.
+
+Admin sends to client.
+
+Client only sees sent recommendations.
+
+Clients must never see proposed recommendations.
+
+7. Payment Rules
+
+Stripe uses manual capture.
+
+Flow:
+
+Client books a slot.
+
+Stripe authorizes payment.
+
+Payment is not captured yet.
+
+Consultation enters pending_acceptance.
+
+Consultant accepts within 48 hours.
+
+Orchestrator captures payment.
+
+Orchestrator creates Google Calendar event and Meet link.
+
+Consultation becomes confirmed.
+
+If consultant declines or times out:
+
+Orchestrator cancels authorization.
+
+Consultation becomes admin_attention.
+
+Client is told no charge was made.
+
+The 48-hour timeout starts at payment_authorized_at.
+
+Timeout job runs every 15 minutes.
+
+8. Google Calendar and Meet Rules
+
+Google Calendar integration is handled only by the Node orchestrator.
+
+Consultants connect Google Calendar through OAuth.
+
+The orchestrator stores only encrypted refresh tokens.
+
+Access tokens are minted server-side when needed.
+
+The client is never added as a Google Calendar attendee.
+
+Consultant calendar event rules:
+
+event is created on consultant calendar
+
+event title uses internal reference, e.g. MakeHijrah Consultation #ABC123
+
+event may include consultation ID, dashboard link, and Meet link
+
+event must not include client email
+
+event must not include client phone
+
+event must not include client WhatsApp
+
+event must not add client as attendee
+
+Client receives:
+
+confirmation email
+
+Meet link
+
+.ics calendar attachment
+
+No native embedded Google Meet in v1.0.
+
+No Google Meet Add-on in v1.0.
+
+9. Availability Rules
+
+Availability is generated by the Node orchestrator.
+
+Source inputs:
+
+consultant working hours from consultants.working_hours_jsonb
+
+consultant timezone
+
+consultant minimum booking notice
+
+Google Calendar FreeBusy
+
+existing non-terminal consultations
+
+Redis cache
+
+FreeBusy responses are cached in Redis for 2 minutes.
+
+Google Calendar is never called from the Lovable frontend.
+
+Slot duration:
+
+60 minutes
+
+Slot interval:
+
+30 minutes
+
+Minimum booking notice:
+
+default 24 hours
+
+consultant can set longer notice
+
+All database timestamps are stored as UTC timestamptz.
+
+10. Double-Booking Protection
+
+The consultations table acts as the slot hold table.
+
+Draft consultations reserve a slot.
+
+Duplicate slot protection is enforced by the database unique partial index on:
+
+consultant_id + scheduled_start_at
+
+for active/reserved statuses.
+
+Drafts older than 30 minutes are cancelled by background job.
+
+Lovable does not enforce slot uniqueness. The database and orchestrator do.
+
+11. Auth Rules
+
+Supabase Auth with email OTP.
+
+No passwords.
+
+Roles:
+
+client
+
+consultant
+
+admin
+
+First admin is seeded manually.
+
+No public admin registration.
+
+Consultants do not self-register publicly.
+
+Consultants onboard through admin-generated invite links.
+
+12. Consultant Invite Rules
+
+Consultant invites are created by admin through orchestrator.
+
+Raw token:
+
+generated by orchestrator
+
+shown once
+
+never stored plaintext
+
+never logged
+
+Stored token:
+
+Argon2id hash only
+
+Invite statuses:
+
+unused
+
+used
+
+expired
+
+revoked
+
+Consultant account is created only after:
+
+user completes Supabase OTP signup
+
+user submits valid invite token
+
+orchestrator verifies token
+
+orchestrator changes profile role to consultant
+
+orchestrator creates consultant row
+
+13. Privacy Rules
+
+Consultants must not see client email through Google Calendar.
+
+Consultants must not access oauth_connections.
+
+Clients must not see:
+
+consultant private OAuth data
+
+proposed recommendations
+
+consultation notes
+
+payment logs
+
+other clients’ consultations
+
+other clients’ messages
+
+Admins may see operational data required to run the platform.
+
+Lovable must not receive secrets.
+
+14. Secret Handling
+
+Lovable may later receive:
+
+Supabase URL
+
+Supabase anon key
+
+public API base URL
+
+Lovable must never receive:
+
+Supabase service role key
+
+Supabase JWT secret
+
+Stripe secret key
+
+Stripe webhook secret
+
+Google client secret
+
+OAuth token encryption key
+
+Resend API key
+
+Redis URL
+
+Railway secrets
+
+Secrets live only in Railway/orchestrator environment variables.
+
+15. Locked API Boundary
+
+The Node orchestrator owns all sensitive mutations.
+
+Lovable may call only endpoints listed in API_CONTRACT.md.
+
+If an endpoint is not in API_CONTRACT.md, it does not exist.
+
+Lovable must never write to:
+
+consultations
+
+payments
+
+oauth_connections
+
+consultant_invites
+
+services (see section 30)
+
+Lovable must never directly call:
+
+Stripe
+
+Google APIs
+
+Redis
+
+Resend
+
+16. Direct Supabase Access Rules
+
+Lovable may directly read/write only what RLS permits.
+
+Allowed direct Supabase usage is defined in:
+
+RLS_POLICY_PLAN.md
+
+ROLE_ACCESS_MATRIX.md
+
+API_CONTRACT.md
+
+Sensitive operations go through the orchestrator.
+
+If a write touches money, status, tokens, or Google, it goes through the orchestrator.
+
+17. Storage Rules
+
+One Supabase Storage bucket:
+
+public-media
+
+Prefixes:
+
+avatars/{auth.uid()}/*
+
+consultants/{auth.uid()}/*
+
+giveaways/*
+
+Read:
+
+public
+
+Write:
+
+authenticated users only under their own avatar/consultant prefixes
+
+giveaways admin-only
+
+18. Email Rules
+
+Email provider:
+
+Resend
+
+Sender:
+
+consultations@makehijrah.com
+
+Emails required in MVP:
+
+payment authorized / pending consultant acceptance
+
+consultant accepted
+
+Meet link + .ics to client
+
+consultant confirmation
+
+consultant declined
+
+48-hour timeout
+
+consultant acceptance reminder
+
+24-hour session reminder
+
+1-hour session reminder
+
+recommendation sent
+
+No inbound email parsing.
+
+No Mandrill relay.
+
+No reply-by-email.
+
+19. MVP Pages
+
+Public
+
+/
+
+/consultation
+
+/login
+
+/onboard/:token
+
+Client
+
+/dashboard
+
+/dashboard/consultation/:id
+
+Consultant
+
+/consultant
+
+/consultant/consultation/:id
+
+/consultant/profile
+
+Admin
+
+/admin
+
+/admin/consultations
+
+/admin/consultants
+
+/admin/services
+
+/admin/recommendations
+
+/admin/service-requests
+
+/admin/giveaways
+
+/admin/countries
+
+No extra routes without approval.
+
+20. Lovable Shell Rules
+
+The first Lovable build is UI shell only.
+
+It uses mock data only.
+
+It must create a swappable API layer:
+
+src/lib/api/types.ts
+
+src/lib/api/client.ts
+
+src/lib/api/mock.ts
+
+src/lib/api/index.ts
+
+src/mocks/fixtures.ts
+
+Pages import only from:
+
+src/lib/api
+
+Pages must not import fixtures directly.
+
+No real auth.
+
+No Supabase.
+
+No Stripe.
+
+No Google.
+
+No backend orchestration.
+
+No Realtime.
+
+No extra libraries unless Lovable already provides them.
+
+No extra routes.
+
+No extra statuses.
+
+No extra tables.
+
+21. Role Switcher Rule
+
+The role switcher is allowed only for local/private staging review.
+
+It must be controlled by:
+
+VITE_ENABLE_ROLE_SWITCHER=true
+
+It must not rely on NODE_ENV alone.
+
+It must never render in production.
+
+22. Design Direction
+
+Approved shell design tokens:
+
+deep green: #0F3D2E
+
+warm sand: #F5EFE4
+
+gold: #C9A24B
+
+Visual direction:
+
+calm
+
+trustworthy
+
+premium
+
+warm
+
+professional
+
+generous whitespace
+
+rounded-xl cards
+
+no stock-photo clutter
+
+Owners may replace brand tokens before design polish.
+
+Do not block the UI shell on final branding.
+
+23. Explicitly Out of Scope
+
+Do not build in v1.0:
+
+AI note summaries
+
+PDF uploads
+
+document vault
+
+client file sharing
+
+service workflow engine
+
+email reply parsing
+
+Mandrill inbound relay
+
+payout automation
+
+Stripe Connect
+
+native embedded Google Meet
+
+Google Meet Add-on
+
+vendor portal
+
+partner portal
+
+course platform
+
+advanced accounting
+
+advanced analytics
+
+Realtime
+
+push notifications
+
+mobile app
+
+multilingual UI
+
+extra tables
+
+extra statuses
+
+extra routes
+
+24. Build Order
+
+Track 1: Supabase
+
+Create Supabase staging project.
+
+Run migration_001_schema.sql.
+
+Run migration_002_rls.sql.
+
+Seed first admin.
+
+Seed Egypt.
+
+Create test users.
+
+Run RLS checklist.
+
+Do not connect Lovable until RLS passes.
+
+Track 2: Lovable
+
+Create Lovable project.
+
+Do not connect Supabase.
+
+Do not use Lovable Cloud.
+
+Run frozen shell prompt in Plan Mode only.
+
+Bring Lovable plan to Dave for review.
+
+Build shell only after plan approval.
+
+Track 3: Node Orchestrator
+
+Create Railway project.
+
+Create Railway Redis.
+
+Implement API endpoints from API_CONTRACT.md.
+
+Implement Stripe manual capture.
+
+Implement Google OAuth / Calendar / Meet.
+
+Implement BullMQ jobs.
+
+Implement Resend emails.
+
+Connect Lovable only after shell and RLS pass.
+
+25. Testing Gates
+
+Gate 1: Supabase Schema
+
+Must pass:
+
+migrations run cleanly
+
+all 15 tables exist
+
+enums exist
+
+triggers exist
+
+indexes exist
+
+storage bucket exists
+
+Gate 2: RLS
+
+Must pass RLS checklist.
+
+Key checks:
+
+client cannot read oauth_connections
+
+client cannot update consultations.status
+
+client cannot see another client’s consultations
+
+client cannot see proposed recommendations
+
+client cannot see consultation notes
+
+consultant cannot see other consultant consultations
+
+consultant cannot update is_active
+
+anon can read active consultants and countries
+
+only admin reads payments and invites
+
+user cannot self-escalate role
+
+Gate 3: Lovable Plan
+
+Plan must confirm:
+
+no real auth
+
+no Supabase integration
+
+no Stripe
+
+no Google
+
+no backend orchestration
+
+no extra routes
+
+no extra tables/statuses
+
+pages import only from src/lib/api
+
+role switcher env-flagged for staging only
+
+Gate 4: Lovable Shell
+
+Must show:
+
+public booking flow
+
+client dashboard
+
+consultant dashboard
+
+admin dashboard
+
+all 11 consultation statuses
+
+all role route guards
+
+mock data only
+
+Gate 5: Auth Integration
+
+Must pass:
+
+OTP login
+
+profile auto-creation
+
+role routing
+
+production role switcher disabled
+
+Gate 6: Booking
+
+Must pass:
+
+availability lookup
+
+draft slot hold
+
+duplicate slot rejected
+
+checkout session created
+
+Gate 7: Payment
+
+Must pass:
+
+manual authorization
+
+no capture before consultant acceptance
+
+webhook records payment event
+
+status moves to pending_acceptance
+
+Gate 8: Consultant Acceptance
+
+Must pass:
+
+consultant accepts
+
+payment captures
+
+Google event created on consultant calendar only
+
+client not added as attendee
+
+Meet link stored
+
+client receives Meet link and .ics
+
+status becomes confirmed
+
+Gate 9: Decline / Timeout
+
+Must pass:
+
+decline cancels authorization
+
+timeout cancels authorization
+
+admin attention appears
+
+no charge captured
+
+Gate 10: Recommendation
+
+Must pass:
+
+consultant completes consultation after scheduled end
+
+consultant proposes 1–3 services
+
+admin sends recommendation
+
+client sees only sent recommendations
+
+26. Team Responsibilities
+
+Dave
+
+architecture owner
+
+scope gatekeeper
+
+reviews Lovable plans
+
+reviews schema/API deviations
+
+approves version bumps
+
+Troy
+
+Supabase builder
+
+Lovable prompt executor
+
+RLS tester
+
+frontend shell builder
+
+later frontend integration builder
+
+Bob
+
+senior consultant
+
+only called for major architecture, payment, webhook, or calendar failure risks
+
+Project Owner
+
+owns accounts
+
+supplies beta users
+
+supplies Egyptian consultant
+
+confirms real price before Week 4
+
+owns domain/DNS access
+
+27. Beta Inputs Needed
+
+Before Week 7, owner must provide:
+
+full name and email of one Egyptian consultant
+
+confirmation consultant has Google account
+
+10 real beta clients from last 3 months
+
+each beta client’s:
+
+full name
+
+email
+
+WhatsApp/mobile
+
+original consultation country/topic if known
+
+confirmation that Egypt is the beta country
+
+No real consultant invite token is generated until the consultant’s real email is confirmed.
+
+28. Change Control
+
+This is a frozen MVP.
+
+A change requires written approval if it adds or modifies:
+
+table
+
+enum
+
+status
+
+route
+
+endpoint
+
+payment behavior
+
+calendar behavior
+
+auth behavior
+
+RLS behavior
+
+storage behavior
+
+secret handling
+
+Lovable backend behavior
+
+service fulfillment workflow
+
+file upload
+
+AI feature
+
+messaging behavior
+
+Minor copy/design changes do not require approval unless they affect flow, permissions, or backend.
+
+29. Immediate Next Step
+
+Start in this order:
+
+Create new Project.
+
+Upload this PROJECT_LOCK.md.
+
+Upload all frozen v1.0 docs.
+
+Create Supabase staging independently.
+
+Run migration 001.
+
+Run migration 002.
+
+Run RLS checklist.
+
+Submit Lovable shell prompt in Plan Mode.
+
+Bring Lovable plan back for approval.
+
+No build mode until plan approval.
+
+30. Amendment 004 — Structured Service Pricing and Stripe Payment Links
+
+Source: PROJECT_LOCK_AMENDMENT_004_STRUCTURED_SERVICE_PRICING_AND_STRIPE_PAYMENT_LINKS.md (APPROVED). Applied as migration 022. Where this section conflicts with an earlier section, this section prevails, and only for services.
+
+Services may carry structured pricing.
+
+A service holds billing_type, recurring_interval, price_cents and currency, in addition to price_display.
+
+Pricing is all or nothing. A service is fully priced or entirely unpriced.
+
+price_display is retained for compatibility and for server-generated display text. It is not dropped.
+
+Service sales use Stripe Payment Links.
+
+A priced, active service is purchased through a Stripe Payment Link.
+
+Payment Links use normal Stripe payment and subscription behavior.
+
+Consultation payment behavior is unchanged. Consultation Checkout remains manual capture, with the same authorize, accept, capture flow in section 7.
+
+Stripe service resources are orchestrator-owned.
+
+The orchestrator creates and owns the Stripe Product, Price and Payment Link for each service.
+
+One Stripe Product per service.
+
+A price, currency or billing change creates a new immutable Stripe Price and a replacement Payment Link.
+
+Lovable never calls Stripe and never sends a Stripe identifier.
+
+All public.services mutations are orchestrator-only.
+
+Every insert, update and delete on public.services is performed by the orchestrator under the service role.
+
+Authenticated users, including admins, cannot directly insert, update or delete services.
+
+Migration 022 revoked those grants and dropped the three admin write policies. services_select_active is the only remaining policy, and authenticated holds SELECT only.
+
+Admins manage the catalog through the endpoints in API_CONTRACT.md section 3a.
+
+Service purchases are not recorded in the MakeHijrah database.
+
+In this scope a service Payment Link purchase creates no row in any MakeHijrah table.
+
+No payments row. No automatic service_requests row.
+
+Stripe is the temporary source of truth for service purchases and subscriptions, including subscription management and refunds.
+
+Reconciliation into the database is out of scope and requires its own amendment.
+
+Nothing was added to the locked surface.
+
+No new table. The data model remains exactly 15 tables.
+
+No new route. No new status. No new currency beyond usd, gbp and eur.
+
+Section 3, section 4, section 5, section 6 and section 23 are unchanged by this amendment.
+
+Webhook acknowledgement.
+
+Correctly signed Stripe events carrying no consultation_id are acknowledged with HTTP 200 and ignored.
+
+No consultation transition, no payments row, no consultation RPC.
+
+Signature verification is unchanged. An invalid signature is still rejected.
