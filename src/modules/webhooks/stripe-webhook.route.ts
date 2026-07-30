@@ -125,14 +125,6 @@ export const registerStripeWebhookRoute =
                 processingResult.message,
               );
 
-            case "MISSING_METADATA":
-              return sendError(
-                reply,
-                422,
-                "MISSING_METADATA",
-                processingResult.message,
-              );
-
             case "STRIPE_ERROR":
               return sendError(
                 reply,
@@ -152,6 +144,14 @@ export const registerStripeWebhookRoute =
           }
         }
 
+        /*
+         * Safe fields only: the Stripe event identifier, its
+         * type, and the ignore reason. The Stripe payload, the
+         * signature header and the webhook secret are never
+         * logged. An ignored event is recorded here, which is
+         * what PROJECT_LOCK Amendment 004 section 10.3.1
+         * requires of it.
+         */
         request.log.info(
           {
             stripeEventId: event.id,
@@ -159,6 +159,8 @@ export const registerStripeWebhookRoute =
               event.type,
             ignored:
               processingResult.ignored,
+            reason:
+              processingResult.reason,
             processed:
               processingResult.processed,
             alreadyProcessed:
@@ -173,12 +175,19 @@ export const registerStripeWebhookRoute =
           "Stripe webhook handled",
         );
 
+        /*
+         * HTTP 200. A correctly signed event is acknowledged
+         * whether it was processed or ignored, so that Stripe
+         * does not retry it and does not disable the endpoint.
+         */
         return sendSuccess(reply, {
           received: true,
           event_id: event.id,
           event_type: event.type,
           ignored:
             processingResult.ignored,
+          reason:
+            processingResult.reason,
           processed:
             processingResult.processed,
           already_processed:

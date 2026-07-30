@@ -23,10 +23,34 @@ type NormalizedStripeEvent = {
   rawJson: Stripe.Event;
 };
 
+/*
+ * Why a correctly signed event may be ignored.
+ *
+ * non_consultation_event
+ *   The event is one this webhook otherwise supports, but it
+ *   carries no consultation_id. Service Payment Link purchases
+ *   produce exactly these events. PROJECT_LOCK Amendment 004
+ *   section 10.2 requires that they be acknowledged rather than
+ *   rejected, because repeated rejections cause Stripe to retry
+ *   and ultimately disable the endpoint, which would break
+ *   consultation payment capture.
+ *
+ * unsupported_event_type
+ *   The event type is not one this webhook handles at all. This
+ *   was already acknowledged and ignored before Amendment 004;
+ *   only the reason label is new.
+ */
+export type StripeWebhookIgnoredReason =
+  | "non_consultation_event"
+  | "unsupported_event_type";
+
 export type ProcessStripeWebhookResult =
   | {
       ok: true;
       ignored: boolean;
+      reason:
+        | StripeWebhookIgnoredReason
+        | null;
       processed: boolean;
       alreadyProcessed: boolean;
       paymentId: string | null;
@@ -36,7 +60,6 @@ export type ProcessStripeWebhookResult =
       ok: false;
       code:
         | "INVALID_EVENT"
-        | "MISSING_METADATA"
         | "STRIPE_ERROR"
         | "DATABASE_ERROR";
       message: string;
@@ -69,19 +92,17 @@ const readConsultationId = (
   return consultationId || null;
 };
 
+/*
+ * The caller establishes that this payment intent belongs to a
+ * consultation and passes the identifier in. Reading metadata is
+ * deliberately not repeated here, so that the decision to treat
+ * an event as non-consultation is made in exactly one place.
+ */
 const normalizePaymentIntentEvent = (
   event: Stripe.Event,
   paymentIntent: Stripe.PaymentIntent,
+  consultationId: string,
 ): NormalizedStripeEvent | null => {
-  const consultationId =
-    readConsultationId(
-      paymentIntent.metadata,
-    );
-
-  if (!consultationId) {
-    return null;
-  }
-
   const eventTimestamp =
     stripeTimestampToIso(
       event.created,
@@ -165,6 +186,11 @@ const normalizeRefundEvent = async (
 ): Promise<
   | {
       ok: true;
+      ignored: true;
+    }
+  | {
+      ok: true;
+      ignored: false;
       normalized:
         NormalizedStripeEvent;
     }
@@ -172,7 +198,6 @@ const normalizeRefundEvent = async (
       ok: false;
       code:
         | "INVALID_EVENT"
-        | "MISSING_METADATA"
         | "STRIPE_ERROR";
       message: string;
     }
@@ -233,17 +258,24 @@ const normalizeRefundEvent = async (
       paymentIntent.metadata,
     );
 
+  /*
+   * A refund of a service Payment Link purchase reaches this
+   * point with no consultation_id. It is not a consultation
+   * refund, so it is ignored rather than rejected. The two
+   * failure paths above are unchanged: a charge with no
+   * PaymentIntent is still INVALID_EVENT, and a failed Stripe
+   * retrieval is still STRIPE_ERROR.
+   */
   if (!consultationId) {
     return {
-      ok: false,
-      code: "MISSING_METADATA",
-      message:
-        "The refunded payment is missing its consultation ID.",
+      ok: true,
+      ignored: true,
     };
   }
 
   return {
     ok: true,
+    ignored: false,
     normalized: {
       eventId: event.id,
       eventType: event.type,
@@ -272,6 +304,7 @@ const normalizeStripeEvent = async (
   | {
       ok: true;
       ignored: true;
+      reason: StripeWebhookIgnoredReason;
     }
   | {
       ok: true;
@@ -283,7 +316,6 @@ const normalizeStripeEvent = async (
       ok: false;
       code:
         | "INVALID_EVENT"
-        | "MISSING_METADATA"
         | "STRIPE_ERROR";
       message: string;
     }
@@ -296,18 +328,47 @@ const normalizeStripeEvent = async (
         event.data
           .object as Stripe.PaymentIntent;
 
+      const consultationId =
+        readConsultationId(
+          paymentIntent.metadata,
+        );
+
+      /*
+       * This is the single decision point for payment intents.
+       * No consultation_id means the payment is not a
+       * consultation payment, so the event is acknowledged and
+       * ignored. Nothing downstream runs: no payment row, no
+       * consultation transition, no RPC call.
+       */
+      if (!consultationId) {
+        return {
+          ok: true,
+          ignored: true,
+          reason:
+            "non_consultation_event",
+        };
+      }
+
       const normalized =
         normalizePaymentIntentEvent(
           event,
           paymentIntent,
+          consultationId,
         );
 
+      /*
+       * Unreachable in practice: the switch above admits only
+       * the three event types normalizePaymentIntentEvent
+       * handles. Retained so that adding a case here without
+       * adding one there fails loudly rather than silently
+       * dropping a consultation payment.
+       */
       if (!normalized) {
         return {
           ok: false,
-          code: "MISSING_METADATA",
+          code: "INVALID_EVENT",
           message:
-            "The payment is missing its consultation ID.",
+            "The payment event could not be interpreted.",
         };
       }
 
@@ -333,6 +394,19 @@ const normalizeStripeEvent = async (
         return refundResult;
       }
 
+      /*
+       * A refund with no consultation_id belongs to a service
+       * purchase, not a consultation.
+       */
+      if (refundResult.ignored) {
+        return {
+          ok: true,
+          ignored: true,
+          reason:
+            "non_consultation_event",
+        };
+      }
+
       return {
         ok: true,
         ignored: false,
@@ -341,10 +415,17 @@ const normalizeStripeEvent = async (
       };
     }
 
+    /*
+     * Event types this webhook does not handle were already
+     * acknowledged and ignored before Amendment 004. That
+     * behaviour is unchanged; only the reason label is new.
+     */
     default:
       return {
         ok: true,
         ignored: true,
+        reason:
+          "unsupported_event_type",
       };
   }
 };
@@ -360,12 +441,21 @@ export const processStripeWebhookEvent =
       return normalizationResult;
     }
 
+    /*
+     * The ignored path returns before any database or Stripe
+     * work. This is what guarantees Amendment 004 sections
+     * 10.3.2 through 10.3.4: an ignored event cannot reach the
+     * RPC below, so it cannot transition a consultation, write
+     * a payment row, or call a consultation payment RPC.
+     */
     if (
       normalizationResult.ignored
     ) {
       return {
         ok: true,
         ignored: true,
+        reason:
+          normalizationResult.reason,
         processed: false,
         alreadyProcessed: false,
         paymentId: null,
@@ -465,6 +555,7 @@ export const processStripeWebhookEvent =
     return {
       ok: true,
       ignored: false,
+      reason: null,
       processed: row.processed,
       alreadyProcessed:
         row.already_processed,
