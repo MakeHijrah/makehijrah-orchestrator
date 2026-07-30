@@ -8,11 +8,12 @@
  */
 
 import { supabaseAdmin } from "../../lib/supabase.js";
-import type {
-  ServiceBillingType,
-  ServiceCurrency,
-  ServiceRecurringInterval,
-  StructuredPricing,
+import {
+  formatPriceDisplay,
+  type ServiceBillingType,
+  type ServiceCurrency,
+  type ServiceRecurringInterval,
+  type StructuredPricing,
 } from "./admin-service.schema.js";
 
 export const SERVICE_COLUMNS =
@@ -362,6 +363,13 @@ export const persistPricingAndStripeIdentifiers =
           price_cents:
             pricing.priceCents,
           currency: pricing.currency,
+          /*
+           * Generated here, never accepted from a client
+           * (section 6.2), and written in the same statement as
+           * the pricing it describes so the two cannot diverge.
+           */
+          price_display:
+            formatPriceDisplay(pricing),
           stripe_price_id:
             stripePriceId,
           stripe_payment_link_id:
@@ -407,6 +415,12 @@ export const clearPricing = async (
         recurring_interval: null,
         price_cents: null,
         currency: null,
+        /*
+         * The generated display string describes structured
+         * pricing that no longer exists, so it is cleared with
+         * it rather than left behind as a stale claim.
+         */
+        price_display: null,
         stripe_price_id: null,
         stripe_payment_link_id: null,
         stripe_payment_link_url: null,
@@ -416,6 +430,44 @@ export const clearPricing = async (
   if (error) {
     logDatabaseError(
       "pricing clear",
+      { serviceId },
+      error,
+    );
+
+    return { ok: false };
+  }
+
+  return { ok: true, value: null };
+};
+
+/*
+ * Repairs a stale or missing display string on a service that
+ * already carries structured pricing.
+ *
+ * Needed because rows priced before this formatter existed, or
+ * left behind by an interrupted provisioning, would otherwise
+ * keep advertising a value that no longer matches their pricing.
+ */
+export const persistPriceDisplay = async ({
+  serviceId,
+  priceDisplay,
+}: {
+  serviceId: string;
+  priceDisplay: string;
+}): Promise<
+  RepositoryResult<null>
+> => {
+  const { error } =
+    await supabaseAdmin
+      .from("services")
+      .update({
+        price_display: priceDisplay,
+      })
+      .eq("id", serviceId);
+
+  if (error) {
+    logDatabaseError(
+      "price display repair",
       { serviceId },
       error,
     );
@@ -524,10 +576,29 @@ export const countServiceReferences =
         return { ok: false };
       }
 
-      const tableCount = count ?? 0;
+      /*
+       * A missing count is not zero references.
+       *
+       * Treating null, undefined or NaN as zero would let a
+       * degraded count query authorise the deletion of a
+       * referenced service, orphaning historical records that
+       * section 13.5 requires be preserved. Anything that is not
+       * a finite number fails closed.
+       */
+      if (
+        typeof count !== "number" ||
+        !Number.isFinite(count)
+      ) {
+        console.error(
+          "Admin service reference count returned no usable value",
+          { serviceId, table },
+        );
 
-      references[table] = tableCount;
-      total += tableCount;
+        return { ok: false };
+      }
+
+      references[table] = count;
+      total += count;
     }
 
     return {

@@ -99,14 +99,33 @@ const buildMetadata = (
 };
 
 /*
- * Stable across retries of the same logical pricing, and
- * different across a genuine pricing change. Combined with the
- * Stripe idempotency key this is what makes a resumed create or
- * patch return the resource it already made rather than a second
- * one.
+ * Identifies a pricing *generation*, not merely a set of pricing
+ * values.
+ *
+ * The superseded Price and Payment Link identifiers are folded in
+ * deliberately. A fingerprint over the pricing values alone is
+ * stable across a revert: moving A -> B -> A reproduces the
+ * original key, Stripe replays the original response inside its
+ * 24 hour window, and the service ends up referencing the Price
+ * and Payment Link that were deactivated when B superseded A.
+ * Including the resources being replaced makes the second A a
+ * distinct generation, so it gets fresh, active resources.
+ *
+ * Stability is preserved where it matters: a retry of the same
+ * unfinished transition reads the same stored identifiers,
+ * because the database is only updated once the new generation is
+ * complete. The key therefore does not move under a retry.
  */
-export const computePricingFingerprint =
-  (pricing: StructuredPricing): string => {
+export const computeGenerationFingerprint =
+  ({
+    pricing,
+    previousPriceId,
+    previousPaymentLinkId,
+  }: {
+    pricing: StructuredPricing;
+    previousPriceId: string | null;
+    previousPaymentLinkId: string | null;
+  }): string => {
     return createHash("sha256")
       .update(
         [
@@ -115,6 +134,48 @@ export const computePricingFingerprint =
             "",
           String(pricing.priceCents),
           pricing.currency,
+          previousPriceId ?? "",
+          previousPaymentLinkId ?? "",
+        ].join("|"),
+      )
+      .digest("hex")
+      .slice(0, 32);
+  };
+
+/*
+ * Stripe rejects a reused idempotency key whose request
+ * parameters differ. The Product key therefore has to cover the
+ * parameters the Product is created with, or a name change
+ * between a first attempt and its retry produces a hard
+ * idempotency error that blocks provisioning for 24 hours.
+ *
+ * Description is normalised so that null, undefined and the empty
+ * string all fold to the same token, matching the fact that
+ * createProduct omits an empty description entirely.
+ */
+export const computeProductFingerprint =
+  ({
+    serviceId,
+    name,
+    description,
+  }: {
+    serviceId: string;
+    name: string;
+    description: string | null;
+  }): string => {
+    const metadata =
+      buildMetadata(serviceId);
+
+    return createHash("sha256")
+      .update(
+        [
+          name,
+          description ?? "",
+          String(
+            metadata.makehijrah_service_id,
+          ),
+          String(metadata.application),
+          String(metadata.environment),
         ].join("|"),
       )
       .digest("hex")
@@ -122,10 +183,6 @@ export const computePricingFingerprint =
   };
 
 export const buildProductIdempotencyKey =
-  (serviceId: string): string =>
-    `service-product-${serviceId}`;
-
-export const buildPriceIdempotencyKey =
   ({
     serviceId,
     fingerprint,
@@ -133,17 +190,60 @@ export const buildPriceIdempotencyKey =
     serviceId: string;
     fingerprint: string;
   }): string =>
-    `service-price-${serviceId}-${fingerprint}`;
+    `service-product-${serviceId}-${fingerprint}`;
+
+/*
+ * The attempt suffix is an escalation path, not a retry counter.
+ *
+ * It is only advanced when Stripe returns an inactive resource
+ * for a key, which cannot happen for a fresh generation but is
+ * possible if a historical key is somehow replayed. Escalation is
+ * deterministic, so a repeated request walks the same sequence
+ * and converges on the same resource rather than creating a new
+ * one each time.
+ */
+export const buildPriceIdempotencyKey =
+  ({
+    serviceId,
+    generation,
+    attempt,
+  }: {
+    serviceId: string;
+    generation: string;
+    attempt: number;
+  }): string =>
+    `service-price-${serviceId}-${generation}${
+      attempt > 0 ? `-r${attempt}` : ""
+    }`;
 
 export const buildLinkIdempotencyKey =
   ({
     serviceId,
-    fingerprint,
+    generation,
+    attempt,
   }: {
     serviceId: string;
-    fingerprint: string;
+    generation: string;
+    attempt: number;
   }): string =>
-    `service-link-${serviceId}-${fingerprint}`;
+    `service-link-${serviceId}-${generation}${
+      attempt > 0 ? `-r${attempt}` : ""
+    }`;
+
+/*
+ * A stored identifier that Stripe no longer knows about is stale
+ * rather than fatal: the correct response is to provision a
+ * replacement. Every other Stripe failure - authentication,
+ * permission, rate limiting, network - is a real error and must
+ * not be mistaken for a missing resource.
+ */
+export const isResourceMissing = (
+  failure: StripeFailure,
+): boolean => {
+  return (
+    failure.code === "resource_missing"
+  );
+};
 
 export const createProduct = async ({
   serviceId,
@@ -169,9 +269,17 @@ export const createProduct = async ({
         },
         {
           idempotencyKey:
-            buildProductIdempotencyKey(
+            buildProductIdempotencyKey({
               serviceId,
-            ),
+              fingerprint:
+                computeProductFingerprint(
+                  {
+                    serviceId,
+                    name,
+                    description,
+                  },
+                ),
+            }),
         },
       );
 
@@ -239,12 +347,14 @@ export const createPrice = async ({
   serviceId,
   stripeProductId,
   pricing,
-  fingerprint,
+  generation,
+  attempt,
 }: {
   serviceId: string;
   stripeProductId: string;
   pricing: StructuredPricing;
-  fingerprint: string;
+  generation: string;
+  attempt: number;
 }): Promise<
   StripeCallResult<Stripe.Price>
 > => {
@@ -273,7 +383,8 @@ export const createPrice = async ({
           idempotencyKey:
             buildPriceIdempotencyKey({
               serviceId,
-              fingerprint,
+              generation,
+              attempt,
             }),
         },
       );
@@ -301,11 +412,13 @@ export const createPrice = async ({
 export const createPaymentLink = async ({
   serviceId,
   stripePriceId,
-  fingerprint,
+  generation,
+  attempt,
 }: {
   serviceId: string;
   stripePriceId: string;
-  fingerprint: string;
+  generation: string;
+  attempt: number;
 }): Promise<
   StripeCallResult<Stripe.PaymentLink>
 > => {
@@ -332,7 +445,8 @@ export const createPaymentLink = async ({
           idempotencyKey:
             buildLinkIdempotencyKey({
               serviceId,
-              fingerprint,
+              generation,
+              attempt,
             }),
         },
       );
@@ -357,9 +471,17 @@ export const retrievePaymentLink =
     StripeCallResult<Stripe.PaymentLink>
   > => {
     try {
+      /*
+       * line_items must be expanded explicitly. Without it the
+       * field is absent from the response and the price
+       * correspondence check below can never actually run.
+       */
       const paymentLink =
         await stripe.paymentLinks.retrieve(
           stripePaymentLinkId,
+          {
+            expand: ["line_items"],
+          },
         );
 
       return {
@@ -460,25 +582,33 @@ export const archiveProduct = async (
  * and still sells the service's current Price. Anything else is
  * replaced rather than trusted (section 12.1.3).
  */
+/*
+ * A stored Payment Link is usable only when it is live and sells
+ * the service's current Price.
+ *
+ * Absent line items are treated as unusable rather than as
+ * "unknown, assume fine". The retrieval expands them explicitly,
+ * so absence means the link is structurally not what this service
+ * needs, and the safe response is to replace it. Assuming
+ * correspondence here would let a link pointing at a superseded
+ * Price survive activation unnoticed.
+ */
 export const paymentLinkMatchesPrice = (
   paymentLink: Stripe.PaymentLink,
   stripePriceId: string,
 ): boolean => {
-  if (!paymentLink.active) {
+  if (paymentLink.active === false) {
     return false;
   }
 
   const lineItems =
     paymentLink.line_items?.data;
 
-  if (!lineItems) {
-    /*
-     * line_items is not expanded by default. Absence is not
-     * evidence of a mismatch, so an active link is accepted and
-     * the price correspondence is enforced by the fact that the
-     * orchestrator created the link for that price.
-     */
-    return true;
+  if (
+    !lineItems ||
+    lineItems.length === 0
+  ) {
+    return false;
   }
 
   return lineItems.some(

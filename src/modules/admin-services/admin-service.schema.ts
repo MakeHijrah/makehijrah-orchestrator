@@ -342,6 +342,68 @@ export const toStructuredPricing = (
   };
 };
 
+const CURRENCY_SYMBOLS: Record<
+  ServiceCurrency,
+  string
+> = {
+  usd: "$",
+  gbp: "£",
+  eur: "€",
+};
+
+/*
+ * The single source of price_display, required by PROJECT_LOCK
+ * Amendment 004 section 6.2: where structured pricing exists,
+ * price_display is generated server-side. It is never accepted
+ * from a client and is not a database-generated column.
+ *
+ * Formatting is done by hand rather than through
+ * Intl/toLocaleString. Locale-aware output varies with the host's
+ * ICU data and default locale, which would make the stored string
+ * depend on which server wrote it.
+ *
+ *   15000 usd one_time        -> $150
+ *   1299  usd one_time        -> $12.99
+ *   9900  gbp recurring month -> £99/month
+ *   120000 eur recurring year -> €1,200/year
+ */
+export const formatPriceDisplay = (
+  pricing: StructuredPricing,
+): string => {
+  const symbol =
+    CURRENCY_SYMBOLS[pricing.currency];
+
+  const whole = Math.floor(
+    pricing.priceCents / 100,
+  );
+
+  const remainder =
+    pricing.priceCents % 100;
+
+  const groupedWhole = String(
+    whole,
+  ).replace(
+    /\B(?=(\d{3})+(?!\d))/g,
+    ",",
+  );
+
+  const amount =
+    remainder === 0
+      ? groupedWhole
+      : `${groupedWhole}.${String(
+          remainder,
+        ).padStart(2, "0")}`;
+
+  const suffix =
+    pricing.billingType ===
+      "recurring" &&
+    pricing.recurringInterval
+      ? `/${pricing.recurringInterval}`
+      : "";
+
+  return `${symbol}${amount}${suffix}`;
+};
+
 export type PatchPricingIntent =
   | { kind: "descriptive_only" }
   | {

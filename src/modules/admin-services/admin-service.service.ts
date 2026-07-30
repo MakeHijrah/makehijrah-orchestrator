@@ -22,12 +22,13 @@ import { randomUUID } from "node:crypto";
 import type { StripeFailure } from "./admin-service.stripe.js";
 import {
   archiveProduct,
-  computePricingFingerprint,
+  computeGenerationFingerprint,
   createPaymentLink,
   createPrice,
   createProduct,
   deactivatePaymentLink,
   deactivatePrice,
+  isResourceMissing,
   paymentLinkMatchesPrice,
   retrievePaymentLink,
   updateProductDescriptive,
@@ -51,6 +52,7 @@ import {
   deleteService as deleteServiceRow,
   getServiceById,
   insertService,
+  persistPriceDisplay,
   persistPricingAndStripeIdentifiers,
   persistProductId,
   setActiveState,
@@ -58,12 +60,20 @@ import {
   type ServiceRow,
 } from "./admin-service.repository.js";
 import {
+  formatPriceDisplay,
   interpretPatchPricing,
   toStructuredPricing,
   type CreateServiceBody,
   type PatchServiceBody,
   type StructuredPricing,
 } from "./admin-service.schema.js";
+
+/*
+ * Bounded escalation used only if Stripe replays an inactive
+ * resource for a generation key. Kept small: it is a safety net,
+ * not an expected path.
+ */
+const MAX_GENERATION_ATTEMPTS = 3;
 
 /*
  * Only the codes in API_CONTRACT.md section 0. Amendment 004
@@ -275,81 +285,176 @@ const provisionPricing = async ({
     }
   }
 
-  const fingerprint =
-    computePricingFingerprint(
+  /*
+   * The generation is derived from the resources being replaced,
+   * not from the pricing values alone, so a revert to a previous
+   * price is a new generation rather than a replay of the old
+   * one. See computeGenerationFingerprint.
+   */
+  const generation =
+    computeGenerationFingerprint({
       pricing,
+      previousPriceId:
+        service.stripe_price_id,
+      previousPaymentLinkId:
+        service.stripe_payment_link_id,
+    });
+
+  let priceId: string | null = null;
+
+  for (
+    let attempt = 0;
+    attempt < MAX_GENERATION_ATTEMPTS;
+    attempt += 1
+  ) {
+    const created = await createPrice({
+      serviceId,
+      stripeProductId: productId,
+      pricing,
+      generation,
+      attempt,
+    });
+
+    if (!created.ok) {
+      logStripeFailure(
+        "price creation",
+        {
+          serviceId,
+          generation,
+          attempt,
+        },
+        created.failure,
+      );
+
+      return {
+        ok: false,
+        stage: "price",
+        failure: {
+          ok: false,
+          code: "STRIPE_ERROR",
+          message:
+            GENERIC_STRIPE_MESSAGE,
+        },
+      };
+    }
+
+    /*
+     * An inactive Price must never become the current one. This
+     * should be unreachable now that the generation covers the
+     * superseded resources, so it is logged rather than silently
+     * escalated.
+     */
+    if (created.value.active !== false) {
+      priceId = created.value.id;
+      break;
+    }
+
+    console.error(
+      "Admin service received an inactive Stripe Price for a generation key",
+      {
+        serviceId,
+        generation,
+        attempt,
+        stripePriceId: created.value.id,
+      },
     );
+  }
 
-  const price = await createPrice({
-    serviceId,
-    stripeProductId: productId,
-    pricing,
-    fingerprint,
-  });
-
-  if (!price.ok) {
-    logStripeFailure(
-      "price creation",
-      { serviceId, fingerprint },
-      price.failure,
-    );
-
+  if (!priceId) {
     return {
       ok: false,
       stage: "price",
       failure: {
         ok: false,
         code: "STRIPE_ERROR",
-        message:
-          GENERIC_STRIPE_MESSAGE,
+        message: GENERIC_STRIPE_MESSAGE,
       },
     };
   }
 
-  const paymentLink =
-    await createPaymentLink({
-      serviceId,
-      stripePriceId: price.value.id,
-      fingerprint,
-    });
+  let linkId: string | null = null;
 
-  if (!paymentLink.ok) {
-    logStripeFailure(
-      "payment link creation",
+  let linkUrl: string | null = null;
+
+  for (
+    let attempt = 0;
+    attempt < MAX_GENERATION_ATTEMPTS;
+    attempt += 1
+  ) {
+    const created =
+      await createPaymentLink({
+        serviceId,
+        stripePriceId: priceId,
+        generation,
+        attempt,
+      });
+
+    if (!created.ok) {
+      logStripeFailure(
+        "payment link creation",
+        {
+          serviceId,
+          stripePriceId: priceId,
+          generation,
+          attempt,
+        },
+        created.failure,
+      );
+
+      return {
+        ok: false,
+        stage: "link",
+        failure: {
+          ok: false,
+          code: "STRIPE_ERROR",
+          message:
+            GENERIC_STRIPE_MESSAGE,
+        },
+      };
+    }
+
+    if (created.value.active !== false) {
+      linkId = created.value.id;
+      /*
+       * The URL is taken only from the Stripe response. It is
+       * never constructed or templated (section 8.3.3).
+       */
+      linkUrl = created.value.url;
+      break;
+    }
+
+    console.error(
+      "Admin service received an inactive Stripe Payment Link for a generation key",
       {
         serviceId,
-        stripePriceId:
-          price.value.id,
+        generation,
+        attempt,
+        stripePaymentLinkId:
+          created.value.id,
       },
-      paymentLink.failure,
     );
+  }
 
+  if (!linkId || !linkUrl) {
     return {
       ok: false,
       stage: "link",
       failure: {
         ok: false,
         code: "STRIPE_ERROR",
-        message:
-          GENERIC_STRIPE_MESSAGE,
+        message: GENERIC_STRIPE_MESSAGE,
       },
     };
   }
 
-  /*
-   * The URL is taken only from the Stripe response. It is never
-   * constructed or templated (section 8.3.3).
-   */
   const persisted =
     await persistPricingAndStripeIdentifiers(
       {
         serviceId,
         pricing,
-        stripePriceId: price.value.id,
-        stripePaymentLinkId:
-          paymentLink.value.id,
-        stripePaymentLinkUrl:
-          paymentLink.value.url,
+        stripePriceId: priceId,
+        stripePaymentLinkId: linkId,
+        stripePaymentLinkUrl: linkUrl,
       },
     );
 
@@ -1166,19 +1271,35 @@ export const activateService = async (
               link.failure,
             );
 
-            return {
-              ok: false,
-              code: "STRIPE_ERROR",
-              message:
-                GENERIC_STRIPE_MESSAGE,
-            };
-          }
+            /*
+             * A stored identifier Stripe no longer knows about is
+             * stale, not fatal: the link is treated as unusable
+             * and replaced below. Authentication, permission,
+             * rate limit and network failures are real errors and
+             * still fail the request, because retrying later is
+             * the correct response to those.
+             */
+            if (
+              !isResourceMissing(
+                link.failure,
+              )
+            ) {
+              return {
+                ok: false,
+                code: "STRIPE_ERROR",
+                message:
+                  GENERIC_STRIPE_MESSAGE,
+              };
+            }
 
-          linkUsable =
-            paymentLinkMatchesPrice(
-              link.value,
-              current.stripe_price_id,
-            );
+            linkUsable = false;
+          } else {
+            linkUsable =
+              paymentLinkMatchesPrice(
+                link.value,
+                current.stripe_price_id,
+              );
+          }
         }
 
         /*
@@ -1216,6 +1337,31 @@ export const activateService = async (
                 previousPriceId,
             },
           );
+        }
+
+        /*
+         * Activation is the natural repair point for a display
+         * string that predates this formatter, or that an
+         * interrupted provisioning left stale. A service is never
+         * published advertising a price it does not charge.
+         */
+        const expectedDisplay =
+          formatPriceDisplay(pricing);
+
+        if (
+          current.price_display !==
+          expectedDisplay
+        ) {
+          const repaired =
+            await persistPriceDisplay({
+              serviceId,
+              priceDisplay:
+                expectedDisplay,
+            });
+
+          if (!repaired.ok) {
+            return internal();
+          }
         }
 
         const activated =

@@ -82,6 +82,19 @@ const setTableRows = (table: string, rows: Row[]): void => {
 
 let dbFailures: DbFailure[] = [];
 
+/*
+ * Lets a test return a count query that succeeded but carries no
+ * usable number, which is the shape the fail-closed guard exists
+ * for.
+ */
+type CountOverride = {
+  table: string;
+  value: unknown;
+  remaining: number;
+};
+
+let countOverrides: CountOverride[] = [];
+
 const takeDbFailure = (
   table: string,
   op: DbFailure["op"],
@@ -221,6 +234,16 @@ class FakeQuery {
     const matched = rows.filter((row) => this.matches(row));
 
     if (this.countMode) {
+      const override = countOverrides.find(
+        (candidate) =>
+          candidate.table === this.table && candidate.remaining > 0,
+      );
+
+      if (override) {
+        override.remaining -= 1;
+        return { data: null, error: null, count: override.value };
+      }
+
       return { data: null, error: null, count: matched.length };
     }
 
@@ -236,21 +259,57 @@ type StripeCall = { op: string; args: unknown[] };
 
 let stripeCalls: StripeCall[] = [];
 let stripeFailures = new Map<string, number>();
-let idempotencyStore = new Map<string, Row>();
+let idempotencyStore = new Map<string, { params: unknown; value: Row }>();
 let stripeSequence = 0;
 
 const callsOf = (op: string): StripeCall[] =>
   stripeCalls.filter((call) => call.op === op);
 
 class FakeStripeError extends Error {
-  type = "api_error";
-  code = "resource_missing";
+  type: string;
+  code: string;
+  requestId = "req_secret_12345";
+
+  constructor(code = "card_declined", type = "api_error") {
+    super("Stripe said: card was declined (decline_code: do_not_honor)");
+    this.code = code;
+    this.type = type;
+  }
+}
+
+/*
+ * Stripe rejects a reused idempotency key whose parameters
+ * differ. Modelling that is the only way a test can prove the
+ * Product key covers its parameters.
+ */
+class FakeStripeIdempotencyError extends Error {
+  type = "invalid_request_error";
+  code = "idempotency_error";
   requestId = "req_secret_12345";
 
   constructor() {
-    super("Stripe said: card was declined (decline_code: do_not_honor)");
+    super(
+      "Keys for idempotent requests can only be used with the same parameters they were first used with.",
+    );
   }
 }
+
+type PaymentLinkState = {
+  active: boolean;
+  priceId: string | null;
+};
+
+const paymentLinkState = new Map<string, PaymentLinkState>();
+let stripeFailureCodes = new Map<string, string>();
+
+/*
+ * Populated only when the fake actually mints a new object. An
+ * idempotent replay returns the cached value without touching
+ * these, so their size is the true count of resources created.
+ */
+const mintedProducts = new Set<string>();
+const mintedPrices = new Set<string>();
+const mintedLinks = new Set<string>();
 
 /*
  * Lets a test hold a Stripe call open so a second request runs
@@ -294,20 +353,39 @@ const stripeCall = async <T extends Row>(
 
   if (remaining > 0) {
     stripeFailures.set(op, remaining - 1);
-    throw new FakeStripeError();
+    throw new FakeStripeError(
+      stripeFailureCodes.get(op) ?? "card_declined",
+      stripeFailureCodes.get(op) === "resource_missing"
+        ? "invalid_request_error"
+        : "api_error",
+    );
   }
 
   if (idempotencyKey) {
     const existing = idempotencyStore.get(idempotencyKey);
+
     if (existing) {
-      return existing as T;
+      /*
+       * Same key, different parameters is an error in Stripe, not
+       * a silent replay.
+       */
+      if (
+        JSON.stringify(existing.params) !== JSON.stringify(args[0] ?? null)
+      ) {
+        throw new FakeStripeIdempotencyError();
+      }
+
+      return existing.value as T;
     }
   }
 
   const created = build();
 
   if (idempotencyKey) {
-    idempotencyStore.set(idempotencyKey, created);
+    idempotencyStore.set(idempotencyKey, {
+      params: args[0] ?? null,
+      value: created,
+    });
   }
 
   return created;
@@ -327,9 +405,23 @@ const installStubs = (): void => {
   dbFailures = [];
   stripeCalls = [];
   stripeFailures = new Map();
+  stripeFailureCodes = new Map();
   idempotencyStore = new Map();
+  paymentLinkState.clear();
+  mintedProducts.clear();
+  mintedPrices.clear();
+  mintedLinks.clear();
   stripeSequence = 0;
   redisStore.clear();
+  countOverrides = [];
+
+  /*
+   * Reset unconditionally. A concurrency test that fails between
+   * opening and releasing the gate would otherwise leave it held,
+   * blocking every later test that touches the gated Stripe call
+   * and burying the original failure.
+   */
+  stripeGate = null;
 
   supabaseAdmin.from = ((table: string) =>
     new FakeQuery(table)) as unknown as typeof supabaseAdmin.from;
@@ -353,10 +445,11 @@ const installStubs = (): void => {
   } as unknown as typeof supabaseAdmin.auth;
 
   stripe.products.create = (async (params: Row, options?: Row) =>
-    stripeCall("products.create", [params], options?.idempotencyKey as string, () => ({
-      id: `prod_${++stripeSequence}`,
-      active: true,
-    }))) as unknown as typeof stripe.products.create;
+    stripeCall("products.create", [params], options?.idempotencyKey as string, () => {
+      const id = `prod_${++stripeSequence}`;
+      mintedProducts.add(id);
+      return { id, active: true };
+    })) as unknown as typeof stripe.products.create;
 
   stripe.products.update = (async (id: string, params: Row) =>
     stripeCall("products.update", [id, params], undefined, () => ({
@@ -365,10 +458,11 @@ const installStubs = (): void => {
     }))) as unknown as typeof stripe.products.update;
 
   stripe.prices.create = (async (params: Row, options?: Row) =>
-    stripeCall("prices.create", [params], options?.idempotencyKey as string, () => ({
-      id: `price_${++stripeSequence}`,
-      active: true,
-    }))) as unknown as typeof stripe.prices.create;
+    stripeCall("prices.create", [params], options?.idempotencyKey as string, () => {
+      const id = `price_${++stripeSequence}`;
+      mintedPrices.add(id);
+      return { id, active: true };
+    })) as unknown as typeof stripe.prices.create;
 
   stripe.prices.update = (async (id: string, params: Row) =>
     stripeCall("prices.update", [id, params], undefined, () => ({
@@ -383,23 +477,60 @@ const installStubs = (): void => {
       options?.idempotencyKey as string,
       () => {
         const id = `plink_${++stripeSequence}`;
+        const lineItems = params.line_items as { price: string }[];
+        const priceId = lineItems[0]?.price ?? null;
+
+        mintedLinks.add(id);
+        paymentLinkState.set(id, { active: true, priceId });
+
         return { id, url: `https://buy.stripe.test/${id}`, active: true };
       },
     )) as unknown as typeof stripe.paymentLinks.create;
 
   stripe.paymentLinks.update = (async (id: string, params: Row) =>
-    stripeCall("paymentLinks.update", [id, params], undefined, () => ({
-      id,
-      active: params.active !== false,
-      url: `https://buy.stripe.test/${id}`,
-    }))) as unknown as typeof stripe.paymentLinks.update;
+    stripeCall("paymentLinks.update", [id, params], undefined, () => {
+      const state = paymentLinkState.get(id);
 
-  stripe.paymentLinks.retrieve = (async (id: string) =>
-    stripeCall("paymentLinks.retrieve", [id], undefined, () => ({
-      id,
-      active: true,
-      url: `https://buy.stripe.test/${id}`,
-    }))) as unknown as typeof stripe.paymentLinks.retrieve;
+      if (state && params.active === false) {
+        state.active = false;
+      }
+
+      return {
+        id,
+        active: params.active !== false,
+        url: `https://buy.stripe.test/${id}`,
+      };
+    })) as unknown as typeof stripe.paymentLinks.update;
+
+  /*
+   * Mirrors the real API: line_items appear only when expanded.
+   */
+  stripe.paymentLinks.retrieve = (async (id: string, params?: Row) =>
+    stripeCall("paymentLinks.retrieve", [id, params], undefined, () => {
+      const state = paymentLinkState.get(id) ?? {
+        active: true,
+        priceId: null,
+      };
+
+      const expanded = (params?.expand as string[] | undefined)?.includes(
+        "line_items",
+      );
+
+      return {
+        id,
+        active: state.active,
+        url: `https://buy.stripe.test/${id}`,
+        ...(expanded
+          ? {
+              line_items: {
+                data: state.priceId
+                  ? [{ price: { id: state.priceId } }]
+                  : [],
+              },
+            }
+          : {}),
+      };
+    })) as unknown as typeof stripe.paymentLinks.retrieve;
 
   redis.set = (async (
     key: string,
@@ -544,17 +675,25 @@ const seedService = (overrides: Row = {}): Row => {
   return row;
 };
 
-const seedPricedActive = () =>
-  seedService({
+const seedPricedActive = (overrides: Row = {}) => {
+  paymentLinkState.set("plink_seed", {
+    active: true,
+    priceId: "price_seed",
+  });
+
+  return seedService({
     is_active: true,
     billing_type: "one_time",
     price_cents: 50_000,
     currency: "usd",
+    price_display: "$500",
     stripe_product_id: "prod_seed",
     stripe_price_id: "price_seed",
     stripe_payment_link_id: "plink_seed",
     stripe_payment_link_url: "https://buy.stripe.test/plink_seed",
+    ...overrides,
   });
+};
 
 describe("admin services: authorization", () => {
   beforeEach(installStubs);
@@ -865,12 +1004,17 @@ describe("admin services: POST idempotency", () => {
 
       assert.equal(retry.statusCode, 200);
       assert.equal(db.services.length, 1, "exactly one service row");
-      assert.equal(callsOf("products.create").length <= 2, true);
 
-      const created = new Set(
-        callsOf("products.create").map(() => "").filter(Boolean),
+      /*
+       * The Product must be created at most once across the
+       * failure and the retry, and every Product create must have
+       * resolved to the same object.
+       */
+      assert.equal(
+        mintedProducts.size,
+        1,
+        "exactly one Product minted across failure and retry",
       );
-      assert.equal(created.size, 0);
 
       const service = retry.body.data?.service as Row;
       assert.equal(service.id, failed.body.error?.details?.service_id);
@@ -1479,6 +1623,41 @@ describe("admin services: concurrency and sanitisation", () => {
     assert.equal(callsOf("paymentLinks.create").length, 1);
   });
 
+  it("keeps the race safe when a stale worker resumes after takeover", async () => {
+    stripeFailures.set("prices.create", 1);
+
+    const failed = await createPriced();
+    assert.equal(failed.statusCode, 502);
+
+    const key = [...redisStore.keys()].find((k) =>
+      k.startsWith("service:create:"),
+    );
+    assert.ok(key);
+
+    const stale = redisStore.get(key) as string;
+
+    const record = JSON.parse(stale);
+    record.status = "in_progress";
+    record.lease_expires_at = new Date(Date.now() - 60_000).toISOString();
+    redisStore.set(key, JSON.stringify(record));
+
+    /* Worker B takes over and completes. */
+    const takeover = await createPriced();
+    assert.equal(takeover.statusCode, 200);
+
+    /* Worker A resumes against its now-stale view and must not win. */
+    redisStore.set(key, stale);
+    const resumed = await createPriced();
+
+    assert.equal(db.services.length, 1, "one row across both workers");
+    assert.equal(mintedProducts.size, 1, "one Product across both workers");
+    assert.equal(mintedLinks.size, 1, "one Payment Link across both workers");
+
+    const row = db.services[0] as Row;
+    assert.equal(row.stripe_payment_link_id, [...mintedLinks][0]);
+    assert.ok(resumed.statusCode === 200 || resumed.statusCode === 409);
+  });
+
   it("never leaks Stripe error detail to the client", async () => {
     seedService({
       billing_type: "one_time",
@@ -1501,5 +1680,441 @@ describe("admin services: concurrency and sanitisation", () => {
     assert.equal(serialised.includes("declined"), false);
     assert.equal(serialised.includes("api_error"), false);
     assert.equal(serialised.includes("resource_missing"), false);
+  });
+});
+
+describe("admin services: pricing generations", () => {
+  beforeEach(installStubs);
+
+  it("creates fresh resources when pricing reverts to a previous value", async () => {
+    /*
+     * A is created through the API so its Stripe idempotency keys
+     * are genuinely recorded. Seeding the row instead would leave
+     * no cached response for A, and the replay this test exists
+     * to catch could not occur.
+     */
+    const created = await createPriced();
+    assert.equal(created.statusCode, 200);
+
+    const serviceId = (created.body.data?.service as Row).id as string;
+    const originalPriceId = (created.body.data?.service as Row)
+      .stripe_price_id as string;
+    const originalLinkId = (created.body.data?.service as Row)
+      .stripe_payment_link_id as string;
+
+    const SERVICE_ID = serviceId;
+
+    const toB = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: { billing_type: "one_time", price_cents: 75_000, currency: "eur" },
+    });
+
+    assert.equal(toB.statusCode, 200);
+
+    /* Snapshot: db rows are live objects mutated in place. */
+    const afterB = { ...(db.services[0] as Row) };
+    assert.notEqual(afterB.stripe_price_id, originalPriceId);
+    assert.notEqual(afterB.stripe_payment_link_id, originalLinkId);
+
+    /* A's resources were retired. */
+    assert.equal(paymentLinkState.get(originalLinkId)?.active, false);
+
+    const backToA = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: { billing_type: "one_time", price_cents: 50_000, currency: "usd" },
+    });
+
+    assert.equal(backToA.statusCode, 200);
+
+    const service = backToA.body.data?.service as Row;
+
+    assert.equal(service.price_cents, 50_000);
+    assert.equal(service.currency, "usd");
+
+    /* The second A must not resurrect the first A's retired pair. */
+    assert.notEqual(service.stripe_price_id, originalPriceId);
+    assert.notEqual(service.stripe_payment_link_id, originalLinkId);
+    assert.notEqual(service.stripe_payment_link_id, afterB.stripe_payment_link_id);
+
+    const currentLink = paymentLinkState.get(
+      service.stripe_payment_link_id as string,
+    );
+
+    assert.equal(currentLink?.active, true, "current Link is live");
+    assert.equal(currentLink?.priceId, service.stripe_price_id);
+
+    assert.equal(mintedPrices.size, 3, "a new Price for each of A, B and A'");
+    assert.equal(mintedLinks.size, 3, "a new Link for each of A, B and A'");
+  });
+
+  it("keeps the key stable when the same transition is retried", async () => {
+    seedPricedActive();
+    stripeFailures.set("paymentLinks.create", 1);
+
+    const failed = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: { billing_type: "one_time", price_cents: 75_000, currency: "eur" },
+    });
+
+    assert.equal(failed.statusCode, 502);
+
+    const retry = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: { billing_type: "one_time", price_cents: 75_000, currency: "eur" },
+    });
+
+    assert.equal(retry.statusCode, 200);
+    assert.equal(mintedPrices.size, 1, "retry reused the in-flight Price");
+    assert.equal(mintedLinks.size, 1);
+  });
+});
+
+describe("admin services: Product idempotency parameters", () => {
+  beforeEach(installStubs);
+
+  it("survives a name change between Product creation and its retry", async () => {
+    /* Product is created, then persisting its id fails. */
+    dbFailures.push({
+      table: "services",
+      op: "update",
+      column: "stripe_product_id",
+      remaining: 1,
+    });
+
+    const failed = await createPriced();
+    assert.equal(failed.statusCode, 500);
+
+    const serviceId = failed.body.error?.details?.service_id as string;
+    assert.ok(serviceId);
+    assert.equal(mintedProducts.size, 1);
+
+    /*
+     * The administrator renames the service before retrying. With
+     * a parameter-blind key this retry would hit Stripe's
+     * idempotency-parameter error and stay stuck for 24 hours.
+     */
+    const row = db.services[0] as Row;
+    row.name = "Renamed Before Retry";
+
+    const retry = await createPriced();
+
+    assert.equal(
+      retry.statusCode,
+      200,
+      "no Stripe idempotency-parameter error",
+    );
+
+    const service = retry.body.data?.service as Row;
+    assert.ok(service.stripe_product_id);
+    assert.ok(service.stripe_payment_link_id);
+    assert.equal(db.services.length, 1, "one service row");
+    assert.equal(
+      new Set(db.services.map((r) => r.stripe_product_id)).size,
+      1,
+      "one Product stored on the row",
+    );
+  });
+
+  it("rejects a reused key with different parameters, proving the fake is strict", async () => {
+    await createPriced();
+
+    const key = callsOf("products.create").length;
+    assert.equal(key, 1);
+
+    /*
+     * Directly re-invoking the stub with the same key but altered
+     * params must throw, otherwise the test above proves nothing.
+     */
+    await assert.rejects(async () => {
+      await stripe.products.create(
+        { name: "Different", metadata: {} } as never,
+        { idempotencyKey: [...idempotencyStore.keys()][0] } as never,
+      );
+    });
+  });
+});
+
+describe("admin services: reference counting fails closed", () => {
+  beforeEach(installStubs);
+
+  const invalidCounts: [string, unknown][] = [
+    ["null", null],
+    ["undefined", undefined],
+    ["NaN", Number.NaN],
+  ];
+
+  for (const [label, value] of invalidCounts) {
+    it(`refuses deletion when a count is ${label}`, async () => {
+      seedPricedActive({ is_active: false });
+
+      countOverrides.push({
+        table: "service_recommendations",
+        value,
+        remaining: 1,
+      });
+
+      const response = await request({
+        method: "DELETE",
+        url: `/api/admin/services/${SERVICE_ID}?confirm=true`,
+      });
+
+      assert.equal(response.statusCode, 500);
+      assert.equal(response.body.error?.code, "INTERNAL");
+      assert.equal(stripeCalls.length, 0, "no Stripe teardown");
+      assert.equal(db.services.length, 1, "row retained");
+    });
+  }
+
+  it("refuses deletion when the second table returns an invalid count", async () => {
+    seedPricedActive({ is_active: false });
+
+    countOverrides.push({
+      table: "service_requests",
+      value: null,
+      remaining: 1,
+    });
+
+    const response = await request({
+      method: "DELETE",
+      url: `/api/admin/services/${SERVICE_ID}?confirm=true`,
+    });
+
+    assert.equal(response.statusCode, 500);
+    assert.equal(stripeCalls.length, 0);
+    assert.equal(db.services.length, 1);
+  });
+});
+
+describe("admin services: Payment Link verification", () => {
+  beforeEach(installStubs);
+
+  it("reuses an active Link that references the expected Price", async () => {
+    seedPricedActive({ is_active: false });
+
+    const response = await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(mintedLinks.size, 0, "existing Link reused");
+    assert.equal((db.services[0] as Row).stripe_payment_link_id, "plink_seed");
+  });
+
+  it("replaces a Link that references another Price", async () => {
+    seedPricedActive({ is_active: false });
+    paymentLinkState.set("plink_seed", {
+      active: true,
+      priceId: "price_somethingelse",
+    });
+
+    const response = await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(mintedLinks.size, 1, "replacement Link created");
+    assert.notEqual(
+      (db.services[0] as Row).stripe_payment_link_id,
+      "plink_seed",
+    );
+  });
+
+  it("replaces an inactive Link", async () => {
+    seedPricedActive({ is_active: false });
+    paymentLinkState.set("plink_seed", {
+      active: false,
+      priceId: "price_seed",
+    });
+
+    const response = await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(mintedLinks.size, 1);
+  });
+
+  it("replaces a Link with no usable line item", async () => {
+    seedPricedActive({ is_active: false });
+    paymentLinkState.set("plink_seed", { active: true, priceId: null });
+
+    const response = await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(mintedLinks.size, 1);
+  });
+
+  it("expands line items when retrieving the Link", async () => {
+    seedPricedActive({ is_active: false });
+
+    await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    const params = callsOf("paymentLinks.retrieve")[0]?.args[1] as Row;
+    assert.deepEqual(params.expand, ["line_items"]);
+  });
+});
+
+describe("admin services: resource_missing reconciliation", () => {
+  beforeEach(installStubs);
+
+  it("replaces a stored Link that Stripe no longer knows about", async () => {
+    seedPricedActive({ is_active: false });
+    stripeFailures.set("paymentLinks.retrieve", 1);
+    stripeFailureCodes.set("paymentLinks.retrieve", "resource_missing");
+
+    const response = await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    assert.equal(response.statusCode, 200);
+
+    const service = response.body.data?.service as Row;
+    assert.notEqual(service.stripe_payment_link_id, "plink_seed");
+    assert.equal(mintedLinks.size, 1, "replacement persisted");
+    assert.equal(service.is_active, true, "activation happened last");
+
+    const serialised = JSON.stringify(response.body);
+    assert.equal(serialised.includes("resource_missing"), false);
+  });
+
+  it("still fails on a non-resource_missing retrieval error", async () => {
+    seedPricedActive({ is_active: false });
+    stripeFailures.set("paymentLinks.retrieve", 1);
+    stripeFailureCodes.set("paymentLinks.retrieve", "rate_limit");
+
+    const response = await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    assert.equal(response.statusCode, 502);
+    assert.equal(response.body.error?.code, "STRIPE_ERROR");
+    assert.equal((db.services[0] as Row).is_active, false);
+    assert.equal(mintedLinks.size, 0);
+  });
+});
+
+describe("admin services: price_display", () => {
+  beforeEach(installStubs);
+
+  const formatterCases: [Row, string][] = [
+    [{ billing_type: "one_time", price_cents: 15_000, currency: "usd" }, "$150"],
+    [{ billing_type: "one_time", price_cents: 1_299, currency: "usd" }, "$12.99"],
+    [
+      {
+        billing_type: "recurring",
+        recurring_interval: "month",
+        price_cents: 9_900,
+        currency: "gbp",
+      },
+      "£99/month",
+    ],
+    [
+      {
+        billing_type: "recurring",
+        recurring_interval: "year",
+        price_cents: 120_000,
+        currency: "eur",
+      },
+      "€1,200/year",
+    ],
+    [{ billing_type: "one_time", price_cents: 1, currency: "usd" }, "$0.01"],
+    [
+      { billing_type: "one_time", price_cents: 100_000_00, currency: "usd" },
+      "$100,000",
+    ],
+  ];
+
+  for (const [pricing, expected] of formatterCases) {
+    it(`formats ${JSON.stringify(pricing)} as ${expected}`, async () => {
+      const response = await createPriced(KEY_A, {
+        name: "Formatted",
+        ...pricing,
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(
+        (response.body.data?.service as Row).price_display,
+        expected,
+      );
+    });
+  }
+
+  it("regenerates price_display on a pricing change", async () => {
+    seedPricedActive();
+
+    const response = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: {
+        billing_type: "recurring",
+        recurring_interval: "month",
+        price_cents: 9_900,
+        currency: "gbp",
+      },
+    });
+
+    assert.equal(
+      (response.body.data?.service as Row).price_display,
+      "£99/month",
+    );
+  });
+
+  it("clears price_display when pricing is cleared", async () => {
+    seedPricedActive({ is_active: false });
+
+    const response = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: {
+        billing_type: null,
+        recurring_interval: null,
+        price_cents: null,
+        currency: null,
+      },
+    });
+
+    assert.equal((response.body.data?.service as Row).price_display, null);
+  });
+
+  it("repairs a stale price_display during activation", async () => {
+    seedPricedActive({ is_active: false, price_display: "wrong legacy text" });
+
+    const response = await request({
+      method: "POST",
+      url: `/api/admin/services/${SERVICE_ID}/activate`,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal((response.body.data?.service as Row).price_display, "$500");
+  });
+
+  it("leaves an unpriced legacy value untouched", async () => {
+    seedService({ price_display: "legacy free text" });
+
+    const response = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: { name: "Renamed" },
+    });
+
+    assert.equal(
+      (response.body.data?.service as Row).price_display,
+      "legacy free text",
+    );
   });
 });
