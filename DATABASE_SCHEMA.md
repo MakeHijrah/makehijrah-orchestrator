@@ -1,7 +1,7 @@
 # MakeHijrah Relocation OS — DATABASE_SCHEMA.md
 
 **Version:** 1.0 (draft for Dave's review)
-**Scope:** Exactly the 15 locked tables. All additions from Dave's response (2026-07) incorporated.
+**Scope:** Exactly the 16 locked tables (15 original + `app_settings`, authorised by PROJECT_LOCK Amendment 007). All additions from Dave's response (2026-07) incorporated.
 **Conventions:** All timestamps `timestamptz` in UTC. All PKs `uuid default gen_random_uuid()` unless noted. IANA timezones only.
 
 ---
@@ -185,6 +185,7 @@ create table consultations (
   price_cents integer not null,
   currency text not null default 'usd',
   stripe_payment_intent_id text unique,
+  stripe_mode text,                           -- Amendment 007, migration 025; null when no PaymentIntent
   payment_authorized_at timestamptz,
   accepted_at timestamptz,
   declined_at timestamptz,
@@ -197,9 +198,13 @@ create table consultations (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint consultation_end_after_start check (scheduled_end_at > scheduled_start_at),
-  constraint consultation_currency_lowercase check (currency = lower(currency))
+  constraint consultation_currency_lowercase check (currency = lower(currency)),
+  constraint consultations_stripe_mode_check
+    check (stripe_mode is null or stripe_mode in ('test', 'live'))
 );
 ```
+
+**`stripe_mode` (Amendment 007, migration 025).** Records the Stripe mode under which this consultation's PaymentIntent was created. It is the authoritative selector for every later capture, cancellation or refund, so a change to the global `app_settings.stripe_mode` never redirects an existing payment to the wrong Stripe account. Null when no PaymentIntent exists. Existing rows carrying a PaymentIntent were backfilled to `'test'`.
 
 **The race-condition index (day one, non-negotiable):**
 
@@ -467,6 +472,51 @@ No redemption tracking.
 
 ---
 
+## 16. `app_settings`
+
+Added by **PROJECT_LOCK Amendment 007**, applied as migration 025. The sixteenth and final table. A singleton row of explicitly typed operational settings, read and written **only** by the orchestrator service role.
+
+```sql
+create table app_settings (
+  id uuid primary key default gen_random_uuid(),
+  is_singleton boolean not null default true,
+  consultation_price_cents integer not null,
+  consultation_currency text not null default 'usd',
+  consultation_duration_minutes integer not null,
+  stripe_mode text not null,
+  support_email text,
+  default_timezone text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  updated_by_admin_profile_id uuid references profiles(id),
+  constraint app_settings_singleton_check check (is_singleton),
+  constraint app_settings_singleton_unique unique (is_singleton),
+  constraint app_settings_stripe_mode_check check (stripe_mode in ('test', 'live')),
+  constraint app_settings_currency_check check (consultation_currency = 'usd'),
+  constraint app_settings_price_bounds_check
+    check (consultation_price_cents between 100 and 1000000),
+  constraint app_settings_duration_bounds_check
+    check (consultation_duration_minutes between 15 and 240),
+  constraint app_settings_support_email_check
+    check (support_email is null
+           or support_email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'),
+  constraint app_settings_default_timezone_check
+    check (btrim(default_timezone) <> '')
+);
+```
+
+**Singleton enforcement:** `is_singleton` is constrained to `true` and carries a unique constraint, so a second row is rejected by the database. No trigger, no fixed magic UUID, no `count(*)` race. Reads use `select ... limit 1`.
+
+**Seeded values** (the values already in force, so applying the migration changes no behaviour): price `15000`, currency `usd`, duration `60`, `stripe_mode` `test`, `support_email` `null`, `default_timezone` `Africa/Cairo`.
+
+**Contains no secret of any kind.** Stripe secret keys and webhook signing secrets live only in Railway environment variables — `STRIPE_TEST_SECRET_KEY`, `STRIPE_TEST_WEBHOOK_SECRET`, `STRIPE_LIVE_SECRET_KEY`, `STRIPE_LIVE_WEBHOOK_SECRET`. `app_settings.stripe_mode` selects between them and never stores them.
+
+**Access:** RLS enabled with **zero policies**, and all privileges revoked from `anon` and `authenticated`. Only the service role reaches this table. Not in the `supabase_realtime` publication. See `RLS_POLICY_PLAN.md` §2.
+
+**Deliberately absent:** `consultant_acceptance_timeout_hours` (deferred by Amendment 007 §7 — the 48-hour timeout remains hardcoded in both the orchestrator scheduler and `finalize_authorization_timeout`), any JSON settings blob, any key/value column, and any credential field.
+
+---
+
 ## `updated_at` trigger (shared)
 
 ```sql
@@ -478,7 +528,7 @@ begin
 end $$;
 ```
 
-Attached to: `profiles`, `consultants`, `oauth_connections`, `consultations`, `consultation_notes`, `services`, `service_requests`.
+Attached to: `profiles`, `consultants`, `oauth_connections`, `consultations`, `consultation_notes`, `services`, `service_requests`, `app_settings` (trigger `set_app_settings_updated_at`, migration 025).
 
 ## `profiles` auto-creation trigger
 
@@ -504,6 +554,7 @@ Role stays `client` by default; consultant role is granted by the orchestrator d
 
 1. `country_id IS NULL` is the **only** signal for a general consultation. No `is_general` boolean — one source of truth.
 2. ~~`services.price_display` stays text. No `price_cents` on `services` in v1.0.~~ **Superseded by PROJECT_LOCK Amendment 004 (approved), applied as migration 022.** `services` now carries structured pricing (`billing_type`, `recurring_interval`, `price_cents`, `currency`) and orchestrator-owned Stripe identifiers. `price_display` is retained for compatibility and server-generated display text. See §10.
-3. One storage bucket `public-media` with prefixes `avatars/{auth.uid()}/*`, `consultants/{auth.uid()}/*`, `giveaways/*`.
+3. One storage bucket `public-media` with prefixes `avatars/{auth.uid()}/*`, `consultants/{auth.uid()}/*`, `giveaways/*`. **Unchanged by Amendment 007** — the admin avatar reuses this exact path, with no new bucket, column or policy.
+4. The global consultation price is `app_settings.consultation_price_cents`, not an environment variable (Amendment 007, migration 025). It is snapshotted into `consultations.price_cents` at draft creation, so existing consultations and drafts never change price.
 
-**Schema status: FROZEN v1.0** (post Dave's four required edits, all applied above).
+**Schema status: FROZEN v1.1** — v1.0 plus Amendment 004 (`services` structured pricing, migration 022), Amendment 005 (nullable `messages.consultation_id`, migrations 023–024) and Amendment 007 (`app_settings` plus `consultations.stripe_mode`, migration 025). Table count is **16**. Any further table requires a new amendment.

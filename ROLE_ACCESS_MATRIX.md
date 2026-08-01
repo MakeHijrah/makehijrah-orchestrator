@@ -45,6 +45,9 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | View payments log | ❌ | ❌ | ❌ | ✅ | RLS read |
 | View intake answers | ❌ | ✅ own | ✅ assigned | ✅ all | RLS read |
 | Change any user's role | ❌ | ❌ | ❌ | ❌ (manual/seeded or orchestrator) | 🔧 / SQL |
+| View public settings (price, currency, duration) | ✅ | ✅ | ✅ | ✅ | 🔧 `GET /api/public/settings` (Phase 2) |
+| View/manage admin settings | ❌ | ❌ | ❌ | ✅ orchestrator only | 🔧 Phase 2 endpoints — never RLS |
+| Switch Stripe mode (test/live) | ❌ | ❌ | ❌ | ✅ orchestrator only | 🔧 Phase 2; credentials stay in Railway |
 
 ---
 
@@ -67,15 +70,22 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | payments | ❌ | ❌ | ❌ | R |
 | messages | ❌ | R/W participant | R/W participant | R |
 | giveaways | ❌ | R active | R active | R/W |
+| app_settings | ❌ | ❌ | ❌ | ❌⁵ |
 
 ¹ excluding `role`, `email` (trigger-guarded)
 ² excluding `is_active`, `available_for_general`, `profile_id` (trigger-guarded)
 ³ insert as `proposed`, delete own while `proposed`; cannot set `sent`
 ⁴ **read only.** No authenticated role — admin included — holds raw `INSERT`, `UPDATE` or `DELETE` on `services`. Migration 022 revoked those grants and dropped the three admin write policies; `services_select_active` is all that remains. Catalog mutations are performed by the orchestrator under the service role, via the endpoints in §1.
 
+⁵ **no browser access at all, admin included.** Migration 025 enables RLS on `app_settings` with **zero policies** and revokes all privileges from `anon` and `authenticated`, so the table is unreachable from the browser by construction rather than by convention. Admins read and write settings only through orchestrator endpoints (Phase 2). The table contains no secret: Stripe credentials remain solely in Railway environment variables, and `stripe_mode` merely selects between them.
+
 **All status transitions on `consultations` and all `payments` writes: service role only. No exceptions.**
 
 **All `services` mutations — pricing, Stripe resource IDs, activation, deactivation, deletion: service role only, through the orchestrator. No exceptions.**
+
+**All `app_settings` reads and writes: service role only, through the orchestrator. No exceptions.** (Amendment 007.)
+
+**Admin avatar is unchanged by Amendment 007.** It continues to use own-profile RLS write on `profiles.avatar_url` plus the existing `public-media` bucket at prefix `avatars/{auth.uid()}/*` — the same path as every other role, per the "Edit own profile" row above. No new endpoint, bucket, column or storage policy, and no avatar data in `app_settings`.
 
 ---
 

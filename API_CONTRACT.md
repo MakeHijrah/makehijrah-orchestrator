@@ -97,7 +97,9 @@ Body:
 }
 ```
 
-Server: re-validate slot exactly as `GET /api/availability` (fresh FreeBusy, bypass cache) → insert `consultations` (status `draft`, price snapshot from env, `end_at = start + 60min`) + `consultation_intake` in one transaction → unique index is the final referee.
+Server: re-validate slot exactly as `GET /api/availability` (fresh FreeBusy, bypass cache) → insert `consultations` (status `draft`, price snapshot from `app_settings`, `end_at = start + consultation_duration_minutes`) + `consultation_intake` in one transaction → unique index is the final referee.
+
+**Price source (PROJECT_LOCK Amendment 007, migration 025).** The price is read from `app_settings.consultation_price_cents`, not from an environment variable, and is **snapshotted** into `consultations.price_cents` at draft creation. An admin price change therefore affects newly created consultations only; existing consultations and existing drafts keep their original price. Checkout always takes its amount from `consultations.price_cents`. The client never submits, controls or influences the amount — there is no price field in this request body and none is accepted. *Until Phase 2 ships, the orchestrator still reads the environment variable; the seeded `app_settings` values are identical, so behaviour is unchanged either way.*
 
 Response `data`:
 ```json
@@ -113,6 +115,8 @@ Errors: `SLOT_TAKEN` (409, unique index or FreeBusy conflict — UI returns user
 
 ### `POST /api/consultations/:id/checkout` — client (owner)
 Creates Stripe Checkout session, manual capture.
+
+**Stripe mode (PROJECT_LOCK Amendment 007, migration 025).** The PaymentIntent is created under the currently active `app_settings.stripe_mode`, and that mode is recorded on the consultation as `consultations.stripe_mode`. Every later Stripe operation on that consultation — capture on accept, cancellation on decline or timeout, admin cancel, refund — selects its Stripe client from `consultations.stripe_mode`, **never** from the current global mode. A consultation authorised in Test therefore still captures against Test after an admin switches the platform to Live. Stripe credentials remain solely in Railway environment variables and are never stored in the database or sent to any browser. *Implemented in Phase 2; migration 025 adds the column and backfills existing PaymentIntent rows to `'test'`.*
 
 Body: none.
 Server: verify ownership + status `draft` + draft not stale (< 30 min) → create Checkout Session (`capture_method: manual`, amount = snapshotted `price_cents`) → store `stripe_payment_intent_id` on the consultation.
@@ -284,7 +288,9 @@ messages (participant)                           → consultation room, 30s poll
 profiles (own)                                   → account settings
 ```
 
-**Banned from Lovable, permanently:** any write to `consultations`, `payments`, `oauth_connections`, `consultant_invites`, `services`; any Google or Stripe API call; any Stripe identifier in a request body, query parameter or header; any status field mutation on any table except `service_requests` (admin) and `service_recommendations` deletion of own `proposed` rows.
+**Banned from Lovable, permanently:** any read of or write to `app_settings`; any write to `consultations`, `payments`, `oauth_connections`, `consultant_invites`, `services`; any Google or Stripe API call; any Stripe identifier in a request body, query parameter or header; any status field mutation on any table except `service_requests` (admin) and `service_recommendations` deletion of own `proposed` rows.
+
+`app_settings` is unreachable from the browser by construction: RLS is enabled with zero policies and all privileges are revoked from `anon` and `authenticated` (Amendment 007). Settings are read and written exclusively through orchestrator endpoints, which arrive in Phase 2. No settings endpoint exists yet.
 
 `services` is read-only for every authenticated role, admin included — the database enforces this, not just convention (migration 022). Catalog changes go through §3a.
 
@@ -323,7 +329,9 @@ Templates are plain HTML in the orchestrator repo. No template service in MVP.
 1. **Google Calendar privacy:** client is never an attendee; consultant's event carries internal reference only; client gets Meet link + `.ics` via Resend. (Applied in §2.)
 2. **`/complete`:** consultant or admin, only after `scheduled_end_at`. (Applied in §2.)
 3. **Accept ordering:** capture first, calendar second; Google failure post-capture → `admin_attention`, no auto-refund. Approved.
-4. **Price:** staging placeholder `DEFAULT_CONSULTATION_PRICE_CENTS=15000` ($150 USD). Owners confirm real price before Week 4; does not block Weeks 1–3.
+4. ~~**Price:** staging placeholder `DEFAULT_CONSULTATION_PRICE_CENTS=15000` ($150 USD).~~ **Superseded by PROJECT_LOCK Amendment 007 (migration 025).** The price is now `app_settings.consultation_price_cents`, admin-managed and seeded at the same `15000`. The environment variable is retained only as the migration seed and a bootstrap fallback.
 5. **Reminders:** 24h consultant acceptance reminder; 24h + 1h session reminders. Approved as proposed.
 
-**Contract status: FROZEN v1.0, plus Amendment 004.** Any new endpoint requires Dave's written approval and a version bump of this document. The five admin service endpoints in §3a are the only addition, authorised by PROJECT_LOCK Amendment 004 (approved). No other endpoint has been added, and no existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1.
+**Contract status: FROZEN v1.0, plus Amendments 004 and 007.** Any new endpoint requires Dave's written approval and a version bump of this document. The five admin service endpoints in §3a are the only endpoint addition, authorised by PROJECT_LOCK Amendment 004 (approved). No other endpoint has been added, and no existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1.
+
+**Amendment 007 adds no endpoint in this phase.** It changes only the documented *source* of the consultation price (`app_settings` rather than the environment) and records the `consultations.stripe_mode` behaviour, both described in §1. The settings endpoints it authorises — `GET /api/public/settings`, `GET /api/admin/settings`, `PATCH /api/admin/settings`, `PATCH /api/admin/settings/stripe-mode` — arrive in Phase 2 and will be documented here at that time. None of them exists yet.

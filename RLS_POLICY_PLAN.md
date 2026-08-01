@@ -170,6 +170,25 @@ Clients see payment outcome through `consultations.status`, never through the St
 | SELECT | authenticated where `active = true`; admin all |
 | INSERT / UPDATE / DELETE | `is_admin()` |
 
+### `app_settings`
+
+Added by **PROJECT_LOCK Amendment 007**, applied as migration 025.
+
+| Command | Policy |
+|---|---|
+| SELECT | **none** |
+| INSERT / UPDATE / DELETE | **none** |
+
+**RLS is enabled and no policy exists.** Under PostgreSQL, a table with RLS enabled and zero policies denies every row to every non-bypassing role, so `anon` and `authenticated` — admin included — have no access whatsoever. This is deliberately stronger than a restrictive policy and simpler to audit: there is no expression to get wrong.
+
+In addition, migration 025 runs `revoke all on public.app_settings from anon` and `from authenticated`, so the intent survives even if a policy is added by mistake later.
+
+The orchestrator's service role bypasses RLS and is the only reader and writer. Admin settings reads and writes go through orchestrator endpoints (Phase 2), never through the browser.
+
+**The table contains no secret.** Stripe secret keys and webhook signing secrets remain solely in Railway environment variables; `app_settings.stripe_mode` only selects between them. No credential column may ever be added to this table.
+
+**Not in the `supabase_realtime` publication** — see §4.
+
 ---
 
 ## 3. Storage policies
@@ -185,6 +204,10 @@ One bucket, locked: `public-media`. No separate avatars/consultant-photos bucket
 ## 4. Realtime
 
 Not required by the locked flow. Do **not** enable Realtime on any table in MVP. Dashboards refetch on navigation/interval. (Messages could tempt us; resist — polling every 30s in the consultation room is fine for beta.)
+
+`app_settings` is explicitly **not** added to the `supabase_realtime` publication (Amendment 007 §3.5). Settings change rarely and are delivered through orchestrator endpoints; a Realtime subscription would also be a browser-side read path on a table that has none by design.
+
+`messages` is in the publication as discovered live and is used for direct-message presence under Amendments 005 and 006. That predates this section and is unchanged.
 
 ---
 
