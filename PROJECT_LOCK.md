@@ -124,7 +124,7 @@ timeout/background job support
 
 3. Locked Data Model
 
-Exactly 15 tables for MVP:
+Exactly 15 tables for MVP: *(Amended to exactly 16 tables by Amendment 007, which added `public.app_settings`. See §33.)*
 
 profiles
 
@@ -834,7 +834,7 @@ Must pass:
 
 migrations run cleanly
 
-all 15 tables exist
+all 15 tables exist *(Amended to exactly 16 tables by Amendment 007.)*
 
 enums exist
 
@@ -1172,7 +1172,7 @@ Reconciliation into the database is out of scope and requires its own amendment.
 
 Nothing was added to the locked surface.
 
-No new table. The data model remains exactly 15 tables.
+No new table. The data model remains exactly 15 tables. *(Historical and correct for Amendment 004. The count was later amended to 16 by Amendment 007. See §33.)*
 
 No new route. No new status. No new currency beyond usd, gbp and eur.
 
@@ -1185,3 +1185,55 @@ Correctly signed Stripe events carrying no consultation_id are acknowledged with
 No consultation transition, no payments row, no consultation RPC.
 
 Signature verification is unchanged. An invalid signature is still rejected.
+
+---
+
+31. Amendment 005 — Admin ↔ Consultant Direct Messaging
+
+Source: PROJECT_LOCK_AMENDMENT_005_ADMIN_CONSULTANT_DIRECT_MESSAGING.md (APPROVED). Applied as migrations 023 and 024.
+
+`public.messages.consultation_id` becomes nullable. A message is exactly one of: a consultation message (`consultation_id is not null`) or a direct admin ↔ consultant message (`consultation_id is null`). No new table. The direct pair must be exactly one admin and one consultant, enforced by a database trigger reading `public.profiles`. Clients are excluded from direct messaging entirely. Messages remain non-deletable; `read_at` remains the only client-writable column. Migration 024 adds `get_direct_message_admin()` so a consultant can initiate without a prior admin message, without widening `profiles` visibility.
+
+---
+
+32. Amendment 006 — Direct Presence and Delayed Email Notifications
+
+Source: PROJECT_LOCK_AMENDMENT_006_DIRECT_MESSAGE_PRESENCE_AND_EMAIL.md (APPROVED). No migration.
+
+Direct conversations use Supabase Presence, scoped to a single conversation pair and informational only — it never gates sending, reading, scheduling or delivery. No global presence system, no persisted presence record. Direct messages use the existing delayed email pipeline; no second queue or delivery path. `messages.email_notification_sent_at` remains the sole idempotency marker. Read suppression applies identically to both message classes. Role pairing is validated from `public.profiles`, never from a client value. Direct emails are tagged `direct-message`; metadata is limited to `message_id`, `sender_role` and `recipient_role`, and never carries a message body or a null consultation identifier. No email reply ingestion, no push notifications.
+
+---
+
+33. Amendment 007 — Admin Settings and Dynamic Consultation Pricing
+
+Source: PROJECT_LOCK_AMENDMENT_007_ADMIN_SETTINGS_AND_DYNAMIC_PRICING.md (APPROVED). Applied as migration 025.
+
+**The locked data model becomes exactly 16 tables.** The sixteenth is `public.app_settings`, a singleton of explicitly typed operational settings, with RLS enabled and zero policies, `anon` and `authenticated` revoked, and no Realtime publication. It holds no secret of any kind.
+
+The global consultation price moves from an environment variable to `app_settings.consultation_price_cents`, snapshotted into `consultations.price_cents` at draft creation; existing consultations and drafts never change price. USD only. Consultation duration likewise becomes settings-driven.
+
+Stripe credentials remain solely in Railway environment variables. `app_settings.stripe_mode` selects between them and is never a credential store. `consultations.stripe_mode` records the mode a payment was created under and is the authoritative selector for every later capture, cancellation and refund, so a mode switch never redirects an existing payment. Webhook signatures verify against each configured mode's secret and `event.livemode` must match the verifying secret. Manual capture is unchanged. No Stripe Connect. Consultant-specific pricing and a configurable acceptance timeout are explicitly deferred.
+
+---
+
+34. Amendment index
+
+| # | Title | Status |
+|---|---|---|
+| 001 | Consultation Intake Fields | Approved — applied as migration 004 |
+| 002 | Frictionless Public Booking | Approved — applied as migration 005 and orchestrator behaviour |
+| 003 | Resilient Availability, Validated WhatsApp, Gender Matching | Approved — applied as migrations 018–020 |
+| 004 | Structured Service Pricing and Stripe Payment Links | Approved — applied as migration 022 (§30) |
+| 005 | Admin ↔ Consultant Direct Messaging | Approved — applied as migrations 023–024 (§31) |
+| 006 | Direct Presence and Delayed Email Notifications | Approved — no migration (§32) |
+| 007 | Admin Settings and Dynamic Consultation Pricing | Approved — applied as migration 025 (§33) |
+
+Each amendment document is in the repository root under its `PROJECT_LOCK_AMENDMENT_NNN_*.md` filename.
+
+---
+
+35. Implementation history annotation (2026-08-01)
+
+**Outbound email provider.** This document and the frozen deliverables specify **Resend**. The implemented and deployed provider is **Mandrill** (`src/lib/mandrill.ts`, `MANDRILL_*` environment variables). Delivery semantics, recipients and idempotency rules are as originally locked; only the vendor differs. The original wording is retained in historical sections rather than rewritten.
+
+**Frontend tooling.** References to "Lovable" as the calling actor mean the frontend application generally, which is now maintained directly in Git. Lovable Cloud remains prohibited.

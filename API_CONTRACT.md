@@ -1,7 +1,11 @@
 # MakeHijrah Relocation OS — API_CONTRACT.md
 
 **Version:** 1.0 (draft for Dave's review)
-**Purpose:** The complete, closed list of orchestrator endpoints. **If an endpoint is not in this document, Lovable does not call it and it does not exist.** Every Lovable prompt that touches the backend references this file.
+**Purpose:** The complete, closed list of orchestrator endpoints. **If an endpoint is not in this document, the frontend does not call it and it does not exist.** Every prompt that touches the backend references this file.
+
+> **Terminology note (2026-08-01).** Historical references to "Lovable" throughout this document mean **the frontend application generally**, which is now maintained directly in Git. The original wording is preserved rather than rewritten; read it as "the frontend".
+>
+> **Provider note (2026-08-01).** Historical references to **Resend** describe the originally specified email provider. The implemented and deployed provider is **Mandrill** (`src/lib/mandrill.ts`). Delivery semantics are as documented; only the vendor differs.
 
 ---
 
@@ -99,7 +103,7 @@ Body:
 
 Server: re-validate slot exactly as `GET /api/availability` (fresh FreeBusy, bypass cache) → insert `consultations` (status `draft`, price snapshot from `app_settings`, `end_at = start + consultation_duration_minutes`) + `consultation_intake` in one transaction → unique index is the final referee.
 
-**Price source (PROJECT_LOCK Amendment 007, migration 025).** The price is read from `app_settings.consultation_price_cents`, not from an environment variable, and is **snapshotted** into `consultations.price_cents` at draft creation. An admin price change therefore affects newly created consultations only; existing consultations and existing drafts keep their original price. Checkout always takes its amount from `consultations.price_cents`. The client never submits, controls or influences the amount — there is no price field in this request body and none is accepted. *Until Phase 2 ships, the orchestrator still reads the environment variable; the seeded `app_settings` values are identical, so behaviour is unchanged either way.*
+**Price source (PROJECT_LOCK Amendment 007, migration 025).** The price is read from `app_settings.consultation_price_cents`, not from an environment variable, and is **snapshotted** into `consultations.price_cents` at draft creation. An admin price change therefore affects newly created consultations only; existing consultations and existing drafts keep their original price. Checkout always takes its amount from `consultations.price_cents`. The client never submits, controls or influences the amount — there is no price field in this request body and none is accepted. Live since orchestrator commit `f905431`; see §3b.
 
 Response `data`:
 ```json
@@ -116,7 +120,7 @@ Errors: `SLOT_TAKEN` (409, unique index or FreeBusy conflict — UI returns user
 ### `POST /api/consultations/:id/checkout` — client (owner)
 Creates Stripe Checkout session, manual capture.
 
-**Stripe mode (PROJECT_LOCK Amendment 007, migration 025).** The PaymentIntent is created under the currently active `app_settings.stripe_mode`, and that mode is recorded on the consultation as `consultations.stripe_mode`. Every later Stripe operation on that consultation — capture on accept, cancellation on decline or timeout, admin cancel, refund — selects its Stripe client from `consultations.stripe_mode`, **never** from the current global mode. A consultation authorised in Test therefore still captures against Test after an admin switches the platform to Live. Stripe credentials remain solely in Railway environment variables and are never stored in the database or sent to any browser. *Implemented in Phase 2; migration 025 adds the column and backfills existing PaymentIntent rows to `'test'`.*
+**Stripe mode (PROJECT_LOCK Amendment 007, migration 025).** The PaymentIntent is created under the currently active `app_settings.stripe_mode`, and that mode is recorded on the consultation as `consultations.stripe_mode`. Every later Stripe operation on that consultation — capture on accept, cancellation on decline or timeout, admin cancel, refund — selects its Stripe client from `consultations.stripe_mode`, **never** from the current global mode. A consultation authorised in Test therefore still captures against Test after an admin switches the platform to Live. Stripe credentials remain solely in Railway environment variables and are never stored in the database or sent to any browser. Live since orchestrator commit `f905431`. Migration 025 added the column and backfilled existing PaymentIntent rows to `'test'`; see §3b.
 
 Body: none.
 Server: verify ownership + status `draft` + draft not stale (< 30 min) → create Checkout Session (`capture_method: manual`, amount = snapshotted `price_cents`) → store `stripe_payment_intent_id` on the consultation.
@@ -147,7 +151,7 @@ Server sequence (order matters):
 2. On capture success → status `captured`, set `captured_at`, `accepted_at`.
 3. Create Google Calendar event on the **consultant's calendar only — the client is NEVER added as an attendee** (privacy rule: consultant must not see client email via Google). Event title uses an internal reference, e.g. `MakeHijrah Consultation #ABC123`; description may contain consultation ID, dashboard link, Join Meet link — and must NOT contain client email, phone, or WhatsApp. Meet link via `conferenceData.createRequest`.
 4. Store `google_event_id`, `meet_link` → status `confirmed`.
-5. Emails (Resend): client receives Meet link **plus an `.ics` calendar attachment** (this replaces the Google invite); consultant receives confirmation.
+5. Emails (Mandrill; originally specified as Resend): client receives Meet link **plus an `.ics` calendar attachment** (this replaces the Google invite); consultant receives confirmation.
 
 If step 3/4 fails after capture: status `admin_attention`, reason `calendar_failed`, money stays captured, admin resolves manually. **Never auto-refund on calendar failure.**
 
@@ -174,6 +178,32 @@ Exchanges code → encrypts refresh token → upserts `oauth_connections` → 30
 Guard (locked by Dave): status in (`confirmed`, `captured`) AND `scheduled_end_at <= now()`.
 Server: status `completed`, `completed_at = now()`. Unlocks recommendation proposals.
 UI copy requirement: consultant sees "You can write notes now. You can mark the consultation complete after the scheduled end time." — notes are never blocked (allowed during `confirmed`/`captured`/`completed` per RLS plan); recommendations are proposed after completion.
+
+---
+
+## 2a. Message notification — client, consultant or admin
+
+Added by PROJECT_LOCK Amendments 005 and 006.
+
+### `POST /api/messages/:id/notification`
+
+Schedules the delayed email notification for a message that has already been persisted. It does **not** send mail directly and it does **not** create or modify the message.
+
+Auth: any authenticated `client`, `consultant` or `admin`. The caller's profile id must equal `messages.sender_profile_id` — admin was added solely so an admin can schedule notifications for direct messages they sent, and it grants no other message access.
+
+Body: **none.** The message id in the path is the only input. The message class is read from the stored row (`consultation_id is not null` = consultation message, `null` = direct message) and never from the request.
+
+Rate limit: 30 / minute.
+
+Response `data`:
+```json
+{ "message_id": "uuid", "notification": "scheduled" }
+```
+`notification` is one of `scheduled`, `suppressed` (already read), `already_sent`. **All three are success.** Callers should treat this as fire-and-forget: the message is already persisted, so a scheduling failure must never be surfaced as a send failure.
+
+Errors: `403 FORBIDDEN` (caller is not the sender, or direct-message pairing is invalid), `404 NOT_FOUND`, `400 VALIDATION_ERROR` (malformed id), `500 INTERNAL_ERROR`.
+
+Behaviour: a fixed delay elapses before delivery; if the recipient reads the message first, **no email is sent**. `messages.email_notification_sent_at` is the sole idempotency marker and is written only after a successful send while the message is still unread and unmarked. Repeated scheduling of the same message never produces a duplicate email. Direct emails are tagged `direct-message` and carry metadata limited to `message_id`, `sender_role` and `recipient_role`; consultation emails remain tagged `consultation-message` and carry no metadata. Message bodies never appear in metadata.
 
 ---
 
@@ -205,9 +235,9 @@ Guard for activate: consultant has timezone, working hours non-empty, and OAuth 
 Body: `{ "refund": true | false, "note": "…" }`
 Server by current status: `pending_acceptance` → cancel authorization; `confirmed`/`captured` → refund if `refund: true`, delete/patch Google event; always → status `cancelled` (or `refunded`), payments log, emails to both parties.
 
-### `POST /api/admin/recommendations/:id/send`
+### `POST /api/admin/recommendations/:id/send` — admin
 Guard: recommendation status `proposed`, parent consultation `completed`.
-Server: status `sent`, `sent_at`, `sent_by_admin_id` (satisfies the DB check constraint) → Resend email "recommended services" to client.
+Server: status `sent`, `sent_at`, `sent_by_admin_id` (satisfies the DB check constraint) → Mandrill email "recommended services" to client.
 Response `data`: `{ "status": "sent" }`.
 
 ---
@@ -272,6 +302,84 @@ Correctly signed Stripe events that carry no `consultation_id` — which is what
 
 ---
 
+## 3b. Application settings — public read, admin write
+
+Added by PROJECT_LOCK Amendment 007, applied as migration 025. `public.app_settings` has RLS enabled with **zero policies** and `anon`/`authenticated` revoked, so it is unreachable from the browser by construction. These four endpoints are the only access path. There is deliberately **no** generic settings endpoint accepting arbitrary keys.
+
+### `GET /api/public/settings` — public, no auth
+
+Rate limit: 60 / minute.
+
+Response `data` — exactly these three fields, nothing else:
+```json
+{
+  "consultation_price_cents": 15000,
+  "consultation_currency": "usd",
+  "consultation_duration_minutes": 60
+}
+```
+No `stripe_mode`, no configured booleans, no `support_email`, no `default_timezone`, no timestamps, no audit id. Fails closed with `500 INTERNAL_ERROR` rather than returning a guessed price.
+
+### `GET /api/admin/settings` — admin
+
+Response `data`:
+```json
+{
+  "consultation_price_cents": 15000,
+  "consultation_currency": "usd",
+  "consultation_duration_minutes": 60,
+  "support_email": null,
+  "default_timezone": "Africa/Cairo",
+  "stripe_mode": "test",
+  "stripe_test_configured": true,
+  "stripe_live_configured": true,
+  "updated_at": "2026-08-01T00:00:00.000Z"
+}
+```
+`stripe_test_configured` / `stripe_live_configured` are derived **solely** from server-side environment-variable presence and are booleans. No key material — whole, partial, masked, prefixed or suffixed — is ever returned.
+
+### `PATCH /api/admin/settings` — admin
+
+Strict body; **unknown keys are rejected**. At least one field required.
+```json
+{
+  "consultation_price_cents": 20000,
+  "consultation_duration_minutes": 45,
+  "support_email": "help@example.com",
+  "default_timezone": "Africa/Cairo"
+}
+```
+Validation: price `100`–`1000000` integer cents; duration `15`–`240` integer minutes; `support_email` a valid email or explicit `null` to clear; `default_timezone` a valid IANA zone. Bounds mirror the migration-025 check constraints exactly. `stripe_mode` is **not** accepted here.
+
+Writes `updated_by_admin_profile_id`; `updated_at` is set by the `set_app_settings_updated_at` trigger. Returns the admin projection above. Invalidates the settings cache before responding.
+
+Errors: `400 VALIDATION_ERROR`, `401`, `403`, `500`.
+
+### `PATCH /api/admin/settings/stripe-mode` — admin
+
+```json
+{ "stripe_mode": "live", "confirm_live": true }
+```
+Rules: the target mode's environment credential pair must exist, or `409 STRIPE_MODE_NOT_CONFIGURED`. Switching to `live` requires `confirm_live: true`, or `409 LIVE_MODE_CONFIRMATION_REQUIRED`.
+
+Response `data` — only:
+```json
+{ "stripe_mode": "live", "stripe_test_configured": true, "stripe_live_configured": true }
+```
+
+Effective immediately, without redeploy or restart. **Never** returns a credential.
+
+### Settings-driven runtime behaviour
+
+- **Consultation price** is read from `app_settings.consultation_price_cents` at draft creation and **snapshotted** into `consultations.price_cents`. Existing consultations and drafts keep their original price. Checkout always takes its amount from the snapshot. The client never submits or influences the amount.
+- **Consultation duration** is read from `app_settings.consultation_duration_minutes` and drives both availability slot generation and draft `scheduled_end_at` from a single value. Existing scheduled consultations retain their stored `scheduled_end_at`.
+- **`consultations.stripe_mode`** records the mode a consultation's PaymentIntent was created under. Every later capture, cancellation and refund selects its Stripe client from that value, **never** from the current global mode — so a payment authorised in test still captures against test after a switch to live. After retrieval, `paymentIntent.livemode` must match the recorded mode or the operation is refused.
+- **Webhook verification** tries each configured mode's signing secret in a fixed, bounded order and consults no database state. After a signature verifies, `event.livemode` must match the verifying secret's mode or the event is rejected `400 STRIPE_LIVEMODE_MISMATCH` and never processed. Test events stay processable while the platform is live, and vice versa. Duplicate protection through the unique `payments.stripe_event_id` is unchanged.
+- **Manual capture is unchanged.**
+- Stripe credentials live **only** in Railway environment variables and are never stored in the database, sent to a browser, accepted through a UI, or logged.
+
+---
+
 ## 4. What Lovable reads directly from Supabase (no endpoint)
 
 Everything RLS already grants — this is the *only* non-orchestrator data path:
@@ -290,7 +398,7 @@ profiles (own)                                   → account settings
 
 **Banned from Lovable, permanently:** any read of or write to `app_settings`; any write to `consultations`, `payments`, `oauth_connections`, `consultant_invites`, `services`; any Google or Stripe API call; any Stripe identifier in a request body, query parameter or header; any status field mutation on any table except `service_requests` (admin) and `service_recommendations` deletion of own `proposed` rows.
 
-`app_settings` is unreachable from the browser by construction: RLS is enabled with zero policies and all privileges are revoked from `anon` and `authenticated` (Amendment 007). Settings are read and written exclusively through orchestrator endpoints, which arrive in Phase 2. No settings endpoint exists yet.
+`app_settings` is unreachable from the browser by construction: RLS is enabled with zero policies and all privileges are revoked from `anon` and `authenticated` (Amendment 007). Settings are read and written exclusively through the orchestrator endpoints in §3b.
 
 `services` is read-only for every authenticated role, admin included — the database enforces this, not just convention (migration 022). Catalog changes go through §3a.
 
@@ -309,7 +417,7 @@ All jobs use job-ID-based dedup where a single-fire per consultation matters.
 
 ---
 
-## 6. Email map (Resend, `consultations@makehijrah.com`)
+## 6. Email map (Mandrill — originally specified as Resend — `consultations@makehijrah.com`)
 
 | Trigger | To |
 |---|---|
@@ -326,12 +434,22 @@ Templates are plain HTML in the orchestrator repo. No template service in MVP.
 
 ## 7. Resolved decisions (locked by Dave)
 
-1. **Google Calendar privacy:** client is never an attendee; consultant's event carries internal reference only; client gets Meet link + `.ics` via Resend. (Applied in §2.)
+1. **Google Calendar privacy:** client is never an attendee; consultant's event carries internal reference only; client gets Meet link + `.ics` via Mandrill. (Applied in §2.)
 2. **`/complete`:** consultant or admin, only after `scheduled_end_at`. (Applied in §2.)
 3. **Accept ordering:** capture first, calendar second; Google failure post-capture → `admin_attention`, no auto-refund. Approved.
 4. ~~**Price:** staging placeholder `DEFAULT_CONSULTATION_PRICE_CENTS=15000` ($150 USD).~~ **Superseded by PROJECT_LOCK Amendment 007 (migration 025).** The price is now `app_settings.consultation_price_cents`, admin-managed and seeded at the same `15000`. The environment variable is retained only as the migration seed and a bootstrap fallback.
 5. **Reminders:** 24h consultant acceptance reminder; 24h + 1h session reminders. Approved as proposed.
 
-**Contract status: FROZEN v1.0, plus Amendments 004 and 007.** Any new endpoint requires Dave's written approval and a version bump of this document. The five admin service endpoints in §3a are the only endpoint addition, authorised by PROJECT_LOCK Amendment 004 (approved). No other endpoint has been added, and no existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1.
+**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006 and 007.** Any new endpoint requires Dave's written approval and a version bump of this document.
 
-**Amendment 007 adds no endpoint in this phase.** It changes only the documented *source* of the consultation price (`app_settings` rather than the environment) and records the `consultations.stripe_mode` behaviour, both described in §1. The settings endpoints it authorises — `GET /api/public/settings`, `GET /api/admin/settings`, `PATCH /api/admin/settings`, `PATCH /api/admin/settings/stripe-mode` — arrive in Phase 2 and will be documented here at that time. None of them exists yet.
+Endpoint additions since v1.0, each authorised by an approved amendment:
+
+| Section | Endpoints | Amendment |
+|---|---|---|
+| §3a | five admin service catalog endpoints | 004 |
+| §2a | `POST /api/messages/:id/notification` | 005, 006 |
+| §3b | four application settings endpoints | 007 |
+
+No other endpoint has been added. No existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1, and the price/duration/Stripe-mode sourcing described in §1 and §3b.
+
+**Amendment 007 endpoints are live** and documented in §3b. Amendment 005/006 added `POST /api/messages/:id/notification`, documented in §2a.

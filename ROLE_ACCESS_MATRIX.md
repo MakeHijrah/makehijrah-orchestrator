@@ -25,12 +25,15 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | Trigger refund | ❌ | ❌ | ❌ | ✅ | 🔧 |
 | Write consultation notes | ❌ | ❌ | ✅ own, post-call | ✅ view all | RLS write |
 | Propose service recommendations (1–3) | ❌ | ❌ | ✅ own consultations | ✅ view | RLS write (`proposed` only) |
-| Send recommendation to client | ❌ | ❌ | ❌ | ✅ | 🔧 (also sends Resend email) |
-| View recommended services | ❌ | ✅ `sent` only | ✅ own proposals | ✅ all | RLS read |
+| Send recommendation to client | ❌ | ❌ | ❌ | ✅ | 🔧 `POST /api/admin/recommendations/:id/send` (also sends Mandrill email) |
+| View recommended services | ❌ | ✅ `sent` only⁷ | ✅ own proposals | ✅ all | RLS read |
 | View services catalog | ❌ | ✅ active | ✅ active | ✅ all | RLS read |
 | Manage services catalog | ❌ | ❌ | ❌ | ✅ orchestrator only | 🔧 `POST /api/admin/services`, `PATCH /api/admin/services/:id`, `POST /api/admin/services/:id/activate\|deactivate`, `DELETE /api/admin/services/:id` |
 | View/update service requests | ❌ | ✅ view own | ❌ | ✅ full | RLS |
-| Send/read messages | ❌ | ✅ own consultations | ✅ assigned consultations | ✅ read all | RLS |
+| Send/read consultation messages | ❌ | ✅ own consultations | ✅ assigned consultations | ✅ read all | RLS |
+| Send/read direct messages (admin ↔ consultant) | ❌ | ❌ | ✅ with the admin | ✅ with any consultant | RLS write (pairing enforced by trigger) |
+| Mark a received message read | ❌ | ✅ own | ✅ own | ✅ own | RLS write (`read_at` only, trigger-guarded) |
+| Schedule a message email notification | ❌ | ✅ own sent | ✅ own sent | ✅ own sent | 🔧 `POST /api/messages/:id/notification` |
 | View giveaways | ❌ | ✅ active | ✅ active | ✅ all | RLS read |
 | Manage giveaways | ❌ | ❌ | ❌ | ✅ | RLS write |
 | Edit own profile (name, phone, avatar) | ❌ | ✅ | ✅ | ✅ | RLS write |
@@ -45,9 +48,9 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | View payments log | ❌ | ❌ | ❌ | ✅ | RLS read |
 | View intake answers | ❌ | ✅ own | ✅ assigned | ✅ all | RLS read |
 | Change any user's role | ❌ | ❌ | ❌ | ❌ (manual/seeded or orchestrator) | 🔧 / SQL |
-| View public settings (price, currency, duration) | ✅ | ✅ | ✅ | ✅ | 🔧 `GET /api/public/settings` (Phase 2) |
-| View/manage admin settings | ❌ | ❌ | ❌ | ✅ orchestrator only | 🔧 Phase 2 endpoints — never RLS |
-| Switch Stripe mode (test/live) | ❌ | ❌ | ❌ | ✅ orchestrator only | 🔧 Phase 2; credentials stay in Railway |
+| View public settings (price, currency, duration) | ✅ | ✅ | ✅ | ✅ | 🔧 `GET /api/public/settings` |
+| View/manage admin settings | ❌ | ❌ | ❌ | ✅ orchestrator only | 🔧 `GET`/`PATCH /api/admin/settings` — never RLS |
+| Switch Stripe mode (test/live) | ❌ | ❌ | ❌ | ✅ orchestrator only | 🔧 `PATCH /api/admin/settings/stripe-mode`; credentials stay in Railway |
 
 ---
 
@@ -68,7 +71,7 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | service_recommendations | ❌ | R own `sent` | R/W own `proposed`³ | R all |
 | service_requests | ❌ | R own | ❌ | R/W |
 | payments | ❌ | ❌ | ❌ | R |
-| messages | ❌ | R/W participant | R/W participant | R |
+| messages | ❌ | R/W participant (consultation only)⁶ | R/W participant (consultation + direct with admin)⁶ | R all; R/W direct with consultants⁶ |
 | giveaways | ❌ | R active | R active | R/W |
 | app_settings | ❌ | ❌ | ❌ | ❌⁵ |
 
@@ -77,13 +80,17 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 ³ insert as `proposed`, delete own while `proposed`; cannot set `sent`
 ⁴ **read only.** No authenticated role — admin included — holds raw `INSERT`, `UPDATE` or `DELETE` on `services`. Migration 022 revoked those grants and dropped the three admin write policies; `services_select_active` is all that remains. Catalog mutations are performed by the orchestrator under the service role, via the endpoints in §1.
 
-⁵ **no browser access at all, admin included.** Migration 025 enables RLS on `app_settings` with **zero policies** and revokes all privileges from `anon` and `authenticated`, so the table is unreachable from the browser by construction rather than by convention. Admins read and write settings only through orchestrator endpoints (Phase 2). The table contains no secret: Stripe credentials remain solely in Railway environment variables, and `stripe_mode` merely selects between them.
+⁶ **two message classes, one table.** `consultation_id is not null` = consultation message; `consultation_id is null` = direct admin ↔ consultant message (Amendment 005, migration 023). Six RLS policies split by class. **Clients cannot participate in direct messaging at all**, and a consultant cannot reach another consultant's direct thread — the `messages_direct_pairing` trigger requires exactly one admin and one consultant and rejects every other pairing, including self-send. Write access is `INSERT` as yourself plus `UPDATE` of `read_at` on messages you received; the `messages_guard_columns` trigger blocks identity and body changes. There is no `DELETE` policy.
+
+⁵ **no browser access at all, admin included.** Migration 025 enables RLS on `app_settings` with **zero policies** and revokes all privileges from `anon` and `authenticated`, so the table is unreachable from the browser by construction rather than by convention. Admins read and write settings only through the orchestrator endpoints in `API_CONTRACT.md` §3b. The table contains no secret: Stripe credentials remain solely in Railway environment variables, and `stripe_mode` merely selects between them.
 
 **All status transitions on `consultations` and all `payments` writes: service role only. No exceptions.**
 
 **All `services` mutations — pricing, Stripe resource IDs, activation, deactivation, deletion: service role only, through the orchestrator. No exceptions.**
 
-**All `app_settings` reads and writes: service role only, through the orchestrator. No exceptions.** (Amendment 007.)
+**All `app_settings` reads and writes: service role only, through the orchestrator. No exceptions.** (Amendment 007.) **Stripe mode mutation is admin-initiated and orchestrator-performed only**; no role holds a database write path to it.
+
+⁷ **`sent` gates client visibility, and the payment link rides along.** A `proposed` recommendation is invisible to the client — the RLS `SELECT` requires `status = 'sent'` **and** that the parent consultation belongs to `auth.uid()`. Once sent, the client reads the recommended service through the normal `services_select_active` path, which is what exposes the configured Stripe Payment Link URL behind the **Pay {price}** CTA. No additional policy or endpoint is involved, and no consultant can make a recommendation visible: there is no consultant `UPDATE` policy on `service_recommendations`.
 
 **Admin avatar is unchanged by Amendment 007.** It continues to use own-profile RLS write on `profiles.avatar_url` plus the existing `public-media` bucket at prefix `avatars/{auth.uid()}/*` — the same path as every other role, per the "Edit own profile" row above. No new endpoint, bucket, column or storage policy, and no avatar data in `app_settings`.
 
@@ -106,6 +113,9 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | `/admin/consultants` (+ invites) | admin |
 | `/admin/services` | admin |
 | `/admin/recommendations` (review → Send to Client) | admin |
+| `/admin/settings` (profile, consultation, Stripe, general) | admin |
+| `/admin/messages` (direct threads with consultants) | admin |
+| `/consultant/messages` (direct thread with the admin) | consultant |
 | `/admin/service-requests` | admin |
 | `/admin/giveaways` | admin |
 | `/admin/countries` | admin |

@@ -8,7 +8,7 @@
 
 Two clients touch Postgres. **Lovable** uses the anon key + Supabase Auth JWT and is governed entirely by RLS — it can only ever *read* safe data and *write* the handful of things a user legitimately owns (own profile, own messages, consultant's own notes/recommendations). **The Node orchestrator** uses the service role key and bypasses RLS — it owns every state transition, every payment, every token, every calendar call. If a write involves money, status, tokens, or Google, it does not have an RLS policy allowing it; it goes through the orchestrator or it doesn't happen.
 
-RLS is enabled on **all 15 tables**, no exceptions. Default deny; every access below is an explicit policy.
+RLS is enabled on **all 16 tables**, no exceptions. Default deny; every access below is an explicit policy. *(Amended from 15 to 16 by PROJECT_LOCK Amendment 007, which added `app_settings` — the one table with RLS enabled and deliberately **zero** policies.)*
 
 ---
 
@@ -134,14 +134,21 @@ Service role only for every mutation. This supersedes the original v1.0 rule, wh
 `services_select_active` is now the only policy on the table. `authenticated` holds `SELECT` and nothing else. RLS remains enabled and not forced, so service role and postgres continue to bypass it exactly as before.
 
 ### `service_recommendations`
+
+Verified live behaviour.
+
 | Command | Policy |
 |---|---|
-| SELECT | client: `status = 'sent'` AND consultation is theirs; consultant: own (`recommended_by_consultant_id = my_consultant_id()`); admin: all |
+| SELECT | client: `status = 'sent'` **AND** the parent consultation belongs to `auth.uid()`; consultant: own (`recommended_by_consultant_id = my_consultant_id()`); admin: all |
 | INSERT | consultant, for own consultations, `status` forced to `'proposed'` via `with check` |
-| UPDATE | admin only in principle — but the send action (status → `sent`, `sent_at`, `sent_by_admin_id`) should go through the orchestrator anyway because it also triggers the Resend email. So: no client UPDATE policy; orchestrator does it. |
+| UPDATE | **no consultant UPDATE policy exists.** The `proposed` → `sent` transition is performed only by the orchestrator under the service role, through `POST /api/admin/recommendations/:id/send` |
 | DELETE | consultant may delete own rows while `status = 'proposed'` (changed their mind pre-send) |
 
-The client-side `status = 'sent'` filter is the load-bearing policy: it's what makes the admin-review step real rather than cosmetic.
+The client-side `status = 'sent'` filter is the load-bearing policy: it is what makes the admin-review step real rather than cosmetic. A `proposed` recommendation is invisible to the client, and a consultant has no database path to make one visible.
+
+**The maximum of three recommendations per consultation is enforced in PostgreSQL**, by the `enforce_service_recommendation_limit` trigger on `before insert` (migration 013). It is not a UI or orchestrator-only rule. Sent recommendations remain part of the three-item allowance. A theoretical race exists between concurrent inserts because the trigger counts rows; this is an accepted v1.0 limitation.
+
+**Payment links.** A `sent` recommendation exposes its service's Stripe Payment Link to the client through the normal `services` read path (`services_select_active`), not through any additional policy on this table.
 
 ### `service_requests`
 | Command | Policy |
@@ -158,11 +165,35 @@ The client-side `status = 'sent'` filter is the load-bearing policy: it's what m
 Clients see payment outcome through `consultations.status`, never through the Stripe log.
 
 ### `messages`
-| Command | Policy |
-|---|---|
-| SELECT | `sender_profile_id = auth.uid()` OR `recipient_profile_id = auth.uid()` OR `is_admin()` |
-| INSERT | `sender_profile_id = auth.uid()` AND sender is a participant of `consultation_id` (client or assigned consultant — security-definer helper `is_consultation_participant(consultation_id)`) AND recipient is the *other* participant |
-| UPDATE / DELETE | none (immutable for MVP) |
+
+Live model is **post-migration 023** (PROJECT_LOCK Amendment 005, applied and verified). The original three-policy consultation-only set was dropped by name and replaced with **six** policies: three scoped to `consultation_id is not null`, three to `consultation_id is null`.
+
+**Consultation messages**
+
+| Policy | Command | Rule |
+|---|---|---|
+| `messages_consultation_select` | SELECT | `consultation_id is not null` AND (`sender_profile_id = auth.uid()` OR `recipient_profile_id = auth.uid()` OR `is_admin()`) |
+| `messages_consultation_insert` | INSERT | `consultation_id is not null` AND `sender_profile_id = auth.uid()` AND `recipient_profile_id <> auth.uid()` AND `is_consultation_participant(consultation_id, auth.uid())` AND `is_consultation_participant(consultation_id, recipient_profile_id)` |
+| `messages_consultation_update` | UPDATE | `consultation_id is not null` AND `recipient_profile_id = auth.uid()` (both `using` and `with check`) |
+
+**Direct admin ↔ consultant messages**
+
+| Policy | Command | Rule |
+|---|---|---|
+| `messages_direct_select` | SELECT | `consultation_id is null` AND (`sender_profile_id = auth.uid()` OR `recipient_profile_id = auth.uid()` OR `is_admin()`) |
+| `messages_direct_insert` | INSERT | `consultation_id is null` AND `sender_profile_id = auth.uid()` AND `recipient_profile_id <> auth.uid()` |
+| `messages_direct_update` | UPDATE | `consultation_id is null` AND `recipient_profile_id = auth.uid()` (both `using` and `with check`) |
+
+Rules that hold across both classes:
+
+- **Direct messages require `consultation_id is null`; consultation messages require `consultation_id is not null`.** The column is the sole classifier.
+- **The direct pair must be exactly one admin and one consultant.** This is enforced by the `messages_direct_pairing` trigger reading `public.profiles`, not by policy — which is why `messages_direct_insert` only has to pin the sender to the caller.
+- **Clients cannot participate in direct messaging** in either direction; the pairing trigger rejects them.
+- **A consultant cannot reach another consultant's direct thread** — the pairing trigger rejects consultant ↔ consultant on insert, and the select policies scope reads to participants (or admin).
+- `sender_profile_id` must equal `auth.uid()` on insert. Spoofing a sender fails the `with check`.
+- **UPDATE exists solely so a recipient can set `read_at` on a message they received.** The `messages_guard_columns` trigger blocks every other column for non-privileged writers, so the UPDATE policy cannot be used to rewrite a body.
+- **No DELETE policy on either class.** Messages are not deletable. Removing QA rows is an authorised `service_role` maintenance action.
+- `messages` is the **only** application table authorised for Realtime, for direct-conversation presence under Amendment 005. See §4.
 
 ### `giveaways`
 | Command | Policy |

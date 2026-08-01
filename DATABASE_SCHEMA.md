@@ -434,22 +434,51 @@ create index idx_payments_consultation on payments (consultation_id);
 
 ## 14. `messages`
 
-Per Dave's minimal spec.
+Definition below is **post-migration 023** (PROJECT_LOCK Amendment 005, applied and verified). This supersedes the original v1.0 definition, in which `consultation_id` was `not null` and all messaging was consultation-scoped. No new table was created.
 
 ```sql
 create table messages (
   id uuid primary key default gen_random_uuid(),
-  consultation_id uuid not null references consultations(id) on delete cascade,
+  consultation_id uuid references consultations(id) on delete cascade,  -- nullable since migration 023
   sender_profile_id uuid not null references profiles(id),
   recipient_profile_id uuid not null references profiles(id),
   body text not null,
+  read_at timestamptz,
+  email_notification_sent_at timestamptz,
   created_at timestamptz not null default now()
 );
 
+alter table messages add constraint messages_no_self_send
+  check (sender_profile_id <> recipient_profile_id);
+
 create index idx_messages_consultation on messages (consultation_id, created_at);
+
+create index messages_recipient_unread_idx
+  on messages (recipient_profile_id, created_at)
+  where read_at is null;
+
+create index messages_direct_pair_idx
+  on messages (sender_profile_id, recipient_profile_id, created_at desc)
+  where consultation_id is null;
 ```
 
-No attachments, no read receipts, no threads. `consultation_id` is `not null`: all MVP messaging is consultation-scoped (this is also what makes RLS trivially safe).
+**`consultation_id` is the sole classifier for the two message classes.** A message is exactly one of:
+
+1. **Consultation message** — `consultation_id is not null`. Client ↔ assigned consultant.
+2. **Direct message** — `consultation_id is null`. Admin ↔ consultant only, in either direction. A consultant may initiate without a prior admin message.
+
+The class is never taken from any value supplied by a client.
+
+**Triggers (migration 023):**
+
+- `messages_direct_pairing` — `before insert`, calls `enforce_direct_message_pairing()`. For direct messages it reads both roles from `public.profiles` and requires exactly one admin and one consultant, rejecting self-send, consultant ↔ consultant, admin ↔ admin, and any client participation. Consultation messages pass through untouched.
+- `messages_guard_columns` — `before update`, calls `guard_messages_columns()`. For non-privileged writers it blocks changes to `id`, `consultation_id`, `sender_profile_id`, `recipient_profile_id`, `body`, `created_at` and `email_notification_sent_at`. Privileged writers (`service_role`, admin) are exempt, which is how the orchestrator writes `email_notification_sent_at`.
+
+**Mutability.** Message identity and body are immutable. **`read_at` is the only client-writable column.** `email_notification_sent_at` is written solely by the orchestrator after a successful send, and is the single idempotency marker for delayed notification email (Amendment 006 §3.3).
+
+**Realtime.** `messages` is in the `supabase_realtime` publication and is used for direct-conversation presence under Amendment 005. Presence state is ephemeral and no table, column or record is created for it (Amendment 006 §2.6). No other application table is published.
+
+No attachments and no threads.
 
 ---
 
