@@ -14,6 +14,14 @@ type SendTransactionalEmailInput = {
   html: string;
   text: string;
   tags?: string[];
+  /*
+   * Optional Mandrill metadata. Values must be plain strings.
+   *
+   * Never place message bodies, email addresses, names, tokens or
+   * URL parameters here. Omitted entirely when not supplied, so
+   * existing callers send exactly the payload they sent before.
+   */
+  metadata?: Record<string, string>;
 };
 
 type MandrillSendResult = {
@@ -40,6 +48,7 @@ export const sendTransactionalEmail = async ({
   html,
   text,
   tags = [],
+  metadata,
 }: SendTransactionalEmailInput): Promise<
   SendTransactionalEmailResult
 > => {
@@ -75,6 +84,9 @@ export const sendTransactionalEmail = async ({
             track_opens: true,
             track_clicks: true,
             tags,
+            ...(metadata === undefined
+              ? {}
+              : { metadata }),
           },
           async: false,
         }),

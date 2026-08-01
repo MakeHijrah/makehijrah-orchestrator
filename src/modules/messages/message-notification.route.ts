@@ -38,6 +38,14 @@ export const registerMessageNotificationRoute =
             [
               "client",
               "consultant",
+              /*
+               * Amendment 006 section 5.2. An admin sending a
+               * direct message must be able to schedule its
+               * notification. This grants no other admin
+               * capability: the service still requires the caller
+               * to be the message's own sender.
+               */
+              "admin",
             ],
           );
 

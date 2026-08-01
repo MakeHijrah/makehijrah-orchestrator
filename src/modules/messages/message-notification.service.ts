@@ -13,9 +13,18 @@ export const MESSAGE_NOTIFICATION_LOCK_PREFIX =
 
 const NOTIFICATION_DELAY_MS = 90_000;
 
+/*
+ * consultation_id is nullable since migration 023.
+ *
+ * It is the sole classifier for the two message classes:
+ * - not null -> consultation message
+ * - null     -> direct admin <-> consultant message
+ *
+ * The class is never taken from anything a client supplies.
+ */
 type MessageRow = {
   id: string;
-  consultation_id: string;
+  consultation_id: string | null;
   sender_profile_id: string;
   recipient_profile_id: string;
   body: string;
@@ -23,6 +32,26 @@ type MessageRow = {
   read_at: string | null;
   email_notification_sent_at: string | null;
 };
+
+type ConsultationMessageRow = MessageRow & {
+  consultation_id: string;
+};
+
+type DirectRole =
+  | "admin"
+  | "consultant";
+
+type DirectPairing = {
+  senderProfile: ProfileRow;
+  recipientProfile: ProfileRow;
+  senderRole: DirectRole;
+  recipientRole: DirectRole;
+};
+
+const isConsultationMessage = (
+  message: MessageRow,
+): message is ConsultationMessageRow =>
+  message.consultation_id !== null;
 
 type ConsultationRow = {
   id: string;
@@ -170,7 +199,7 @@ const loadMessage = async (
 };
 
 const loadParticipantContext = async (
-  message: MessageRow,
+  message: ConsultationMessageRow,
 ): Promise<LoadParticipantContextResult> => {
   const {
     data: consultationData,
@@ -617,6 +646,145 @@ const buildPortalLink = ({
   );
 };
 
+/*
+ * Direct-message portal links.
+ *
+ * Follows the same protected-link convention as consultation
+ * links: the recipient lands on /login and is redirected to the
+ * protected path after authenticating.
+ */
+const buildDirectPortalLink = (
+  recipientRole: DirectRole,
+): string => {
+  const baseUrl =
+    env.APP_URL.replace(/\/+$/, "");
+
+  const protectedPath =
+    recipientRole === "admin"
+      ? "/admin/messages"
+      : "/consultant/messages";
+
+  return (
+    `${baseUrl}/login?redirect=` +
+    encodeURIComponent(
+      protectedPath,
+    )
+  );
+};
+
+type ValidateDirectPairingResult =
+  | {
+      ok: true;
+      pairing: DirectPairing;
+    }
+  | {
+      ok: false;
+      kind: "invalid" | "temporary";
+      message: string;
+    };
+
+/*
+ * Direct-message role pairing, resolved entirely from
+ * public.profiles.
+ *
+ * Amendment 006 section 3.5: the pair is never classified or
+ * authorised by anything a client supplies. Requires exactly one
+ * admin and exactly one consultant, which by construction also
+ * rejects any client participation, consultant <-> consultant and
+ * admin <-> admin.
+ */
+const validateDirectPairing = async (
+  message: MessageRow,
+): Promise<ValidateDirectPairingResult> => {
+  const profilesResult =
+    await loadProfiles(message);
+
+  if (!profilesResult.ok) {
+    return {
+      ok: false,
+      kind: profilesResult.kind,
+      message:
+        profilesResult.message,
+    };
+  }
+
+  const {
+    senderProfile,
+    recipientProfile,
+  } = profilesResult;
+
+  if (
+    message.sender_profile_id ===
+      message.recipient_profile_id ||
+    senderProfile.id ===
+      recipientProfile.id
+  ) {
+    console.warn(
+      "Direct message notification permanently suppressed because the sender and recipient are the same profile",
+      {
+        messageId: message.id,
+      },
+    );
+
+    return {
+      ok: false,
+      kind: "invalid",
+      message:
+        "A direct message may not be sent to yourself.",
+    };
+  }
+
+  const roles = [
+    senderProfile.role,
+    recipientProfile.role,
+  ];
+
+  const adminCount = roles.filter(
+    (role) => role === "admin",
+  ).length;
+
+  const consultantCount =
+    roles.filter(
+      (role) =>
+        role === "consultant",
+    ).length;
+
+  if (
+    adminCount !== 1 ||
+    consultantCount !== 1
+  ) {
+    console.warn(
+      "Direct message notification permanently suppressed because the participant roles are not exactly one admin and one consultant",
+      {
+        messageId: message.id,
+        senderRole:
+          senderProfile.role,
+        recipientRole:
+          recipientProfile.role,
+      },
+    );
+
+    return {
+      ok: false,
+      kind: "invalid",
+      message:
+        "Direct messages are permitted only between an admin and a consultant.",
+    };
+  }
+
+  return {
+    ok: true,
+    pairing: {
+      senderProfile,
+      recipientProfile,
+      senderRole:
+        senderProfile.role as DirectRole,
+      recipientRole:
+        recipientProfile.role as DirectRole,
+    },
+  };
+};
+
 const markEmailNotificationSent =
   async (
     messageId: string,
@@ -709,14 +877,24 @@ export const scheduleMessageNotification =
       };
     }
 
-    const participantResult =
-      await loadParticipantContext(
-        message,
-      );
+    /*
+     * Classification is taken from the stored row, never from the
+     * request. Consultation messages keep the existing participant
+     * validation untouched; direct messages use the admin <->
+     * consultant pairing rules.
+     */
+    const validationResult =
+      isConsultationMessage(message)
+        ? await loadParticipantContext(
+            message,
+          )
+        : await validateDirectPairing(
+            message,
+          );
 
-    if (!participantResult.ok) {
+    if (!validationResult.ok) {
       if (
-        participantResult.kind ===
+        validationResult.kind ===
         "temporary"
       ) {
         return {
@@ -820,54 +998,18 @@ export const scheduleMessageNotification =
     };
   };
 
-export const processMessageNotification =
+/*
+ * Consultation-message delivery.
+ *
+ * Preserved exactly as it behaved before direct messages existed:
+ * the same participant validation, expected recipient role,
+ * subject, sender display name, client intake fallback, portal
+ * link and consultation-message tag. No metadata is attached.
+ */
+const processConsultationMessage =
   async (
-    messageId: string,
+    message: ConsultationMessageRow,
   ): Promise<ProcessMessageNotificationResult> => {
-    const messageResult =
-      await loadMessage(messageId);
-
-    if (!messageResult.ok) {
-      return {
-        ok: false,
-        action: "retry",
-        message:
-          "The message could not be loaded.",
-      };
-    }
-
-    if (!messageResult.message) {
-      return {
-        ok: true,
-        action: "remove",
-        outcome:
-          "message_missing",
-      };
-    }
-
-    const { message } =
-      messageResult;
-
-    if (message.read_at) {
-      return {
-        ok: true,
-        action: "remove",
-        outcome: "read",
-      };
-    }
-
-    if (
-      message
-        .email_notification_sent_at
-    ) {
-      return {
-        ok: true,
-        action: "remove",
-        outcome:
-          "already_sent",
-      };
-    }
-
     const participantResult =
       await loadParticipantContext(
         message,
@@ -1162,4 +1304,274 @@ export const processMessageNotification =
       action: "remove",
       outcome: "sent",
     };
+  };
+
+/*
+ * Direct admin <-> consultant message delivery.
+ *
+ * Uses the same delayed pipeline, the same read suppression and
+ * the same single idempotency marker as consultation messages.
+ * Only the addressing, copy, portal link, tag and metadata differ.
+ */
+const processDirectMessage = async (
+  message: MessageRow,
+): Promise<ProcessMessageNotificationResult> => {
+  const pairingResult =
+    await validateDirectPairing(
+      message,
+    );
+
+  if (!pairingResult.ok) {
+    if (
+      pairingResult.kind ===
+      "temporary"
+    ) {
+      return {
+        ok: false,
+        action: "retry",
+        message:
+          pairingResult.message,
+      };
+    }
+
+    return {
+      ok: true,
+      action: "remove",
+      outcome:
+        "permanent_failure",
+    };
+  }
+
+  const {
+    senderProfile,
+    recipientProfile,
+    senderRole,
+    recipientRole,
+  } = pairingResult.pairing;
+
+  const recipientEmail =
+    normalizeEmail(
+      recipientProfile.email,
+    );
+
+  /*
+   * There is no intake fallback here. Clients are excluded from
+   * direct messaging, and intake rows belong to consultations.
+   */
+  if (!recipientEmail) {
+    console.warn(
+      "Direct message notification permanently suppressed because the recipient has no usable email",
+      {
+        messageId: message.id,
+        recipientProfileId:
+          recipientProfile.id,
+      },
+    );
+
+    return {
+      ok: true,
+      action: "remove",
+      outcome:
+        "permanent_failure",
+    };
+  }
+
+  const recipientName =
+    recipientProfile.full_name?.trim() ??
+    "";
+
+  const portalLink =
+    buildDirectPortalLink(
+      recipientRole,
+    );
+
+  /*
+   * Amendment 006 section 6.
+   *
+   * An admin sender is always presented as the organisation, never
+   * by personal name. A consultant sender uses their full name
+   * when one is recorded.
+   */
+  const senderName =
+    senderRole === "admin"
+      ? "MakeHijrah Administration"
+      : senderProfile.full_name?.trim() ||
+        "A MakeHijrah consultant";
+
+  const subject =
+    senderRole === "admin"
+      ? "MakeHijrah Administration sent you a message"
+      : "A MakeHijrah consultant sent you a message";
+
+  const preview = createPreview(
+    message.body,
+  );
+
+  const greeting = recipientName
+    ? `Assalamu alaikum ${recipientName},`
+    : "Assalamu alaikum,";
+
+  const instruction =
+    "Sign in to your MakeHijrah portal to read and reply. Replies to this email are not monitored.";
+
+  const html = [
+    `<p>${escapeHtml(
+      greeting,
+    )}</p>`,
+    `<p>${escapeHtml(
+      senderName,
+    )} sent you a new message.</p>`,
+    `<blockquote style="margin:16px 0;padding:12px 16px;border-left:4px solid #669282;background:#f6f8f7;">${escapeHtml(
+      preview,
+    )}</blockquote>`,
+    `<p><a href="${escapeHtml(
+      portalLink,
+    )}" style="display:inline-block;padding:10px 16px;background:#669282;color:#ffffff;text-decoration:none;">Read and reply</a></p>`,
+    `<p>${escapeHtml(
+      instruction,
+    )}</p>`,
+  ].join("");
+
+  const text = [
+    greeting,
+    "",
+    `${senderName} sent you a new message.`,
+    "",
+    preview,
+    "",
+    `Read and reply: ${portalLink}`,
+    "",
+    instruction,
+  ].join("\n");
+
+  /*
+   * Metadata carries identifiers and roles only. No body, no
+   * consultation identifier, no email address, no name, no token
+   * and no URL parameters.
+   */
+  const emailResult =
+    await sendTransactionalEmail({
+      to: {
+        email: recipientEmail,
+        name:
+          recipientName || null,
+      },
+      subject,
+      html,
+      text,
+      tags: ["direct-message"],
+      metadata: {
+        message_id: message.id,
+        sender_role: senderRole,
+        recipient_role:
+          recipientRole,
+      },
+    });
+
+  if (!emailResult.ok) {
+    console.error(
+      "Direct message notification email failed",
+      {
+        messageId: message.id,
+        recipientProfileId:
+          recipientProfile.id,
+        message:
+          emailResult.message,
+      },
+    );
+
+    return {
+      ok: false,
+      action: "retry",
+      message:
+        "The message notification email could not be sent.",
+    };
+  }
+
+  const sentAt =
+    new Date().toISOString();
+
+  const updateResult =
+    await markEmailNotificationSent(
+      message.id,
+      sentAt,
+    );
+
+  if (!updateResult.ok) {
+    return {
+      ok: false,
+      action: "retry",
+      message:
+        "The notification delivery could not be recorded.",
+    };
+  }
+
+  return {
+    ok: true,
+    action: "remove",
+    outcome: "sent",
+  };
+};
+
+export const processMessageNotification =
+  async (
+    messageId: string,
+  ): Promise<ProcessMessageNotificationResult> => {
+    const messageResult =
+      await loadMessage(messageId);
+
+    if (!messageResult.ok) {
+      return {
+        ok: false,
+        action: "retry",
+        message:
+          "The message could not be loaded.",
+      };
+    }
+
+    if (!messageResult.message) {
+      return {
+        ok: true,
+        action: "remove",
+        outcome:
+          "message_missing",
+      };
+    }
+
+    const { message } =
+      messageResult;
+
+    /*
+     * Read suppression is re-checked here, after the delay, so a
+     * message read during the wait is never emailed.
+     */
+    if (message.read_at) {
+      return {
+        ok: true,
+        action: "remove",
+        outcome: "read",
+      };
+    }
+
+    if (
+      message
+        .email_notification_sent_at
+    ) {
+      return {
+        ok: true,
+        action: "remove",
+        outcome:
+          "already_sent",
+      };
+    }
+
+    return isConsultationMessage(
+      message,
+    )
+      ? processConsultationMessage(
+          message,
+        )
+      : processDirectMessage(
+          message,
+        );
   };
