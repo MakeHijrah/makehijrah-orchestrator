@@ -1,5 +1,5 @@
 import type Stripe from "stripe";
-import { stripe } from "../../lib/stripe.js";
+
 import { supabaseAdmin } from "../../lib/supabase.js";
 
 type ConsultationStatus =
@@ -181,6 +181,7 @@ const normalizePaymentIntentEvent = (
 };
 
 const normalizeRefundEvent = async (
+  stripe: Stripe,
   event: Stripe.Event,
   charge: Stripe.Charge,
 ): Promise<
@@ -299,6 +300,7 @@ const normalizeRefundEvent = async (
 };
 
 const normalizeStripeEvent = async (
+  stripe: Stripe,
   event: Stripe.Event,
 ): Promise<
   | {
@@ -386,6 +388,7 @@ const normalizeStripeEvent = async (
 
       const refundResult =
         await normalizeRefundEvent(
+          stripe,
           event,
           charge,
         );
@@ -432,10 +435,15 @@ const normalizeStripeEvent = async (
 
 export const processStripeWebhookEvent =
   async (
+    stripe: Stripe,
     event: Stripe.Event,
+    verifiedMode?: "test" | "live",
   ): Promise<ProcessStripeWebhookResult> => {
     const normalizationResult =
-      await normalizeStripeEvent(event);
+      await normalizeStripeEvent(
+        stripe,
+        event,
+      );
 
     if (!normalizationResult.ok) {
       return normalizationResult;
@@ -524,6 +532,71 @@ export const processStripeWebhookEvent =
         message:
           "The Stripe event could not be processed.",
       };
+    }
+
+    /*
+     * Record the Stripe mode this consultation's payment belongs
+     * to, from the mode whose signing secret verified the event.
+     * That is authoritative: the signature and the livemode check
+     * both passed for it.
+     *
+     * Checkout already sets this when the Session is created; this
+     * is the defensive backfill for any consultation that reached
+     * a PaymentIntent without one. Guarded on stripe_mode is null,
+     * so an existing value is never rewritten.
+     */
+    if (
+      verifiedMode &&
+      normalized.consultationId
+    ) {
+      /*
+       * Secondary to the transition above. A failure here is
+       * logged and swallowed: the payment has already been
+       * processed correctly, and checkout sets this value on the
+       * primary path.
+       */
+      try {
+        const { error: modeError } =
+          await supabaseAdmin
+            .from("consultations")
+            .update({
+              stripe_mode:
+                verifiedMode,
+            })
+            .eq(
+              "id",
+              normalized.consultationId,
+            )
+            .is(
+              "stripe_mode",
+              null,
+            );
+
+        if (modeError) {
+          console.error(
+            "Consultation Stripe mode backfill failed during webhook processing",
+            {
+              consultationId:
+                normalized.consultationId,
+              code: modeError.code,
+              message:
+                modeError.message,
+            },
+          );
+        }
+      } catch (error) {
+        console.error(
+          "Consultation Stripe mode backfill threw during webhook processing",
+          {
+            consultationId:
+              normalized.consultationId,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unknown error",
+          },
+        );
+      }
     }
 
     const row =

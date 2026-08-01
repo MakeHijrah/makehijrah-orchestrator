@@ -12,6 +12,7 @@ type CalculateLocalAvailabilityInput = {
   timezone: string;
   workingHours: Record<string, unknown>;
   minimumBookingNoticeHours: number;
+  slotDurationMinutes: number;
   from: string;
   to: string;
 };
@@ -31,6 +32,7 @@ export const calculateLocalAvailability = async ({
   timezone,
   workingHours,
   minimumBookingNoticeHours,
+  slotDurationMinutes,
   from,
   to,
 }: CalculateLocalAvailabilityInput): Promise<LocalAvailabilityCalculationResult> => {
@@ -41,6 +43,7 @@ export const calculateLocalAvailability = async ({
       timezone,
       workingHours,
       minimumBookingNoticeHours,
+      slotDurationMinutes,
       from,
       to,
     });

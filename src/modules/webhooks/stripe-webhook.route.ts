@@ -3,13 +3,87 @@ import type {
   FastifyRequest,
 } from "fastify";
 import type Stripe from "stripe";
-import { env } from "../../config/env.js";
 import {
   sendError,
   sendSuccess,
 } from "../../lib/api-response.js";
-import { stripe } from "../../lib/stripe.js";
+import {
+  configuredStripeModes,
+  getStripeClient,
+  stripeWebhookSecretFor,
+  type StripeMode,
+} from "../../lib/stripe.js";
 import { processStripeWebhookEvent } from "./stripe-webhook.service.js";
+
+/*
+ * Dual-mode webhook verification. PROJECT_LOCK Amendment 007
+ * section 6.
+ *
+ * Each configured mode's signing secret is tried in a fixed order,
+ * bounded to at most two attempts. Verification deliberately does
+ * not consult app_settings: a test event must stay verifiable
+ * while the platform is live, and a live event while it is in
+ * test.
+ *
+ * constructEvent is a pure HMAC comparison with no side effects,
+ * so trying both secrets cannot cause duplicate processing.
+ * Processing happens once, after a mode has been established.
+ */
+const VERIFICATION_ORDER = [
+  "test",
+  "live",
+] as const satisfies readonly StripeMode[];
+
+type VerifiedEvent = {
+  event: Stripe.Event;
+  mode: StripeMode;
+};
+
+const verifyStripeEvent = ({
+  rawBody,
+  signature,
+}: {
+  rawBody: string | Buffer;
+  signature: string;
+}): VerifiedEvent | null => {
+  const available = new Set(
+    configuredStripeModes(),
+  );
+
+  for (const mode of VERIFICATION_ORDER) {
+    if (!available.has(mode)) {
+      continue;
+    }
+
+    const secret =
+      stripeWebhookSecretFor(mode);
+
+    if (!secret) {
+      continue;
+    }
+
+    try {
+      const event =
+        getStripeClient(
+          mode,
+        ).webhooks.constructEvent(
+          rawBody,
+          signature,
+          secret,
+        );
+
+      return { event, mode };
+    } catch {
+      /*
+       * Try the next configured mode. Which secret failed is
+       * never surfaced or logged.
+       */
+      continue;
+    }
+  }
+
+  return null;
+};
 
 type StripeWebhookRequest =
   FastifyRequest & {
@@ -80,24 +154,17 @@ export const registerStripeWebhookRoute =
           );
         }
 
-        let event: Stripe.Event;
-
-        try {
-          event =
-            stripe.webhooks.constructEvent(
+        const verified =
+          verifyStripeEvent({
+            rawBody:
               webhookRequest.rawBody,
-              signature,
-              env.STRIPE_WEBHOOK_SECRET,
-            );
-        } catch (error) {
+            signature,
+          });
+
+        if (!verified) {
           request.log.warn(
-            {
-              message:
-                error instanceof Error
-                  ? error.message
-                  : "Unknown Stripe signature error",
-            },
-            "Stripe webhook signature verification failed",
+            {},
+            "Stripe webhook signature verification failed for every configured mode",
           );
 
           return sendError(
@@ -108,9 +175,47 @@ export const registerStripeWebhookRoute =
           );
         }
 
+        const {
+          event,
+          mode: verifiedMode,
+        } = verified;
+
+        /*
+         * The event's own livemode must agree with the mode of the
+         * secret that verified it. This is what stops a test event
+         * from ever driving live payment handling, and vice versa.
+         * Amendment 007 section 6.2.
+         */
+        if (
+          event.livemode !==
+          (verifiedMode === "live")
+        ) {
+          request.log.error(
+            {
+              eventId: event.id,
+              eventType: event.type,
+              verifiedMode,
+              eventLivemode:
+                event.livemode,
+            },
+            "Stripe webhook rejected because event livemode does not match the verifying secret",
+          );
+
+          return sendError(
+            reply,
+            400,
+            "STRIPE_LIVEMODE_MISMATCH",
+            "The Stripe webhook event does not match its signing mode.",
+          );
+        }
+
         const processingResult =
           await processStripeWebhookEvent(
+            getStripeClient(
+              verifiedMode,
+            ),
             event,
+            verifiedMode,
           );
 
         if (!processingResult.ok) {

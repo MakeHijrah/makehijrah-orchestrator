@@ -1,5 +1,8 @@
 import type Stripe from "stripe";
-import { stripe } from "../../lib/stripe.js";
+import {
+  paymentIntentModeMatches,
+  resolveConsultationStripeClient,
+} from "./consultation-stripe-mode.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import {
   scheduleDeclineNotification,
@@ -10,6 +13,7 @@ type DeclineConsultationRow = {
   consultant_id: string;
   status: string;
   stripe_payment_intent_id: string | null;
+  stripe_mode: string | null;
   declined_at: string | null;
   admin_attention_reason: string | null;
 };
@@ -51,7 +55,7 @@ const loadDeclineConsultation = async (
     await supabaseAdmin
       .from("consultations")
       .select(
-        "id, consultant_id, status, stripe_payment_intent_id, declined_at, admin_attention_reason",
+        "id, consultant_id, status, stripe_payment_intent_id, stripe_mode, declined_at, admin_attention_reason",
       )
       .eq("id", consultationId)
       .maybeSingle();
@@ -94,6 +98,8 @@ const loadDeclineConsultation = async (
 
 const cancelPaymentAuthorization = async (
   paymentIntentId: string,
+  stripe: Stripe,
+  mode: "test" | "live",
 ): Promise<
   | {
       ok: true;
@@ -131,6 +137,28 @@ const cancelPaymentAuthorization = async (
       code: "STRIPE_ERROR",
       message:
         "The payment authorization could not be verified.",
+    };
+  }
+
+  if (
+    !paymentIntentModeMatches({
+      paymentIntent,
+      mode,
+    })
+  ) {
+    console.error(
+      "Stripe livemode mismatch blocked a payment operation",
+      {
+        paymentIntentId,
+        expectedMode: mode,
+      },
+    );
+
+    return {
+      ok: false,
+      code: "STRIPE_ERROR",
+      message:
+        "The payment could not be verified against its original Stripe account.",
     };
   }
 
@@ -397,9 +425,25 @@ export const declineConsultation =
       };
     }
 
+    const stripeClientResult =
+      resolveConsultationStripeClient(
+        consultation,
+      );
+
+    if (!stripeClientResult.ok) {
+      return {
+        ok: false,
+        code: "STRIPE_ERROR",
+        message:
+          stripeClientResult.message,
+      };
+    }
+
     const cancellationResult =
       await cancelPaymentAuthorization(
         paymentIntentId,
+        stripeClientResult.client,
+        stripeClientResult.mode,
       );
 
     if (!cancellationResult.ok) {

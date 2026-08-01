@@ -1,5 +1,8 @@
 import type Stripe from "stripe";
-import { stripe } from "../../lib/stripe.js";
+import {
+  paymentIntentModeMatches,
+  resolveConsultationStripeClient,
+} from "./consultation-stripe-mode.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import { getGoogleAccessToken } from "../oauth/google-access-token.js";
 import { createConsultationCalendarEvent } from "./google-calendar-event.service.js";
@@ -15,6 +18,7 @@ type AcceptanceConsultationRow = {
   scheduled_end_at: string;
   client_timezone: string;
   stripe_payment_intent_id: string | null;
+  stripe_mode: string | null;
   payment_authorized_at: string | null;
   google_event_id: string | null;
   meet_link: string | null;
@@ -59,7 +63,7 @@ const loadAcceptanceConsultation = async (
     await supabaseAdmin
       .from("consultations")
       .select(
-        "id, consultant_id, status, scheduled_start_at, scheduled_end_at, client_timezone, stripe_payment_intent_id, payment_authorized_at, google_event_id, meet_link",
+        "id, consultant_id, status, scheduled_start_at, scheduled_end_at, client_timezone, stripe_payment_intent_id, stripe_mode, payment_authorized_at, google_event_id, meet_link",
       )
       .eq("id", consultationId)
       .maybeSingle();
@@ -138,6 +142,8 @@ const markAdminAttention = async ({
 
 const capturePaymentIntent = async (
   paymentIntentId: string,
+  stripe: Stripe,
+  mode: "test" | "live",
 ): Promise<
   | {
       ok: true;
@@ -175,6 +181,33 @@ const capturePaymentIntent = async (
       code: "STRIPE_ERROR",
       message:
         "The payment authorization could not be verified.",
+    };
+  }
+
+  /*
+   * Defence in depth. The client was chosen from the recorded
+   * mode; the object's own livemode must agree before any capture.
+   * Amendment 007 section 5.7.
+   */
+  if (
+    !paymentIntentModeMatches({
+      paymentIntent,
+      mode,
+    })
+  ) {
+    console.error(
+      "Stripe livemode mismatch blocked a capture",
+      {
+        paymentIntentId,
+        expectedMode: mode,
+      },
+    );
+
+    return {
+      ok: false,
+      code: "STRIPE_ERROR",
+      message:
+        "The payment could not be verified against its original Stripe account.",
     };
   }
 
@@ -456,9 +489,30 @@ export const acceptConsultation =
       };
     }
 
+    /*
+     * The client comes from the mode recorded on this
+     * consultation, so a payment authorised in test mode still
+     * captures against test after a global switch to live.
+     */
+    const stripeClientResult =
+      resolveConsultationStripeClient(
+        consultation,
+      );
+
+    if (!stripeClientResult.ok) {
+      return {
+        ok: false,
+        code: "STRIPE_ERROR",
+        message:
+          stripeClientResult.message,
+      };
+    }
+
     const captureResult =
       await capturePaymentIntent(
         paymentIntentId,
+        stripeClientResult.client,
+        stripeClientResult.mode,
       );
 
     if (!captureResult.ok) {

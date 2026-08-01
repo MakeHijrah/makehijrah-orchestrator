@@ -1,10 +1,20 @@
-import { env } from "../../config/env.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import type { CreateDraftConsultationInput } from "./draft.schema.js";
 
 type CreateDraftRepositoryInput = {
   clientProfileId: string;
   scheduledEndAt: string;
+  /*
+   * Snapshot values resolved from app_settings by the caller.
+   *
+   * Passed in rather than read here so a single request resolves
+   * settings once, and so the price written to the consultation is
+   * demonstrably the one the route loaded. Never supplied by the
+   * client: the draft request body carries no price or currency
+   * field and none is accepted.
+   */
+  priceCents: number;
+  currency: string;
   draft: CreateDraftConsultationInput;
 };
 
@@ -38,6 +48,8 @@ type DraftRpcRow = {
 export const createDraftConsultationRecord = async ({
   clientProfileId,
   scheduledEndAt,
+  priceCents,
+  currency,
   draft,
 }: CreateDraftRepositoryInput): Promise<CreateDraftRepositoryResult> => {
   const { data, error } = await supabaseAdmin.rpc(
@@ -49,9 +61,8 @@ export const createDraftConsultationRecord = async ({
       p_scheduled_start_at: draft.start_at,
       p_scheduled_end_at: scheduledEndAt,
       p_client_timezone: draft.client_timezone,
-      p_price_cents:
-        env.DEFAULT_CONSULTATION_PRICE_CENTS,
-      p_currency: env.DEFAULT_CURRENCY,
+      p_price_cents: priceCents,
+      p_currency: currency,
       p_full_name: draft.intake.full_name,
       p_email: draft.intake.email,
       p_phone_whatsapp:

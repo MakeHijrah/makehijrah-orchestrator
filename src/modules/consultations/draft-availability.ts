@@ -6,6 +6,16 @@ import { getGoogleBusyIntervals } from "../availability/google-freebusy.js";
 type ValidateDraftSlotInput = {
   consultantId: string;
   startAt: string;
+  /*
+   * Supplied by the caller from
+   * app_settings.consultation_duration_minutes, loaded once for
+   * the request. Amendment 007 section 8.5.
+   *
+   * The same value drives both the end time returned here and the
+   * slot generation used to re-validate the slot, so the two can
+   * never disagree.
+   */
+  durationMinutes: number;
 };
 
 export type DraftSlotValidationResult =
@@ -25,9 +35,6 @@ export type DraftSlotValidationResult =
         | "INTERNAL_ERROR";
       message: string;
     };
-
-const SLOT_DURATION_MILLISECONDS =
-  60 * 60 * 1000;
 
 const VALIDATION_WINDOW_PADDING_MILLISECONDS =
   24 * 60 * 60 * 1000;
@@ -49,7 +56,11 @@ const timestampsMatch = (
 export const validateDraftSlot = async ({
   consultantId,
   startAt,
+  durationMinutes,
 }: ValidateDraftSlotInput): Promise<DraftSlotValidationResult> => {
+  const slotDurationMilliseconds =
+    durationMinutes * 60 * 1000;
+
   const requestedStart = new Date(startAt);
 
   if (Number.isNaN(requestedStart.getTime())) {
@@ -63,7 +74,7 @@ export const validateDraftSlot = async ({
 
   const requestedEnd = new Date(
     requestedStart.getTime() +
-      SLOT_DURATION_MILLISECONDS,
+      slotDurationMilliseconds,
   );
 
   const requestedStartIso =
@@ -113,6 +124,8 @@ export const validateDraftSlot = async ({
       minimumBookingNoticeHours:
         consultantResult.consultant
           .minimumBookingNoticeHours,
+      slotDurationMinutes:
+        durationMinutes,
       from: validationFrom,
       to: validationTo,
     });

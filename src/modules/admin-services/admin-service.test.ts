@@ -21,6 +21,10 @@ const testEnv: Record<string, string> = {
   SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
   REDIS_URL: "redis://127.0.0.1:6379",
   STRIPE_SECRET_KEY: "sk_test_admin_services",
+  STRIPE_TEST_SECRET_KEY: "sk_test_admin_services",
+  STRIPE_TEST_WEBHOOK_SECRET: "whsec_test_admin_services",
+  STRIPE_LIVE_SECRET_KEY: "sk_live_admin_services",
+  STRIPE_LIVE_WEBHOOK_SECRET: "whsec_live_admin_services",
   STRIPE_WEBHOOK_SECRET: "whsec_admin_services",
   OAUTH_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64"),
   GOOGLE_CLIENT_ID: "test-google-client-id",
@@ -38,7 +42,9 @@ for (const [key, value] of Object.entries(testEnv)) {
 }
 
 const { default: Fastify } = await import("fastify");
-const { stripe } = await import("../../lib/stripe.js");
+const { getStripeClient } = await import("../../lib/stripe.js");
+/* Amendment 007: one client per mode. Tests run in test mode. */
+const stripe = getStripeClient("test");
 const { supabaseAdmin } = await import("../../lib/supabase.js");
 const { redis } = await import("../../lib/redis.js");
 const { registerAdminServiceRoutes } = await import(
@@ -61,13 +67,29 @@ type DbFailure = {
 };
 
 type FakeDatabase = {
+  /* Amendment 007: the catalog resolves its Stripe mode from here. */
+  app_settings: Row[];
   services: Row[];
   service_recommendations: Row[];
   service_requests: Row[];
   profiles: Row[];
 };
 
+const APP_SETTINGS_ROW: Row = {
+  id: "99999999-9999-4999-8999-999999999999",
+  is_singleton: true,
+  consultation_price_cents: 15000,
+  consultation_currency: "usd",
+  consultation_duration_minutes: 60,
+  stripe_mode: "test",
+  support_email: null,
+  default_timezone: "Africa/Cairo",
+  updated_at: "2026-08-01T00:00:00.000Z",
+  updated_by_admin_profile_id: null,
+};
+
 const db: FakeDatabase = {
+  app_settings: [{ ...APP_SETTINGS_ROW }],
   services: [],
   service_recommendations: [],
   service_requests: [],
@@ -162,6 +184,15 @@ class FakeQuery {
 
   eq(column: string, value: unknown) {
     this.filters.push([column, value]);
+    return this;
+  }
+
+  /*
+   * Amendment 007: the settings provider reads with .limit(2) so a
+   * violated singleton invariant is detectable. The fake keeps
+   * every row; no test relies on truncation.
+   */
+  limit(_count: number) {
     return this;
   }
 
@@ -395,6 +426,9 @@ const stripeCall = async <T extends Row>(
 const redisStore = new Map<string, string>();
 
 const installStubs = (): void => {
+  db.app_settings = [
+    { ...APP_SETTINGS_ROW },
+  ];
   db.services = [];
   db.service_recommendations = [];
   db.service_requests = [];

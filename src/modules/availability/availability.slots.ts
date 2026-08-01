@@ -5,7 +5,12 @@ import type {
   WorkingHoursInterval,
 } from "./availability.types.js";
 
-const SLOT_DURATION_MINUTES = 60;
+/*
+ * Slot length is supplied by the caller from
+ * app_settings.consultation_duration_minutes. Amendment 007
+ * section 8.5. The stride between candidate slot starts is
+ * unchanged.
+ */
 const SLOT_INTERVAL_MINUTES = 30;
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -92,6 +97,7 @@ type GenerateWorkingHourSlotsInput = {
   timezone: string;
   workingHours: Record<string, unknown>;
   minimumBookingNoticeHours: number;
+  slotDurationMinutes: number;
   from: string;
   to: string;
   now?: DateTime;
@@ -101,6 +107,7 @@ export const generateWorkingHourSlots = ({
   timezone,
   workingHours,
   minimumBookingNoticeHours,
+  slotDurationMinutes,
   from,
   to,
   now = DateTime.utc(),
@@ -170,11 +177,11 @@ export const generateWorkingHourSlots = ({
 
       while (
         slotStart.plus({
-          minutes: SLOT_DURATION_MINUTES,
+          minutes: slotDurationMinutes,
         }) <= intervalEnd
       ) {
         const slotEnd = slotStart.plus({
-          minutes: SLOT_DURATION_MINUTES,
+          minutes: slotDurationMinutes,
         });
 
         const slotStartUtc = slotStart.toUTC();

@@ -43,6 +43,7 @@ import {
   stopOAuthHealthWorker,
 } from "./modules/oauth/oauth-health.worker.js";
 import { registerRecommendationSendRoute } from "./modules/recommendations/recommendation-send.route.js";
+import { registerSettingsRoutes } from "./modules/settings/settings.route.js";
 import { registerStripeWebhookRoute } from "./modules/webhooks/stripe-webhook.route.js";
 
 const app = Fastify({
@@ -222,6 +223,9 @@ await registerMessageNotificationRoute(
   app,
 );
 await registerInviteRoutes(
+  app,
+);
+await registerSettingsRoutes(
   app,
 );
 await registerStripeWebhookRoute(

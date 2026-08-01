@@ -1,5 +1,8 @@
 import type Stripe from "stripe";
-import { stripe } from "../../lib/stripe.js";
+import {
+  paymentIntentModeMatches,
+  resolveConsultationStripeClient,
+} from "../consultations/consultation-stripe-mode.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import {
   deleteConsultationCalendarEvent,
@@ -13,6 +16,7 @@ type AdminCancellationRow = {
   consultant_id: string;
   status: string;
   stripe_payment_intent_id: string | null;
+  stripe_mode: string | null;
   google_event_id: string | null;
   cancelled_at: string | null;
   admin_attention_reason: string | null;
@@ -65,7 +69,7 @@ const loadConsultation = async (
     await supabaseAdmin
       .from("consultations")
       .select(
-        "id, consultant_id, status, stripe_payment_intent_id, google_event_id, cancelled_at, admin_attention_reason",
+        "id, consultant_id, status, stripe_payment_intent_id, stripe_mode, google_event_id, cancelled_at, admin_attention_reason",
       )
       .eq("id", consultationId)
       .maybeSingle();
@@ -108,6 +112,8 @@ const loadConsultation = async (
 
 const cancelAuthorization = async (
   paymentIntentId: string,
+  stripe: Stripe,
+  mode: "test" | "live",
 ): Promise<
   | {
       ok: true;
@@ -207,6 +213,8 @@ const cancelAuthorization = async (
 
 const refundPayment = async (
   paymentIntentId: string,
+  stripe: Stripe,
+  mode: "test" | "live",
 ): Promise<
   | {
       ok: true;
@@ -597,6 +605,31 @@ export const adminCancelConsultation =
       return calendarResult;
     }
 
+    /*
+     * Every Stripe operation below acts on an existing payment, so
+     * the client comes from the mode recorded on the consultation,
+     * never from the current global mode. Amendment 007 §5.7.
+     */
+    const stripeClientResult =
+      resolveConsultationStripeClient(
+        consultation,
+      );
+
+    if (!stripeClientResult.ok) {
+      return {
+        ok: false,
+        code: "STRIPE_ERROR",
+        message:
+          stripeClientResult.message,
+      };
+    }
+
+    const stripe =
+      stripeClientResult.client;
+
+    const stripeMode =
+      stripeClientResult.mode;
+
     if (refund) {
       if (!paymentIntentId) {
         return {
@@ -610,6 +643,8 @@ export const adminCancelConsultation =
       const refundResult =
         await refundPayment(
           paymentIntentId,
+          stripe,
+          stripeMode,
         );
 
       if (!refundResult.ok) {
@@ -635,6 +670,8 @@ export const adminCancelConsultation =
       const cancelResult =
         await cancelAuthorization(
           paymentIntentId,
+          stripe,
+          stripeMode,
         );
 
       if (!cancelResult.ok) {
@@ -688,6 +725,8 @@ export const adminCancelConsultation =
         const cancelResult =
           await cancelAuthorization(
             paymentIntentId,
+            stripe,
+            stripeMode,
           );
 
         if (!cancelResult.ok) {

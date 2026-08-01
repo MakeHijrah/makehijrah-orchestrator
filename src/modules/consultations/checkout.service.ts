@@ -1,6 +1,9 @@
 import type Stripe from "stripe";
 import { env } from "../../config/env.js";
-import { stripe } from "../../lib/stripe.js";
+import {
+  getActiveStripeMode,
+  getStripeClient,
+} from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 
 const DRAFT_HOLD_MINUTES = 30;
@@ -267,6 +270,20 @@ export const createStripeCheckout =
       };
     }
 
+    /*
+     * The Checkout Session is created under the currently active
+     * mode, so any PaymentIntent it produces belongs to that
+     * Stripe account. The mode is recorded on the consultation
+     * below, and every later operation on this payment selects its
+     * client from that recorded value rather than from the global
+     * mode. Amendment 007 sections 5.7 and 5.8.
+     */
+    const activeMode =
+      await getActiveStripeMode();
+
+    const stripe =
+      getStripeClient(activeMode);
+
     let checkoutSession:
       Stripe.Checkout.Session;
 
@@ -368,6 +385,47 @@ export const createStripeCheckout =
       return {
         ok: false,
         code: "STRIPE_ERROR",
+        message:
+          "The payment session could not be created.",
+      };
+    }
+
+    /*
+     * Record the Stripe mode this consultation's payment belongs
+     * to, as soon as the Session that will create it exists.
+     *
+     * The PaymentIntent id itself is written later by
+     * process_stripe_webhook_event, so this is the earliest point
+     * at which the mode is both known and attachable. The webhook
+     * re-asserts it from its verified mode, which is authoritative.
+     *
+     * Guarded on stripe_mode is null so a retried checkout can
+     * never rewrite the mode of an existing payment.
+     */
+    const { error: modeError } =
+      await supabaseAdmin
+        .from("consultations")
+        .update({
+          stripe_mode: activeMode,
+        })
+        .eq("id", consultationId)
+        .is("stripe_mode", null);
+
+    if (modeError) {
+      console.error(
+        "Consultation Stripe mode snapshot failed",
+        {
+          consultationId,
+          code: modeError.code,
+          message: modeError.message,
+          details: modeError.details,
+          hint: modeError.hint,
+        },
+      );
+
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
         message:
           "The payment session could not be created.",
       };

@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import type Stripe from "stripe";
 import { env } from "../../config/env.js";
-import { stripe } from "../../lib/stripe.js";
+import { getActiveStripeClient } from "../../lib/stripe.js";
 import type { StructuredPricing } from "./admin-service.schema.js";
 
 export type StripeFailure = {
@@ -263,7 +263,7 @@ export const createProduct = async ({
 > => {
   try {
     const product =
-      await stripe.products.create(
+      await (await getActiveStripeClient()).products.create(
         {
           name,
           ...(description
@@ -319,7 +319,7 @@ export const updateProductDescriptive =
   > => {
     try {
       const product =
-        await stripe.products.update(
+        await (await getActiveStripeClient()).products.update(
           stripeProductId,
           {
             name,
@@ -365,7 +365,7 @@ export const createPrice = async ({
 > => {
   try {
     const price =
-      await stripe.prices.create(
+      await (await getActiveStripeClient()).prices.create(
         {
           product: stripeProductId,
           unit_amount:
@@ -429,7 +429,7 @@ export const createPaymentLink = async ({
 > => {
   try {
     const paymentLink =
-      await stripe.paymentLinks.create(
+      await (await getActiveStripeClient()).paymentLinks.create(
         {
           line_items: [
             {
@@ -482,7 +482,7 @@ export const retrievePaymentLink =
        * correspondence check below can never actually run.
        */
       const paymentLink =
-        await stripe.paymentLinks.retrieve(
+        await (await getActiveStripeClient()).paymentLinks.retrieve(
           stripePaymentLinkId,
           {
             expand: ["line_items"],
@@ -513,7 +513,7 @@ export const deactivatePaymentLink =
   > => {
     try {
       const paymentLink =
-        await stripe.paymentLinks.update(
+        await (await getActiveStripeClient()).paymentLinks.update(
           stripePaymentLinkId,
           { active: false },
         );
@@ -538,7 +538,7 @@ export const deactivatePrice = async (
 > => {
   try {
     const price =
-      await stripe.prices.update(
+      await (await getActiveStripeClient()).prices.update(
         stripePriceId,
         { active: false },
       );
@@ -564,7 +564,7 @@ export const archiveProduct = async (
 > => {
   try {
     const product =
-      await stripe.products.update(
+      await (await getActiveStripeClient()).products.update(
         stripeProductId,
         { active: false },
       );

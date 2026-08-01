@@ -11,6 +11,10 @@ import {
 import { validateDraftSlot } from "./draft-availability.js";
 import { createDraftConsultationRecord } from "./draft.repository.js";
 import { createDraftConsultationSchema } from "./draft.schema.js";
+import {
+  getSettings,
+  SettingsUnavailableError,
+} from "../settings/settings.provider.js";
 
 export const registerDraftConsultationRoute = async (
   app: FastifyInstance,
@@ -38,6 +42,38 @@ export const registerDraftConsultationRoute = async (
           "VALIDATION_ERROR",
           "The consultation request is invalid.",
           parsed.error.flatten(),
+        );
+      }
+
+      /*
+       * Settings are loaded once per request and reused for slot
+       * duration and for the price snapshot, so both come from the
+       * same read. Amendment 007 sections 4.1 and 8.5.
+       *
+       * Fails closed: a booking must never be created at a guessed
+       * price.
+       */
+      let settings;
+
+      try {
+        settings = await getSettings();
+      } catch (error) {
+        request.log.error(
+          {
+            message:
+              error instanceof
+              SettingsUnavailableError
+                ? error.message
+                : "Unknown settings error",
+          },
+          "Draft consultation settings lookup failed",
+        );
+
+        return sendError(
+          reply,
+          500,
+          "INTERNAL_ERROR",
+          "The consultation could not be created.",
         );
       }
 
@@ -88,6 +124,8 @@ export const registerDraftConsultationRoute = async (
           consultantId:
             parsed.data.consultant_id,
           startAt: parsed.data.start_at,
+          durationMinutes:
+            settings.consultation_duration_minutes,
         });
 
       if (!slotValidation.ok) {
@@ -186,6 +224,10 @@ export const registerDraftConsultationRoute = async (
             clientResult.profileId,
           scheduledEndAt:
             slotValidation.endAt,
+          priceCents:
+            settings.consultation_price_cents,
+          currency:
+            settings.consultation_currency,
           draft: parsed.data,
         });
 

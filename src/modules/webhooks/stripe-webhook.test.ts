@@ -27,6 +27,10 @@ const testEnv: Record<string, string> = {
   SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
   REDIS_URL: "redis://127.0.0.1:6379",
   STRIPE_SECRET_KEY: "sk_test_stripe_webhook_tests",
+  STRIPE_TEST_SECRET_KEY: "sk_test_stripe_webhook_tests",
+  STRIPE_TEST_WEBHOOK_SECRET: "whsec_test_stripe_webhook_tests",
+  STRIPE_LIVE_SECRET_KEY: "sk_live_stripe_webhook_tests",
+  STRIPE_LIVE_WEBHOOK_SECRET: "whsec_live_stripe_webhook_tests",
   STRIPE_WEBHOOK_SECRET: "whsec_stripe_webhook_tests",
   OAUTH_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64"),
   GOOGLE_CLIENT_ID: "test-google-client-id",
@@ -43,7 +47,8 @@ for (const [key, value] of Object.entries(testEnv)) {
   process.env[key] ??= value;
 }
 
-const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET as string;
+const WEBHOOK_SECRET = process.env
+  .STRIPE_TEST_WEBHOOK_SECRET as string;
 
 /*
  * Imported dynamically so the environment above is in place
@@ -51,7 +56,9 @@ const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET as string;
  */
 const { default: Fastify } = await import("fastify");
 const { default: rawBody } = await import("fastify-raw-body");
-const { stripe } = await import("../../lib/stripe.js");
+const { getStripeClient } = await import("../../lib/stripe.js");
+/* Amendment 007: one client per mode. Tests run in test mode. */
+const stripe = getStripeClient("test");
 const { supabaseAdmin } = await import("../../lib/supabase.js");
 const { registerStripeWebhookRoute } = await import(
   "./stripe-webhook.route.js"
@@ -136,6 +143,7 @@ const paymentIntentEvent = (
 ): Record<string, unknown> => ({
   id: `evt_${type.replace(/\./g, "_")}`,
   object: "event",
+  livemode: false,
   type,
   created: 1_735_689_600,
   data: {
@@ -154,6 +162,7 @@ const paymentIntentEvent = (
 const chargeRefundedEvent = (): Record<string, unknown> => ({
   id: "evt_charge_refunded",
   object: "event",
+  livemode: false,
   type: "charge.refunded",
   created: 1_735_689_600,
   data: {
@@ -506,6 +515,7 @@ describe("Stripe webhook: unsupported event types", () => {
     const response = await post({
       id: "evt_customer_created",
       object: "event",
+  livemode: false,
       type: "customer.created",
       created: 1_735_689_600,
       data: { object: { id: "cus_test_123", object: "customer" } },
@@ -524,6 +534,7 @@ describe("Stripe webhook: unsupported event types", () => {
     const unsupported = await post({
       id: "evt_checkout_completed",
       object: "event",
+  livemode: false,
       type: "checkout.session.completed",
       created: 1_735_689_600,
       data: { object: { id: "cs_test_123", object: "checkout.session" } },
