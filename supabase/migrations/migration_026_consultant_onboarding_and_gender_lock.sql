@@ -75,7 +75,47 @@ alter table public.consultants
   add column if not exists onboarding_completed_at timestamptz;
 
 -- ------------------------------------------------------------
--- 2. Backfill: active consultants only
+-- 2. Preflight: every active consultant has a usable gender
+-- ------------------------------------------------------------
+--
+-- The backfill in section 3 locks gender permanently for every
+-- consultant it marks. Marking a consultant whose gender is null
+-- or otherwise unusable would lock them into an invalid value
+-- that no application path can then correct, and the only way out
+-- would be a direct service-role write.
+--
+-- So this aborts the whole transaction instead. Nothing is
+-- repaired, inferred or assigned here: a missing gender is a data
+-- question for an administrator, not something a migration may
+-- guess.
+--
+-- IS DISTINCT FROM is used rather than <> or NOT IN so that a
+-- null gender is counted rather than silently dropping out of the
+-- predicate.
+--
+-- On abort the column addition in section 1 rolls back with
+-- everything else, so a failed run leaves the schema untouched.
+
+do $$
+declare
+  v_invalid_count integer;
+begin
+  select count(*)
+    into v_invalid_count
+    from public.consultants
+   where is_active = true
+     and gender is distinct from 'male'
+     and gender is distinct from 'female';
+
+  if v_invalid_count > 0 then
+    raise exception
+      'MIGRATION_026_ACTIVE_CONSULTANT_GENDER_INVALID: % active consultant(s) have a gender that is not exactly male or female. Resolve each one before applying migration 026. No row has been modified.',
+      v_invalid_count;
+  end if;
+end $$;
+
+-- ------------------------------------------------------------
+-- 3. Backfill: active consultants only
 -- ------------------------------------------------------------
 --
 -- A consultant who is already active was activated by an
@@ -94,10 +134,18 @@ alter table public.consultants
 -- is_privileged_writer() would exempt it either way. Doing it in
 -- this order removes any dependence on that.
 --
--- Re-runnable: the null predicate makes a second run a no-op for
--- rows already marked. A consultant activated after this
--- migration would be marked by a re-run, which is consistent
--- with the rule above.
+-- Execution model: this migration runs ONCE, through the
+-- migration ledger. ADD COLUMN IF NOT EXISTS and the null
+-- predicate exist for technical retry safety during a deployment
+-- recovery - an interrupted or repeated apply must not fail or
+-- double-write - and for nothing else.
+--
+-- It is NOT a recurring backfill. A consultant who completes
+-- onboarding after this migration is marked only by the new
+-- profile-submission workflow. Re-running this migration to mark
+-- consultants activated later is not a supported operation and
+-- would set the marker without the completeness validation the
+-- marker is supposed to represent.
 --
 -- Side effect, disclosed: consultants also carries
 -- trg_consultants_updated, so backfilled rows have updated_at
@@ -109,7 +157,7 @@ update public.consultants
    and onboarding_completed_at is null;
 
 -- ------------------------------------------------------------
--- 3. Extended consultant column guard
+-- 4. Extended consultant column guard
 -- ------------------------------------------------------------
 --
 -- The function is replaced in place rather than supplemented by
