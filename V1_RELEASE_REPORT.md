@@ -84,6 +84,11 @@ Message:                   Reconcile v1.0 documentation
 **Railway deployment `5707559039`** is the last confirmed healthy deployment
 before the release-documentation rebuild. **[O]**
 
+**Railway deployment `5723913641`** is the documentation-only rebuild triggered
+by the `Release v1.0.0` commit. It reached `success`, and `/health` returned
+HTTP 200 with `redis: connected`, `supabase: connected`, `supabaseTestRows: 1`,
+`environment: production`. It changes no runtime behaviour. **[D]**
+
 ---
 
 ## 6. Database state
@@ -205,6 +210,7 @@ Deferred to a v1.0.x patch. **These are not accepted product limitations.**
 | Orchestrator runtime commit | `f9054314744dda99950c22277a7704f273950311` |
 | Orchestrator pre-release docs | `01af24381ca3b17915e671a31bb66ba31904f5ff` |
 | Last confirmed healthy Railway deployment | `5707559039` |
+| Release-documentation rebuild deployment | `5723913641` |
 | Migration level | `025` |
 
 Rolling the orchestrator back to `f905431` restores the released runtime. The

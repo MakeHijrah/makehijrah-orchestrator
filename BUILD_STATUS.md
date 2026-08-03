@@ -102,10 +102,11 @@ Message:              Reconcile v1.0 documentation
 Verified in this workspace: local `HEAD` == `origin/main` == `01af243` before release documentation.
 
 ```text
-Railway deployment: 5707559039   Successful
+Railway deployment: 5707559039   Successful   (last confirmed before release docs)
+Railway deployment: 5723913641   Successful   (release-documentation rebuild)
 ```
 
-Last confirmed healthy deployment before the release-documentation rebuild. `/health` returns HTTP 200 with `redis: connected`, `supabase: connected`, `supabaseTestRows: 1`, `environment: production`. **[D]**
+`5707559039` is the last confirmed healthy deployment before the release-documentation rebuild. `5723913641` is the documentation-only rebuild triggered by the `Release v1.0.0` commit; it changes no runtime behaviour. `/health` returned HTTP 200 with `redis: connected`, `supabase: connected`, `supabaseTestRows: 1`, `environment: production` after both. **[D]**
 
 ### Frontend **[O]**
 
