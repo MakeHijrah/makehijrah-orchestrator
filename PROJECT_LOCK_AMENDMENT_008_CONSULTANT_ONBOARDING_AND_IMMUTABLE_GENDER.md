@@ -395,14 +395,14 @@ table is created.
 
 ---
 
-## 17. Atomic profile function — deferred
+## 17. Atomic profile function
 
-17.1 `public.save_consultant_profile(...)` is **not created in this phase.**
-Its contract depends on the endpoint's final field set and on the split between
-SQL-side and application-side validation, and §17.4 forbids shipping a partially
-specified security-sensitive function.
+17.1 `public.save_consultant_profile(...)` was deferred from migration 026
+because its contract was not final. It is now final and is created by
+**`migration_027_atomic_consultant_profile_save.sql`**. The signature below is
+the one that shipped, unchanged from the proposal.
 
-17.2 The proposed signature, to be finalised in the orchestrator phase:
+17.2 Signature:
 
 ```sql
 create or replace function public.save_consultant_profile(
@@ -444,8 +444,53 @@ set search_path = public;
 - application-layer completeness remains authoritative for any requirement
   needing data outside this transaction.
 
-17.4 A half-secure function must not be created. Deferral is the correct outcome
-when the contract is not final.
+17.4 A half-secure function must not be created. Deferral was the correct
+outcome while the contract was unsettled.
+
+17.5 **Finalised mode semantics**, as implemented:
+
+| Mode | Precondition | Marker | Gender |
+|---|---|---|---|
+| `draft` | marker **is null** | never set or cleared | optional; if supplied must be `male` or `female` |
+| `submit` | marker **is null** | set to `now()`, exactly once | **required**, `male` or `female` |
+| `update` | marker **is not null** | never changed | null ignored; equal to stored tolerated for rollout; different rejected |
+
+17.6 **Null-preserve semantics.** In every mode, a null field argument means
+"leave the stored value unchanged". Null is never coerced into an empty string.
+An empty string is stored only when the application deliberately sends one.
+
+17.7 **Country semantics.** `p_country_ids` null preserves existing assignments.
+A supplied array replaces them wholesale, after de-duplication and after
+validating that every distinct identifier exists and is active. An **empty array
+is an instruction to remove all assignments**, distinguished from null by
+`IS NULL` rather than by `array_length`, which returns null for an empty array
+and would otherwise conflate the two.
+
+17.8 **Stable exception markers** raised by the function, for the service to map
+to §14.2 API codes:
+
+```text
+CONSULTANT_PROFILE_MODE_INVALID
+CONSULTANT_PROFILE_NOT_FOUND
+CONSULTANT_ONBOARDING_ALREADY_COMPLETED
+CONSULTANT_ONBOARDING_INCOMPLETE
+CONSULTANT_GENDER_INVALID
+CONSULTANT_GENDER_IMMUTABLE
+CONSULTANT_COUNTRY_INVALID
+```
+
+`CONSULTANT_ONBOARDING_INCOMPLETE` is new in migration 027. It covers `update`
+attempted before onboarding completion, a case the original text did not name.
+Raw PostgreSQL text is never forwarded to a client.
+
+17.9 The function runs `security definer`, so it bypasses the migration 026
+trigger exactly as `service_role` already does. Its body therefore re-enforces
+the gender rules independently. The trigger guards direct client writes; the
+function guards itself. Both layers are required and neither is redundant.
+
+17.10 The consultant row is locked with `FOR UPDATE` for the life of the
+transaction, so two concurrent saves for one consultant serialise rather than
+interleaving their country replacement.
 
 ---
 
