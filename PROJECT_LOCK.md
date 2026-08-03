@@ -1227,6 +1227,7 @@ Stripe credentials remain solely in Railway environment variables. `app_settings
 | 005 | Admin ↔ Consultant Direct Messaging | Approved — applied as migrations 023–024 (§31) |
 | 006 | Direct Presence and Delayed Email Notifications | Approved — no migration (§32) |
 | 007 | Admin Settings and Dynamic Consultation Pricing | Approved — applied as migration 025 (§33) |
+| 008 | Consultant Self-Managed Booking Capability, Complete Profile Submission, and Immutable Gender | Approved — migration 026 authored, **not yet applied** (§36) |
 
 Each amendment document is in the repository root under its `PROJECT_LOCK_AMENDMENT_NNN_*.md` filename.
 
@@ -1237,3 +1238,21 @@ Each amendment document is in the repository root under its `PROJECT_LOCK_AMENDM
 **Outbound email provider.** This document and the frozen deliverables specify **Resend**. The implemented and deployed provider is **Mandrill** (`src/lib/mandrill.ts`, `MANDRILL_*` environment variables). Delivery semantics, recipients and idempotency rules are as originally locked; only the vendor differs. The original wording is retained in historical sections rather than rewritten.
 
 **Frontend tooling.** References to "Lovable" as the calling actor mean the frontend application generally, which is now maintained directly in Git. Lovable Cloud remains prohibited.
+
+---
+
+36. Amendment 008 — Consultant Self-Managed Booking Capability, Complete Profile Submission, and Immutable Gender
+
+Source: PROJECT_LOCK_AMENDMENT_008_CONSULTANT_ONBOARDING_AND_IMMUTABLE_GENDER.md (APPROVED). Classified as a **v1.0.x production patch**. Migration 026 is authored and **not yet applied**. Where this section conflicts with an earlier section, this section prevails, and only for consultant profile management, onboarding completion, gender mutability and consultant activation.
+
+**Consultants manage their own booking capability.** A consultant selects one or more active countries, stored only in `public.consultant_countries`, and may enable general consultations through `available_for_general`. At least one assigned active country **or** general availability is required. Assignment to only inactive countries does not qualify. No comma-separated, array or JSON country field is added to `consultants`. This supersedes the rule that country assignment is exclusively an administrative responsibility.
+
+**A persisted onboarding marker is added.** `consultants.onboarding_completed_at timestamptz null` is set once, at the first successful complete profile submission, and is never reset or set twice. It is not `is_active`; activation is an administrative decision and onboarding completion is a consultant action. Consultants active when migration 026 runs are backfilled and treated as previously onboarded. Inactive consultants are not backfilled.
+
+**Gender becomes immutable.** A consultant chooses `male` or `female` during onboarding, where it is required. Once the marker is set, gender cannot be changed or cleared, by the consultant or through the normal administrator interface. Deactivation never reopens it, because the lock keys on the marker and never on `is_active`. Exceptional correction is a service-role action outside the normal application workflow, requiring explicit confirmation and audit logging, and is not reachable through any route. This supersedes the previous position, under which `consultants.gender` carried no guard at all.
+
+**Profile mutation becomes orchestrator-owned and atomic.** Save draft, Submit profile and post-onboarding Save profile run through one authenticated endpoint that resolves consultant identity server-side, validates every field, replaces only that consultant's country assignments, and writes profile columns, capability and the marker in a single transaction. Reads stay on existing RLS. `consultant_countries` write policies remain administrator-only, so no second unvalidated write path exists. Direct client writes are closed in a later staged migration, applied immediately before the new frontend ships, so the live profile page is not broken during the deployment gap.
+
+**Active consultants cannot be made incomplete.** A save that would leave an active consultant incomplete is rejected atomically, with every current validation error returned at once. The consultant is never silently deactivated. Administrator activation independently re-validates the full completeness set and never trusts frontend validation.
+
+`profiles.avatar_url` is the authoritative profile photograph. Amendment 003 degraded-Google behaviour is unchanged: after activation, a degraded or revoked connection does not deactivate the consultant, erase the marker, or reopen gender. No new table. The data model remains exactly 16 tables. The locked response envelope in `API_CONTRACT.md` §0 is unchanged and binding for the new error codes.
