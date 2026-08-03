@@ -77,10 +77,19 @@ export const registerDraftConsultationRoute = async (
         );
       }
 
+      /*
+       * Consultant eligibility, including destination capability,
+       * is settled here - before slot validation, before the
+       * booking client is resolved, before the draft row exists
+       * and before any checkout capability is issued. A rejected
+       * request therefore produces no external side effect.
+       */
       const genderValidation =
         await validateDraftConsultantGender({
           consultantId:
             parsed.data.consultant_id,
+          countryId:
+            parsed.data.country_id,
           preferredConsultantGender:
             parsed.data.intake.answers
               .preferred_consultant_gender,
@@ -108,6 +117,12 @@ export const registerDraftConsultationRoute = async (
             400,
             "VALIDATION_ERROR",
             genderValidation.message,
+            genderValidation.reason
+              ? {
+                  reason:
+                    genderValidation.reason,
+                }
+              : undefined,
           );
         }
 
