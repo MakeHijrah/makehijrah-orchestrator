@@ -38,11 +38,16 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | Manage giveaways | ❌ | ❌ | ❌ | ✅ | RLS write |
 | Edit own profile (name, phone, avatar) | ❌ | ✅ | ✅ | ✅ | RLS write |
 | Edit consultant profile (bio, hours, timezone, notice) | ❌ | ❌ | ✅ own | ✅ any | RLS write (protected columns via trigger) |
+| Save consultant profile draft (pre-onboarding) | ❌ | ❌ | ✅ own | ❌ | 🔧 `PUT /api/consultant/profile` mode `draft` |
+| Submit consultant onboarding (once) | ❌ | ❌ | ✅ own | ❌ | 🔧 `PUT /api/consultant/profile` mode `submit` |
+| Update consultant profile after completion | ❌ | ❌ | ✅ own | ❌ | 🔧 `PUT /api/consultant/profile` mode `update` |
+| Set own gender before completion | ❌ | ❌ | ✅ own | ❌ | 🔧 profile endpoint; immutable afterwards⁸ |
+| Select own active countries / general availability | ❌ | ❌ | ✅ own | ❌ | 🔧 profile endpoint |
 | Connect Google account | ❌ | ❌ | ✅ own | ❌ | 🔧 OAuth flow |
 | See own Google connection status | ❌ | ❌ | ✅ | ✅ | 🔧 `GET /api/consultant/oauth-status` |
 | Create consultant invites | ❌ | ❌ | ❌ | ✅ | 🔧 (token hashing server-side) |
 | Redeem consultant invite | ✅ (with valid token) | — | — | — | 🔧 (grants role, creates consultants row) |
-| Activate/deactivate consultant | ❌ | ❌ | ❌ | ✅ | 🔧 or admin RLS via trigger-guarded column |
+| Activate/deactivate consultant | ❌ | ❌ | ❌ | ✅ | 🔧 `POST /api/admin/consultants/:id/activate\|deactivate` — activation requires a fully complete profile⁸ |
 | Assign consultant ↔ country | ❌ | ❌ | ❌ | ✅ | RLS write |
 | View admin intervention queue | ❌ | ❌ | ❌ | ✅ | RLS read (`status = 'admin_attention'`) |
 | View payments log | ❌ | ❌ | ❌ | ✅ | RLS read |
@@ -90,6 +95,14 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 
 **All `app_settings` reads and writes: service role only, through the orchestrator. No exceptions.** (Amendment 007.) **Stripe mode mutation is admin-initiated and orchestrator-performed only**; no role holds a database write path to it.
 
+⁸ **Consultant profile mutation is orchestrator-only, and scoped to self.** `PUT /api/consultant/profile` (Amendment 008) resolves the consultant from the authenticated profile through the unique `consultants.profile_id`; `consultant_id` is never accepted from a request and the body schema rejects unknown keys, so one consultant can never address another's row. A consultant may save drafts before onboarding, submit exactly once, and update afterwards. They may **not** change `is_active`, `profile_id`, or `onboarding_completed_at` — none is accepted by the endpoint and all three are trigger-guarded at the database. **Gender is settable before completion and immutable after**, keyed on the completion marker rather than `is_active`, so deactivation does not unlock it.
+
+Admin may activate **only** a fully complete consultant and receives every unmet requirement in `error.details.missing`. Activation state remains an administrator decision; no consultant can activate themselves. Anon and client roles have no access to consultant profile mutation in any form.
+
+**Direct browser execution of `public.save_consultant_profile` is prohibited.** The RPC is granted `EXECUTE` to `service_role` only; `PUBLIC`, `anon` and `authenticated` are explicitly revoked (migration 027). The only route to it is the orchestrator endpoint above.
+
+A Google Calendar connection is required for **initial submission** and for **admin activation**. It is not required for an already-completed consultant's profile update — Amendment 003 degraded behaviour is preserved, and a revoked connection never clears the completion marker, unlocks gender, or deactivates the consultant.
+
 ⁷ **`sent` gates client visibility, and the payment link rides along.** A `proposed` recommendation is invisible to the client — the RLS `SELECT` requires `status = 'sent'` **and** that the parent consultation belongs to `auth.uid()`. Once sent, the client reads the recommended service through the normal `services_select_active` path, which is what exposes the configured Stripe Payment Link URL behind the **Pay {price}** CTA. No additional policy or endpoint is involved, and no consultant can make a recommendation visible: there is no consultant `UPDATE` policy on `service_recommendations`.
 
 **Admin avatar is unchanged by Amendment 007.** It continues to use own-profile RLS write on `profiles.avatar_url` plus the existing `public-media` bucket at prefix `avatars/{auth.uid()}/*` — the same path as every other role, per the "Edit own profile" row above. No new endpoint, bucket, column or storage policy, and no avatar data in `app_settings`.
@@ -114,6 +127,7 @@ Legend: ✅ allowed · ❌ denied · 🔧 = happens only via orchestrator endpoi
 | `/admin/services` | admin |
 | `/admin/recommendations` (review → Send to Client) | admin |
 | `/admin/settings` (profile, consultation, Stripe, general) | admin |
+| `/consultant/profile` (onboarding and profile editing) | consultant (own) |
 | `/admin/messages` (direct threads with consultants) | admin |
 | `/consultant/messages` (direct thread with the admin) | consultant |
 | `/admin/service-requests` | admin |

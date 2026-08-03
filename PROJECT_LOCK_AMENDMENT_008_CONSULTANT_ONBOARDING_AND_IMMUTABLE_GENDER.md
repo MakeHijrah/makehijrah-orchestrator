@@ -212,7 +212,15 @@ activation, a degraded or revoked Google connection:
 - does **not** hide an otherwise active consultant where Amendment 003 permits
   degraded behaviour;
 - does **not** erase `onboarding_completed_at`;
-- does **not** make gender editable.
+- does **not** make gender editable;
+- does **not** block a completed consultant from saving an otherwise valid
+  profile update.
+
+*Implementation note (2026-08-03, orchestrator `59637eb`).* The shared
+completeness evaluator is context-aware for exactly this reason. Google is
+required for `onboarding_submit` and `admin_activation` and is not consulted at
+all for `active_profile_update`. Every structural requirement is identical
+across the three contexts.
 
 9.3 Google connection status is read server-side from `oauth_connections`. It is
 never supplied by the browser, and no OAuth secret appears in any profile
@@ -319,6 +327,14 @@ minimum_booking_notice_hours  booking_capability
 country_ids                   working_hours
 google_calendar               gender_immutable
 ```
+
+*Implementation note (2026-08-03).* The orchestrator currently emits eleven of
+these: the ten structural identifiers above plus `onboarding_completed`, which
+only administrator activation returns. `country_ids` and `gender_immutable`
+remain reserved but are not reached — an unusable country set surfaces as
+`booking_capability`, and a gender-change attempt returns the dedicated
+`CONSULTANT_GENDER_IMMUTABLE` error code rather than a completeness identifier.
+Clients should tolerate both without depending on them.
 
 13.3 The interface shows a summary listing every problem, moves keyboard focus
 to it, exposes it with `role="alert"` or equivalent, associates each message

@@ -4,11 +4,11 @@
 
 **Status:** **V1.0 RELEASED**
 **Release date:** 2026-08-03
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-03 (consultant profile backend, orchestrator `59637eb`)
 **Project owner:** MakeHijrah
 **Lead architect:** Dave
 **Coordinator:** Abu Mansur
-**Next task:** v1.1 planning; v1.0.x production patches only
+**Next task:** consultant profile frontend integration; migration 026/027 production application; v1.1 planning
 
 **Purpose:** Record what has actually been built and verified so completed work is not repeated and the next task is chosen from the real project state.
 
@@ -92,7 +92,11 @@ Orchestrator:  https://orchestrator-production-e24e.up.railway.app
 ### Orchestrator **[D]**
 
 ```text
-Runtime commit:       f9054314744dda99950c22277a7704f273950311
+Runtime commit:       59637eb7ac04a28eba33dd6bf4f3069f91f6e51f
+Message:              Allow profile updates during degraded Google mode
+Railway deployment:   5732804402   Successful   2026-08-03T20:03:05Z
+
+Previous runtime:     f9054314744dda99950c22277a7704f273950311
 Message:              Add admin settings runtime
 
 Pre-release docs:     01af24381ca3b17915e671a31bb66ba31904f5ff
@@ -134,7 +138,8 @@ Deployment: 250874ba
 - 10 PaymentIntent consultations backfilled to `test`.
 - No PaymentIntent consultation remains without `stripe_mode`.
 - No non-PaymentIntent consultation received `stripe_mode`.
-- Latest migration: `migration_025_admin_settings_and_dynamic_pricing.sql`.
+- Latest migration **applied to production**: `migration_025_admin_settings_and_dynamic_pricing.sql`.
+- Migrations **026 and 027 are applied and verified in STAGING only.** This repository holds no evidence of their application to production. Do not treat them as production-applied until that evidence exists.
 
 ---
 
@@ -184,7 +189,9 @@ All 25 migrations are present in `supabase/migrations/`. **[D]**
 | 022 | `migration_022_service_structured_pricing.sql` | `services` structured pricing + Stripe ids | 004 | ✅ | ✅ **[M]** |
 | 023 | `migration_023_admin_consultant_direct_messages.sql` | Nullable `consultation_id`, 6 policies, 2 triggers | 005 | ✅ | ✅ **[M]** |
 | 024 | `migration_024_direct_message_admin_resolver.sql` | `get_direct_message_admin()` | 005 | ✅ | ✅ **[M]** |
-| 025 | `migration_025_admin_settings_and_dynamic_pricing.sql` | `app_settings` + `consultations.stripe_mode` | 007 | ✅ | ✅ **[M]** |
+| 025 | `migration_025_admin_settings_and_dynamic_pricing.sql` | `app_settings` + `consultations.stripe_mode` | 007 | ✅ | ✅ production **[M]** |
+| 026 | `migration_026_consultant_onboarding_and_gender_lock.sql` | `consultants.onboarding_completed_at`; gender and marker locks in the column guard | 008 | ✅ | ✅ **staging only** **[M]** |
+| 027 | `migration_027_atomic_consultant_profile_save.sql` | `save_consultant_profile` transactional RPC, `service_role` only | 008 | ✅ | ✅ **staging only** **[M]** |
 
 ---
 
@@ -264,6 +271,22 @@ All 25 migrations are present in `supabase/migrations/`. **[D]**
 
 - `npm run typecheck`, `npm run typecheck:test`, `npm run build` clean.
 - `npm test` — 221 tests, 221 pass, 0 fail.
+
+---
+
+### Consultant profile backend (Amendment 008) — v1.0.x patch
+
+**Database — STAGING ONLY.** Migrations 026 and 027 applied and verified in staging. **[M]** Migration 027's verification script is self-contained: it creates its own fixtures inside a transaction and rolls back, so it depends on no business record. Production application has **not** been evidenced in this repository.
+
+**Orchestrator — DEPLOYED TO PRODUCTION.** Commit `59637eb`, Railway deployment `5732804402`, successful; `/health` 200 with Redis and Supabase connected. **[D]**
+
+- `PUT /api/consultant/profile` implemented — `draft`, `submit` and `update` modes over the single transactional RPC. Consultant resolved from the authenticated profile; `consultant_id` never accepted from a request. **[D]**
+- **Shared completeness evaluator** implemented — one implementation serving consultant submission, active-consultant updates and admin activation, so the three can never disagree about what a complete profile is. Returns every unmet requirement at once. **[D]**
+- **Admin activation validation expanded** from three checks (timezone, working hours, Google) to the full evaluator plus `onboarding_completed`. Failure code changed `ACTIVATION_BLOCKED` → `CONSULTANT_PROFILE_INCOMPLETE`. **[D]**
+- **Degraded Google update behaviour corrected.** The first implementation (`fac25a2`) wrongly required a healthy Google connection for an active consultant's profile update, which conflicted with Amendment 003. Corrected in `59637eb`: the evaluator is context-aware and Google is required only for `onboarding_submit` and `admin_activation`. A degraded connection never blocks edits, clears the marker, unlocks gender or deactivates. **[D]**
+- **300 tests passing** (235 pre-existing + 65 new). Typecheck, typecheck:test and build clean. **[D]**
+
+**Frontend — PENDING.** No frontend work has been done for this endpoint. The consultant onboarding and profile-editing interface remains unbuilt, and the admin UI still matches the retired `ACTIVATION_BLOCKED` code. See §13.
 
 ---
 

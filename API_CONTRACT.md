@@ -41,6 +41,21 @@ SLOT_TAKEN, SLOT_TOO_SOON, SLOT_OUTSIDE_HOURS, DRAFT_EXPIRED,
 INVALID_TRANSITION, INVITE_INVALID, INVITE_EXPIRED,
 OAUTH_NOT_CONNECTED, GOOGLE_ERROR, STRIPE_ERROR, RATE_LIMITED, INTERNAL
 ```
+
+Added since v1.0 by approved amendments:
+
+```txt
+UNAUTHORIZED                     (auth layer; emitted where v1.0 wrote UNAUTHENTICATED)
+INTERNAL_ERROR                   (emitted where v1.0 wrote INTERNAL)
+STRIPE_MODE_NOT_CONFIGURED       Amendment 007, §3b
+LIVE_MODE_CONFIRMATION_REQUIRED  Amendment 007, §3b
+STRIPE_LIVEMODE_MISMATCH         Amendment 007, §1
+CONSULTANT_PROFILE_INCOMPLETE    Amendment 008, §2b and §3
+CONSULTANT_GENDER_IMMUTABLE      Amendment 008, §2b
+CONSULTANT_COUNTRY_INVALID       Amendment 008, §2b
+```
+
+The implemented auth layer emits `UNAUTHORIZED` and `INTERNAL_ERROR`; the v1.0 spellings `UNAUTHENTICATED` and `INTERNAL` were never emitted by the orchestrator. Clients should match the implemented names.
 Lovable maps codes → UI copy. Lovable never parses `message` strings for logic.
 
 ### Rate limiting (MVP-light)
@@ -207,6 +222,99 @@ Behaviour: a fixed delay elapses before delivery; if the recipient reads the mes
 
 ---
 
+## 2b. Consultant profile — consultant role
+
+Added by PROJECT_LOCK Amendment 008, backed by `save_consultant_profile` (migration 027).
+
+### `PUT /api/consultant/profile`
+
+The single write path for a consultant's own profile. A save spans `profiles`, `consultants` and `consultant_countries`; the orchestrator performs it in one database transaction so a partial save is impossible.
+
+**Authentication.** Consultant role required. The consultant is resolved server-side from the authenticated profile via the unique `consultants.profile_id`. **`consultant_id` is never accepted from the request** — the body schema is strict, so any such key is rejected as a validation error. There is no code path that reads a consultant identifier from a caller.
+
+Rate limit: 30 / minute.
+
+Body:
+```json
+{
+  "mode": "draft" | "submit" | "update",
+  "full_name": "string | null",
+  "avatar_url": "string | null",
+  "gender": "male | female | null",
+  "headline": "string | null",
+  "bio": "string | null",
+  "timezone": "string | null",
+  "minimum_booking_notice_hours": "integer | null",
+  "available_for_general": "boolean | null",
+  "country_ids": "uuid[] | null",
+  "working_hours": "object | null"
+}
+```
+`mode` is required. Every other field is optional. **Unknown keys are rejected.**
+
+#### Semantics
+
+- **Omitted or `null` preserves the stored value.** Null is never written as an empty string.
+- **`draft`** — allowed **only before** onboarding completion. Permits partial data, validates whatever is supplied, does not require completeness, does not require Google, does not set the completion marker.
+- **`submit`** — allowed **only before** onboarding completion. Requires the full completeness bar and sets `onboarding_completed_at` exactly once.
+- **`update`** — allowed **only after** onboarding completion. Never clears or moves the marker.
+- **Gender is immutable after completion.** Before completion it may be set freely. After, `null` is ignored and the stored value is tolerated; any different value is rejected. This keys on the completion marker, not on `is_active`, so a deactivated consultant stays locked.
+- **`country_ids: null` preserves** assignments; **`[]` removes all**. The two are distinguished by null, never by length. Duplicates are collapsed. Every identifier must exist and be active.
+- **`submit` requires a Google Calendar connection.**
+- **Updates after completion do not require a healthy Google connection** — see §9 below.
+- **An active consultant's update must leave the profile structurally complete.** It is rejected before the write if it would not.
+
+Completeness is always evaluated against the **merged final state** — stored values with the request's non-null fields applied — never against the request alone.
+
+#### Success
+
+```json
+{
+  "ok": true,
+  "data": {
+    "consultant": {
+      "id": "uuid",
+      "profile_id": "uuid",
+      "full_name": "…",
+      "avatar_url": "…",
+      "gender": "male | female | null",
+      "headline": "…",
+      "bio": "…",
+      "timezone": "Africa/Cairo",
+      "minimum_booking_notice_hours": 24,
+      "available_for_general": true,
+      "country_ids": ["uuid"],
+      "working_hours": { "monday": [{ "start": "09:00", "end": "17:00" }] },
+      "onboarding_completed_at": "2026-08-03T00:00:00Z | null"
+    }
+  }
+}
+```
+
+The consultant object is **re-read after the save**, so it is the authoritative persisted state rather than an echo of the request. `working_hours` is returned normalised: lowercase weekday keys, intervals sorted, empty days omitted.
+
+#### Errors
+
+| Code | Status | Cause |
+|---|---|---|
+| `UNAUTHORIZED` | 401 | missing or invalid token |
+| `FORBIDDEN` | 403 | authenticated but not a consultant |
+| `VALIDATION_ERROR` | 400 | unknown key, bad enum, malformed working hours, invalid timezone, out-of-range notice. `details.issues` lists **every** problem |
+| `NOT_FOUND` | 404 | the authenticated account has no consultant row |
+| `CONSULTANT_PROFILE_INCOMPLETE` | 409 | `details.missing` lists **every** unmet requirement |
+| `CONSULTANT_GENDER_IMMUTABLE` | 409 | attempt to change gender after completion |
+| `CONSULTANT_COUNTRY_INVALID` | 409 | a supplied country does not exist or is not active |
+| `INVALID_TRANSITION` | 409 | mode is wrong for the current onboarding state; `details.reason` carries the specific cause |
+| `INTERNAL_ERROR` | 500 | generic; details logged server-side only |
+
+**No PostgreSQL text is ever part of this contract.** The database raises internal markers, and the orchestrator maps each to the codes above. Raw exception prose, SQLSTATE values and relation names never reach a client.
+
+#### Working hours
+
+An object keyed by lowercase weekday (`monday`…`sunday`). Each value is an array of `{ "start": "HH:MM", "end": "HH:MM" }` in 24-hour form. `end` must be after `start`. Intervals on the same day must not overlap; touching intervals (`09:00–10:00` then `10:00–11:00`) are allowed. Not every weekday is required. Every problem is reported at once.
+
+---
+
 ## 3. Admin actions — admin role
 
 ### `POST /api/admin/invites`
@@ -229,7 +337,44 @@ Server (one transaction): verify token against `unused` non-expired hashes → m
 Errors: `INVITE_INVALID`, `INVITE_EXPIRED`.
 
 ### `POST /api/admin/consultants/:id/activate` and `/deactivate`
-Guard for activate: consultant has timezone, working hours non-empty, and OAuth connected — else `409` with which precondition failed in `data.missing[]`.
+
+~~Guard for activate: consultant has timezone, working hours non-empty, and OAuth connected — else `409` with which precondition failed in `data.missing[]`.~~ **Superseded by PROJECT_LOCK Amendment 008** (orchestrator commit `59637eb`).
+
+**Activation now applies the same completeness evaluator a consultant must satisfy to submit their profile.** One shared implementation serves consultant submission, active-consultant updates and admin activation, so activation can never disagree with submission about what a complete profile is. Previously it checked only timezone, working hours and Google, which meant a consultant could be activated with no avatar, no headline, no bio and no way to be booked.
+
+Activation requires **all** of: onboarding completed; avatar; full name; gender; headline; bio; a valid IANA timezone; a minimum booking notice within range; booking capability (at least one active country **or** `available_for_general`); non-empty valid working hours; and an active Google Calendar connection.
+
+**Breaking change.** The failure code is now `CONSULTANT_PROFILE_INCOMPLETE`, not `ACTIVATION_BLOCKED`:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "CONSULTANT_PROFILE_INCOMPLETE",
+    "message": "The consultant profile is incomplete.",
+    "details": {
+      "missing": ["onboarding_completed", "avatar", "bio"]
+    }
+  }
+}
+```
+
+`details.missing` lists **every** unmet requirement in one response, never just the first. The identifiers the implementation can return are exactly:
+
+```txt
+onboarding_completed          avatar
+full_name                     gender
+headline                      bio
+timezone                      minimum_booking_notice_hours
+booking_capability            working_hours
+google_calendar
+```
+
+`onboarding_completed` is returned only by activation. The other ten are shared with `PUT /api/consultant/profile` (§2b).
+
+> **Reserved but not currently emitted.** PROJECT_LOCK Amendment 008 §13.2 also reserves `country_ids` and `gender_immutable`. The implementation reaches neither: an unusable country set surfaces as `booking_capability`, and a gender-change attempt returns the dedicated `CONSULTANT_GENDER_IMMUTABLE` code rather than a completeness identifier. Clients should tolerate them but must not depend on them.
+
+**Google requirement.** An active Google Calendar connection is required for activation and for a consultant's initial profile submission. It is **not** required for an already-completed consultant's profile update — see §2b and Amendment 003. `deactivate` has no completeness requirement.
 
 ### `POST /api/admin/consultations/:id/cancel`
 Body: `{ "refund": true | false, "note": "…" }`
@@ -440,7 +585,7 @@ Templates are plain HTML in the orchestrator repo. No template service in MVP.
 4. ~~**Price:** staging placeholder `DEFAULT_CONSULTATION_PRICE_CENTS=15000` ($150 USD).~~ **Superseded by PROJECT_LOCK Amendment 007 (migration 025).** The price is now `app_settings.consultation_price_cents`, admin-managed and seeded at the same `15000`. The environment variable is retained only as the migration seed and a bootstrap fallback.
 5. **Reminders:** 24h consultant acceptance reminder; 24h + 1h session reminders. Approved as proposed.
 
-**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006 and 007.** Any new endpoint requires Dave's written approval and a version bump of this document.
+**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006, 007 and 008.** Any new endpoint requires Dave's written approval and a version bump of this document.
 
 Endpoint additions since v1.0, each authorised by an approved amendment:
 
@@ -449,7 +594,8 @@ Endpoint additions since v1.0, each authorised by an approved amendment:
 | §3a | five admin service catalog endpoints | 004 |
 | §2a | `POST /api/messages/:id/notification` | 005, 006 |
 | §3b | four application settings endpoints | 007 |
+| §2b | `PUT /api/consultant/profile` | 008 |
 
-No other endpoint has been added. No existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1, and the price/duration/Stripe-mode sourcing described in §1 and §3b.
+No other endpoint has been added. No existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1, the price/duration/Stripe-mode sourcing described in §1 and §3b, and the admin activation completeness guard described in §3, which now returns `CONSULTANT_PROFILE_INCOMPLETE` in place of `ACTIVATION_BLOCKED` (Amendment 008).
 
 **Amendment 007 endpoints are live** and documented in §3b. Amendment 005/006 added `POST /api/messages/:id/notification`, documented in §2a.
