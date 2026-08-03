@@ -29,6 +29,17 @@
 -- - The function still validates its own arguments. A trusted
 --   caller is not the same as a correct caller.
 --
+-- search_path:
+-- - Pinned to pg_catalog, public. pg_catalog first means a
+--   built-in can never be shadowed by a same-named object created
+--   later in public, which is the attack a SECURITY DEFINER
+--   function is most exposed to.
+-- - pg_temp is deliberately absent. Including it would let any
+--   caller pre-create a temporary object that resolves ahead of
+--   the real one.
+-- - Every application table below is schema-qualified regardless,
+--   so resolution never depends on the path alone.
+--
 -- Why the body re-enforces the gender rules:
 -- - SECURITY DEFINER runs as the owner, so is_privileged_writer()
 --   is true and the migration 026 trigger does not fire for
@@ -67,7 +78,7 @@ returns table (
 )
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   v_profile_id        uuid;

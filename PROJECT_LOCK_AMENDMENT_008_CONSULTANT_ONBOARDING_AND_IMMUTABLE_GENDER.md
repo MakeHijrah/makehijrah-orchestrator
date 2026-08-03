@@ -425,7 +425,7 @@ returns table (
 )
 language plpgsql
 security definer
-set search_path = public;
+set search_path = pg_catalog, public;
 ```
 
 17.3 Binding requirements when it is created:
