@@ -1,16 +1,29 @@
 import { supabaseAdmin } from "../../lib/supabase.js";
-import { normalizeWorkingHours } from "../availability/availability.slots.js";
+import {
+  evaluateProfileCompleteness,
+  type ProfileRequirement,
+} from "../consultant-profile/consultant-profile.completeness.js";
+import {
+  loadConsultantByProfileId,
+  loadCountryIds,
+} from "../consultant-profile/consultant-profile.repository.js";
+import { hasUsableWorkingHours } from "../consultant-profile/consultant-profile.working-hours.js";
 
 /*
  * Machine-readable activation requirement labels.
+ *
+ * PROJECT_LOCK Amendment 008 replaced the original three-label set
+ * with the shared profile requirement identifiers, so activation
+ * and consultant submission can never disagree about what a
+ * complete profile is. The three original labels are a subset of
+ * the shared set, so existing consumers keep working.
  *
  * These values are part of the admin UI contract and are returned
  * in error.details.missing. Do not rename them.
  */
 export type ActivationRequirement =
-  | "timezone"
-  | "working_hours"
-  | "google_calendar";
+  | ProfileRequirement
+  | "onboarding_completed";
 
 export type AdminConsultantView = {
   id: string;
@@ -36,7 +49,7 @@ export type AdminConsultantActivationResult =
     }
   | {
       ok: false;
-      code: "ACTIVATION_BLOCKED";
+      code: "CONSULTANT_PROFILE_INCOMPLETE";
       message: string;
       missing: ActivationRequirement[];
     }
@@ -48,6 +61,7 @@ export type AdminConsultantActivationResult =
 
 type ConsultantRow = {
   id: string;
+  profile_id: string;
   timezone: string | null;
   working_hours_jsonb: unknown;
   is_active: boolean;
@@ -60,7 +74,7 @@ type OAuthConnectionRow = {
 };
 
 const CONSULTANT_COLUMNS =
-  "id, timezone, working_hours_jsonb, is_active, available_for_general";
+  "id, profile_id, timezone, working_hours_jsonb, is_active, available_for_general";
 
 const toConsultantView = (
   row: ConsultantRow,
@@ -73,46 +87,17 @@ const toConsultantView = (
 });
 
 /*
- * A consultant is only bookable if at least one weekday carries a
- * usable interval.
- *
- * normalizeWorkingHours is reused from the availability module so
- * this check follows the same weekday-key convention and the same
- * HH:MM validation that slot generation already applies. An
- * interval whose end is not after its start produces no slots, so
- * it does not count towards eligibility.
+ * Re-exported from the shared working-hours validator so existing
+ * importers keep working. The implementation now lives with the
+ * consultant profile rules, which is the only place the convention
+ * is defined.
  */
-export const hasUsableWorkingHours = (
-  value: unknown,
-): boolean => {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value)
-  ) {
-    return false;
-  }
-
-  const normalized =
-    normalizeWorkingHours(
-      value as Record<string, unknown>,
-    );
-
-  return Object.values(
-    normalized,
-  ).some((intervals) =>
-    intervals.some(
-      (interval) =>
-        interval.end > interval.start,
-    ),
-  );
-};
+export { hasUsableWorkingHours };
 
 /*
- * Pure activation-precondition evaluation.
- *
- * Kept free of database access so the rules can be exercised in
- * isolation. Labels are emitted in a stable order.
+ * Retained for backwards compatibility with existing callers and
+ * tests. Delegates to the shared evaluator, restricted to the
+ * inputs this signature carries.
  */
 export const evaluateActivationPreconditions =
   ({
@@ -125,40 +110,20 @@ export const evaluateActivationPreconditions =
     googleConnection:
       | GoogleConnectionState
       | null;
-  }): ActivationRequirement[] => {
-    const missing: ActivationRequirement[] =
-      [];
-
-    if (
-      !timezone ||
-      timezone.trim() === ""
-    ) {
-      missing.push("timezone");
-    }
-
-    if (
-      !hasUsableWorkingHours(
-        workingHours,
-      )
-    ) {
-      missing.push("working_hours");
-    }
-
-    if (
-      !googleConnection ||
-      googleConnection.revokedAt !==
-        null ||
-      !googleConnection.encryptedRefreshToken ||
-      googleConnection.encryptedRefreshToken.trim() ===
-        ""
-    ) {
-      missing.push(
-        "google_calendar",
-      );
-    }
-
-    return missing;
-  };
+  }): ActivationRequirement[] =>
+    evaluateProfileCompleteness({
+      avatarUrl: "present",
+      fullName: "present",
+      gender: "male",
+      headline: "present",
+      bio: "present",
+      timezone,
+      minimumBookingNoticeHours: 24,
+      availableForGeneral: true,
+      countryIds: [],
+      workingHours,
+      googleConnection,
+    });
 
 const loadConsultant = async (
   consultantId: string,
@@ -375,24 +340,95 @@ export const activateConsultant =
       };
     }
 
-    const missing =
-      evaluateActivationPreconditions(
-        {
-          timezone:
-            consultant.timezone,
-          workingHours:
-            consultant.working_hours_jsonb,
-          googleConnection:
-            connectionResult.connection,
-        },
+    /*
+     * Amendment 008: activation now applies the SAME completeness
+     * evaluator a consultant had to satisfy to submit. Before this,
+     * activation checked only timezone, working hours and Google,
+     * so a consultant could be activated with no avatar, no
+     * headline, no bio and no booking capability.
+     *
+     * The full profile is re-read here rather than reusing the
+     * narrow activation row, because completeness spans
+     * profiles.full_name, profiles.avatar_url and the country
+     * assignments as well as the consultant row.
+     */
+    const fullProfileResult =
+      await loadConsultantByProfileId(
+        consultant.profile_id,
       );
+
+    if (
+      !fullProfileResult.ok ||
+      !fullProfileResult.data
+    ) {
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The consultant could not be activated.",
+      };
+    }
+
+    const countryResult =
+      await loadCountryIds(
+        consultantId,
+      );
+
+    if (!countryResult.ok) {
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The consultant could not be activated.",
+      };
+    }
+
+    const profile =
+      fullProfileResult.data;
+
+    const missing: ActivationRequirement[] =
+      [];
+
+    /*
+     * Onboarding must have been completed. Activating a consultant
+     * who never submitted would bypass submission entirely.
+     */
+    if (
+      profile.onboarding_completed_at ===
+      null
+    ) {
+      missing.push(
+        "onboarding_completed",
+      );
+    }
+
+    missing.push(
+      ...evaluateProfileCompleteness({
+        avatarUrl: profile.avatar_url,
+        fullName: profile.full_name,
+        gender: profile.gender,
+        headline: profile.headline,
+        bio: profile.bio,
+        timezone: profile.timezone,
+        minimumBookingNoticeHours:
+          profile.minimum_booking_notice_hours,
+        availableForGeneral:
+          profile.available_for_general,
+        countryIds:
+          countryResult.data,
+        workingHours:
+          profile.working_hours_jsonb,
+        googleConnection:
+          connectionResult.connection,
+      }),
+    );
 
     if (missing.length > 0) {
       return {
         ok: false,
-        code: "ACTIVATION_BLOCKED",
+        code: "CONSULTANT_PROFILE_INCOMPLETE",
         message:
-          "This consultant cannot be activated yet.",
+          "The consultant profile is incomplete.",
         missing,
       };
     }

@@ -17,6 +17,7 @@ import {
 } from "./modules/consultations/authorization-timeout.worker.js";
 import { registerAdminConsultantActivationRoutes } from "./modules/admin-consultants/admin-consultant-activation.route.js";
 import { registerAdminServiceRoutes } from "./modules/admin-services/admin-service.route.js";
+import { registerConsultantProfileRoute } from "./modules/consultant-profile/consultant-profile.route.js";
 import { registerAdminConsultationCancelRoute } from "./modules/admin-consultations/admin-consultation-cancel.route.js";
 import { registerAcceptanceRoute } from "./modules/consultations/acceptance.route.js";
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
@@ -205,6 +206,9 @@ await registerAdminConsultantActivationRoutes(
   app,
 );
 await registerAdminServiceRoutes(
+  app,
+);
+await registerConsultantProfileRoute(
   app,
 );
 await registerAcceptanceRoute(

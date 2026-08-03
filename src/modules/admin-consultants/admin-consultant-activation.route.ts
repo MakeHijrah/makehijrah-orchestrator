@@ -31,7 +31,7 @@ const sendActivationResult = (
           result.message,
         );
 
-      case "ACTIVATION_BLOCKED":
+      case "CONSULTANT_PROFILE_INCOMPLETE":
         return sendError(
           reply,
           409,
