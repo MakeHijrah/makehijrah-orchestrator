@@ -2,16 +2,17 @@
 
 ## BUILD_STATUS.md
 
-**Status:** Active build record
-**Last updated:** 2026-08-01
+**Status:** **V1.0 RELEASED**
+**Release date:** 2026-08-03
+**Last updated:** 2026-08-03
 **Project owner:** MakeHijrah
 **Lead architect:** Dave
 **Coordinator:** Abu Mansur
-**Next task:** V1.0 production regression and release closeout
+**Next task:** v1.1 planning; v1.0.x production patches only
 
 **Purpose:** Record what has actually been built and verified so completed work is not repeated and the next task is chosen from the real project state.
 
-**v1.0 is not released.** Release happens only after the production regression and release closeout complete. This file records readiness, not release.
+**v1.0 is released.** The final production regression passed on 2026-08-03 with no release blocker. This file now records the released state; see `V1_RELEASE_REPORT.md` for the full release record.
 
 ---
 
@@ -91,26 +92,30 @@ Orchestrator:  https://orchestrator-production-e24e.up.railway.app
 ### Orchestrator **[D]**
 
 ```text
-Commit:  f9054314744dda99950c22277a7704f273950311
-Message: Add admin settings runtime
+Runtime commit:       f9054314744dda99950c22277a7704f273950311
+Message:              Add admin settings runtime
+
+Pre-release docs:     01af24381ca3b17915e671a31bb66ba31904f5ff
+Message:              Reconcile v1.0 documentation
 ```
 
-Verified in this workspace: local `HEAD` == `origin/main` == deployed SHA.
+Verified in this workspace: local `HEAD` == `origin/main` == `01af243` before release documentation.
 
 ```text
-Railway deployment: 5705165878   Successful
+Railway deployment: 5707559039   Successful
 ```
 
-`/health` returned HTTP 200 with `redis: connected`, `supabase: connected`, `supabaseTestRows: 1`, `environment: production`. **[D]**
+Last confirmed healthy deployment before the release-documentation rebuild. `/health` returns HTTP 200 with `redis: connected`, `supabase: connected`, `supabaseTestRows: 1`, `environment: production`. **[D]**
 
 ### Frontend **[O]**
 
 ```text
-Commit:  8ca87b05630c563e39da494e222c77b6f7c58608
-Message: Add recommendation payment button
+Commit:     775716769e40a3131c5d6d913d0d7fc1b40abdfd
+Message:    Wire consultant notes
+Deployment: 250874ba
 ```
 
-**Owner-supplied.** The frontend repository is not present in this workspace, so neither this commit nor any frontend browser verification in this file was independently confirmed here.
+**Owner-supplied.** The frontend repository is not present in this workspace, so neither this commit, its deployment, its test suite, nor any frontend browser verification in this file was independently confirmed here.
 
 ---
 
@@ -278,6 +283,38 @@ These are accepted for v1.0. They are not defects and do not block release.
 
 ---
 
+## 9a. Final production regression — 2026-08-03 **[M]**
+
+Owner-executed against production. All areas passed; no release blocker.
+
+| Area | Result |
+|---|---|
+| Public booking | PASS |
+| Authentication | PASS |
+| Consultant acceptance | PASS |
+| Stripe capture | PASS |
+| Calendar/Meet | PASS |
+| Consultation messaging | PASS |
+| Direct messaging/presence | PASS |
+| Consultant notes | PASS |
+| Completion/recommendations | PASS |
+| Client payment CTA | PASS |
+| Admin settings/avatar | PASS |
+| Production safety | PASS |
+
+Consultant notes are complete and manually verified. Direct Presence is complete and verified; an earlier failed observation used the wrong consultant account, and the correct admin-consultant two-user test passed.
+
+---
+
+## 9b. Non-blocking technical debt
+
+**These are not accepted product limitations.** They are cleanup items deferred to a v1.0.x patch and are deliberately kept out of section 9.
+
+1. The frontend `.env` file is currently tracked in Git. It contains **browser-public `VITE_` values only** — no server secret. Removal from tracking and `.gitignore` hardening are deferred to v1.0.x. **[O]**
+2. Inactive mock fixtures remain bundled in the frontend build. They are **not selected in production** and are inert. Dead-code cleanup is deferred to v1.0.x. **[O]**
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -322,17 +359,24 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 
 ## 13. Next task
 
-**V1.0 production regression and release closeout.**
+**v1.1 planning; v1.0.x production patches only.**
 
-Scope:
+v1.0 is released and frozen. Until v1.1 is planned and approved, the only permitted changes are v1.0.x production patches:
 
-1. Full production regression across the locked business loop.
-2. Confirm no accepted limitation has become a defect.
-3. Confirm documentation matches production after this reconciliation.
-4. Owner sign-off.
-5. Release tagging and the move to **v1.0 RELEASED**.
+1. Production defect fixes.
+2. The non-blocking technical debt in section 9b.
+3. Documentation corrections.
 
-Do not mark v1.0 released before that sequence completes.
+No new feature ships against v1.0. New scope requires a v1.1 plan or an amendment under the existing change-control rule.
+
+### Release tags
+
+```text
+Orchestrator  v1.0.0  -> release-documentation commit on origin/main
+Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
+```
+
+**Tagging status: PENDING.** Neither tag has been created. The frontend repository is not present in this workspace, so the frontend tag could not be created or verified, and the orchestrator tag was deliberately held so the two repositories are tagged together rather than leaving an asymmetric half-tagged release. See `V1_RELEASE_REPORT.md` for the exact commands.
 
 ---
 
