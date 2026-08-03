@@ -2,6 +2,7 @@ import {
   evaluateProfileCompleteness,
   isValidTimezone,
   isValidMinimumNotice,
+  type GoogleConnectionState,
   type MergedProfileState,
   type ProfileRequirement,
 } from "./consultant-profile.completeness.js";
@@ -437,19 +438,52 @@ export const saveProfileForConsultant =
       normalizedWorkingHours ??
       consultant.working_hours_jsonb;
 
-    const requiresCompleteness =
-      input.mode === "submit" ||
-      (input.mode === "update" &&
-        consultant.is_active);
+    /*
+     * Structural completeness is required for submit and for an
+     * active consultant's update. The two differ only in whether a
+     * working Google connection is part of that bar.
+     *
+     * Amendment 003: an active consultant whose Google connection
+     * has since degraded must still be able to save an otherwise
+     * complete profile. Blocking their edits would punish them for
+     * an external failure they cannot fix from this endpoint, and
+     * would leave them no route back to a good state.
+     */
+    const completenessContext:
+      | "onboarding_submit"
+      | "active_profile_update"
+      | null =
+      input.mode === "submit"
+        ? "onboarding_submit"
+        : input.mode === "update" &&
+            consultant.is_active
+          ? "active_profile_update"
+          : null;
 
-    if (requiresCompleteness) {
-      const googleResult =
-        await loadGoogleConnection(
-          consultant.id,
-        );
+    if (completenessContext) {
+      /*
+       * Read only when the context requires it. An active update
+       * never consults Google, so it never fails on a Google
+       * lookup either.
+       */
+      let googleConnection: GoogleConnectionState | null =
+        null;
 
-      if (!googleResult.ok) {
-        return internalError();
+      if (
+        completenessContext ===
+        "onboarding_submit"
+      ) {
+        const googleResult =
+          await loadGoogleConnection(
+            consultant.id,
+          );
+
+        if (!googleResult.ok) {
+          return internalError();
+        }
+
+        googleConnection =
+          googleResult.data;
       }
 
       const merged: MergedProfileState =
@@ -494,13 +528,13 @@ export const saveProfileForConsultant =
             effectiveCountryIds,
           workingHours:
             mergedWorkingHours,
-          googleConnection:
-            googleResult.data,
+          googleConnection,
         };
 
       const missing =
         evaluateProfileCompleteness(
           merged,
+          completenessContext,
         );
 
       if (missing.length > 0) {

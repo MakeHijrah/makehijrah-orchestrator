@@ -1124,11 +1124,14 @@ describe("Admin activation: shared completeness evaluator", () => {
   });
 });
 
-describe("Amendment 003: degraded Google behaviour is unchanged", () => {
-  it("does not clear the marker, unlock gender or deactivate when Google is revoked", async () => {
+describe("Amendment 003: degraded Google does not block profile updates", () => {
+  const completedActive = () => {
     db.consultants[0]!.onboarding_completed_at =
       "2026-08-01T00:00:00.000Z";
     db.consultants[0]!.is_active = true;
+  };
+
+  const revokedGoogle = () => {
     db.oauth_connections = [
       {
         consultant_id: CONSULTANT_ID,
@@ -1137,21 +1140,186 @@ describe("Amendment 003: degraded Google behaviour is unchanged", () => {
         encrypted_refresh_token: "encrypted",
       },
     ];
+  };
 
-    /* A later revocation blocks a completeness-gated save... */
-    const blocked = await save({ mode: "update", headline: "x" });
-    assert.equal(blocked.statusCode, 409);
-    assert.ok(
-      blocked.json().error.details.missing.includes("google_calendar"),
+  const missingGoogle = () => {
+    db.oauth_connections = [];
+  };
+
+  const unhealthyGoogle = () => {
+    db.oauth_connections = [
+      {
+        consultant_id: CONSULTANT_ID,
+        provider: "google",
+        revoked_at: null,
+        encrypted_refresh_token: "",
+      },
+    ];
+  };
+
+  it("lets a completed active consultant update headline with revoked Google", async () => {
+    completedActive();
+    revokedGoogle();
+
+    const response = await save({
+      mode: "update",
+      headline: "Updated during outage",
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      consultantRow().headline,
+      "Updated during outage",
     );
+  });
 
-    /* ...but changes none of the durable state. */
+  it("lets a completed active consultant update bio with no Google connection", async () => {
+    completedActive();
+    missingGoogle();
+
+    const response = await save({
+      mode: "update",
+      bio: "Rewritten while disconnected",
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      consultantRow().bio,
+      "Rewritten while disconnected",
+    );
+  });
+
+  it("lets a completed active consultant update working hours with unhealthy Google", async () => {
+    completedActive();
+    unhealthyGoogle();
+
+    const response = await save({
+      mode: "update",
+      working_hours: {
+        wednesday: [{ start: "08:00", end: "12:00" }],
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      consultantRow().working_hours_jsonb,
+      { wednesday: [{ start: "08:00", end: "12:00" }] },
+    );
+  });
+
+  it("never reports google_calendar as missing on an active update", async () => {
+    completedActive();
+    missingGoogle();
+    db.consultants[0]!.headline = null;
+
+    const response = await save({ mode: "update", bio: "x" });
+
+    assert.equal(response.statusCode, 409);
+    const missing = response.json().error.details.missing;
+    assert.ok(missing.includes("headline"));
+    assert.ok(
+      !missing.includes("google_calendar"),
+      "google_calendar must not gate an active update",
+    );
+  });
+
+  it("still blocks a structurally incomplete active update", async () => {
+    completedActive();
+    revokedGoogle();
+
+    const response = await save({
+      mode: "update",
+      available_for_general: false,
+      country_ids: [],
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(
+      response.json().error.code,
+      "CONSULTANT_PROFILE_INCOMPLETE",
+    );
+    assert.ok(
+      response
+        .json()
+        .error.details.missing.includes("booking_capability"),
+    );
+    assert.equal(rpcCalls.length, 0);
+  });
+
+  it("does not clear the marker, change is_active or unlock gender", async () => {
+    completedActive();
+    revokedGoogle();
+
+    const response = await save({
+      mode: "update",
+      headline: "Still editable",
+    });
+    assert.equal(response.statusCode, 200);
+
     assert.equal(
       consultantRow().onboarding_completed_at,
       "2026-08-01T00:00:00.000Z",
     );
-    assert.equal(consultantRow().gender, "female");
     assert.equal(consultantRow().is_active, true);
+    assert.equal(consultantRow().gender, "female");
+
+    /* Gender is still locked while Google is degraded. */
+    const genderChange = await save({
+      mode: "update",
+      gender: "male",
+    });
+    assert.equal(genderChange.statusCode, 409);
+    assert.equal(
+      genderChange.json().error.code,
+      "CONSULTANT_GENDER_IMMUTABLE",
+    );
+    assert.equal(consultantRow().gender, "female");
+  });
+
+  it("does not touch OAuth state during a profile save", async () => {
+    completedActive();
+    revokedGoogle();
+    const before = JSON.stringify(db.oauth_connections);
+
+    await save({ mode: "update", headline: "No OAuth writes" });
+
+    assert.equal(
+      JSON.stringify(db.oauth_connections),
+      before,
+    );
+  });
+
+  it("still requires Google for the initial submit", async () => {
+    missingGoogle();
+
+    const response = await save({
+      mode: "submit",
+      gender: "female",
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.ok(
+      response
+        .json()
+        .error.details.missing.includes("google_calendar"),
+    );
+    assert.equal(consultantRow().onboarding_completed_at, null);
+  });
+
+  it("still requires Google for admin activation", async () => {
+    db.consultants[0]!.onboarding_completed_at =
+      "2026-08-01T00:00:00.000Z";
+    revokedGoogle();
+
+    const response = await activate(CONSULTANT_ID);
+
+    assert.equal(response.statusCode, 409);
+    assert.ok(
+      response
+        .json()
+        .error.details.missing.includes("google_calendar"),
+    );
+    assert.equal(consultantRow().is_active, false);
   });
 });
 
@@ -1174,33 +1342,73 @@ describe("Shared completeness evaluator", () => {
   };
 
   it("reports nothing missing for a complete profile", () => {
-    assert.deepEqual(evaluateProfileCompleteness(base), []);
+    assert.deepEqual(
+      evaluateProfileCompleteness(base, "onboarding_submit"),
+      [],
+    );
   });
 
   it("rejects an invalid timezone", () => {
     assert.deepEqual(
-      evaluateProfileCompleteness({
-        ...base,
-        timezone: "Mars/Olympus_Mons",
-      }),
+      evaluateProfileCompleteness(
+        { ...base, timezone: "Mars/Olympus_Mons" },
+        "onboarding_submit",
+      ),
       ["timezone"],
     );
   });
 
   it("rejects an out-of-range notice period", () => {
     assert.deepEqual(
-      evaluateProfileCompleteness({
-        ...base,
-        minimumBookingNoticeHours: -1,
-      }),
+      evaluateProfileCompleteness(
+        { ...base, minimumBookingNoticeHours: -1 },
+        "onboarding_submit",
+      ),
       ["minimum_booking_notice_hours"],
     );
   });
 
   it("treats a blank string as missing", () => {
     assert.deepEqual(
-      evaluateProfileCompleteness({ ...base, headline: "   " }),
+      evaluateProfileCompleteness(
+        { ...base, headline: "   " },
+        "onboarding_submit",
+      ),
       ["headline"],
+    );
+  });
+
+  it("requires google_calendar only for submit and activation", () => {
+    const degraded = {
+      ...base,
+      googleConnection: null,
+    };
+
+    assert.deepEqual(
+      evaluateProfileCompleteness(degraded, "onboarding_submit"),
+      ["google_calendar"],
+    );
+    assert.deepEqual(
+      evaluateProfileCompleteness(degraded, "admin_activation"),
+      ["google_calendar"],
+    );
+    assert.deepEqual(
+      evaluateProfileCompleteness(degraded, "active_profile_update"),
+      [],
+      "an active update must not require Google (Amendment 003)",
+    );
+  });
+
+  it("applies identical structural rules in every context", () => {
+    const broken = { ...base, bio: null, googleConnection: null };
+
+    assert.deepEqual(
+      evaluateProfileCompleteness(broken, "active_profile_update"),
+      ["bio"],
+    );
+    assert.deepEqual(
+      evaluateProfileCompleteness(broken, "onboarding_submit"),
+      ["bio", "google_calendar"],
     );
   });
 });

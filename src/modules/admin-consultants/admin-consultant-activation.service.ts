@@ -123,7 +123,7 @@ export const evaluateActivationPreconditions =
       countryIds: [],
       workingHours,
       googleConnection,
-    });
+    }, "admin_activation");
 
 const loadConsultant = async (
   consultantId: string,
@@ -420,7 +420,7 @@ export const activateConsultant =
           profile.working_hours_jsonb,
         googleConnection:
           connectionResult.connection,
-      }),
+      }, "admin_activation"),
     );
 
     if (missing.length > 0) {

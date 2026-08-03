@@ -3,16 +3,30 @@ import { hasUsableWorkingHours } from "./consultant-profile.working-hours.js";
 
 /*
  * Shared consultant profile completeness evaluator.
- * PROJECT_LOCK Amendment 008.
+ * PROJECT_LOCK Amendments 003 and 008.
  *
- * One evaluator, three callers:
- *   - consultant submit
- *   - active consultant update
- *   - admin consultant activation
+ * One evaluator, three contexts:
+ *   - onboarding_submit      consultant completes onboarding
+ *   - active_profile_update  active consultant edits their profile
+ *   - admin_activation       admin activates a consultant
  *
  * Having a single implementation is the point. Three near-identical
  * rule sets would drift, and the failure mode of that drift is a
  * consultant who can submit a profile the admin can never activate.
+ *
+ * The contexts differ in exactly one rule: whether an active Google
+ * Calendar connection is required.
+ *
+ * Amendment 003 is the reason. A Google connection can degrade at
+ * any time - revoked by the user at Google, expired, or simply
+ * unreachable - through no action of the consultant. Availability
+ * already degrades gracefully rather than disappearing. Blocking a
+ * consultant from fixing their bio because Google is unreachable
+ * would be the same mistake in a different place: it punishes the
+ * consultant for an external failure and gives them no way out.
+ *
+ * A connection is still required to ENTER a bookable state, at
+ * submit and at activation. It is not required to keep editing one.
  *
  * Pure: no database access, no clock, no network. Every input is
  * the already-merged final state.
@@ -36,6 +50,28 @@ export type ProfileRequirement =
   | "working_hours"
   | "google_calendar"
   | "gender_immutable";
+
+/*
+ * Which operation is being evaluated. Only the Google requirement
+ * varies; every structural rule is identical in all three.
+ */
+export type CompletenessContext =
+  | "onboarding_submit"
+  | "active_profile_update"
+  | "admin_activation";
+
+const CONTEXTS_REQUIRING_GOOGLE: ReadonlySet<CompletenessContext> =
+  new Set<CompletenessContext>([
+    "onboarding_submit",
+    "admin_activation",
+  ]);
+
+export const contextRequiresGoogle = (
+  context: CompletenessContext,
+): boolean =>
+  CONTEXTS_REQUIRING_GOOGLE.has(
+    context,
+  );
 
 export type GoogleConnectionState = {
   revokedAt: string | null;
@@ -114,6 +150,7 @@ export const isValidMinimumNotice = (
 export const evaluateProfileCompleteness =
   (
     state: MergedProfileState,
+    context: CompletenessContext,
   ): ProfileRequirement[] => {
     const missing: ProfileRequirement[] =
       [];
@@ -183,7 +220,15 @@ export const evaluateProfileCompleteness =
       missing.push("working_hours");
     }
 
+    /*
+     * Amendment 003: an active consultant editing their profile is
+     * not blocked by a degraded Google connection. The stable
+     * google_calendar identifier is still emitted for submit and
+     * activation, which are the two moments a working connection is
+     * genuinely required.
+     */
     if (
+      contextRequiresGoogle(context) &&
       !isActiveGoogleConnection(
         state.googleConnection,
       )
