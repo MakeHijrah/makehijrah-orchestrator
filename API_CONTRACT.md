@@ -293,6 +293,8 @@ Completeness is always evaluated against the **merged final state** — stored v
 
 The consultant object is **re-read after the save**, so it is the authoritative persisted state rather than an echo of the request. `working_hours` is returned normalised: lowercase weekday keys, intervals sorted, empty days omitted.
 
+`full_name` and `avatar_url` are the **authoritative** `profiles` values. Their public projections on `consultants` — `display_name` (migration 030) and `photo_url` (migration 028) — are deliberately **not** part of this response: the RPC writes each projection atomically with its source, so returning both would add a second copy of the same value with no way for them to differ, and any difference the client did observe would be a bug rather than information. Cross-user and public consultant surfaces read `consultants.display_name` directly, without reading `profiles`; no orchestrator endpoint exposes it, and none is required.
+
 #### Errors
 
 | Code | Status | Cause |

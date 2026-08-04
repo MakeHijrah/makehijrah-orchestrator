@@ -69,6 +69,7 @@ create table consultants (
   headline text,
   bio text,
   photo_url text,                                           -- public projection of profiles.avatar_url (Amendment 008, migration 028)
+  display_name text,                                        -- public projection of profiles.full_name (Amendment 008, migration 030)
   timezone text not null,                                   -- IANA, e.g. 'Africa/Cairo'
   working_hours_jsonb jsonb not null default '{}'::jsonb,
   minimum_booking_notice_hours integer not null default 24,
@@ -105,6 +106,10 @@ Times are local to `timezone`. Slot generator (orchestrator) converts to UTC.
 Named-to-numeric conversion happens inside `save_consultant_profile`; numeric-to-named happens in the orchestrator response mapper. The database must never store named keys. Migrations 027 and 028 stored the argument verbatim and did; migration 029 repairs those rows and moves the conversion into the RPC. Internal readers accept either format while un-migrated rows can still exist.
 
 **`photo_url` (Amendment 008, migration 028).** The **denormalised public projection** of `profiles.avatar_url`, which remains authoritative. It exists because public, client and anon surfaces may read `consultants` but not `profiles`; publishing the authoritative field directly would require widening `profiles` SELECT and exposing `email`, `phone_whatsapp` and every other private column. Both fields are written together, from one argument, in one transaction, by the service-role RPC `save_consultant_profile` — a non-null `p_avatar_url` sets both, a null preserves both — so they cannot diverge through the supported write path. Nothing else writes `photo_url`. Migration 028 also reconciles existing rows once: a legacy `photo_url` is adopted into a **null** `avatar_url` only, and a legacy `photo_url` is never cleared.
+
+**`display_name` (Amendment 008, migration 030 — authored, not applied).** The **denormalised public projection** of `profiles.full_name`, which remains authoritative. It exists for the same reason as `photo_url` and follows the identical rule: the public booking flow renders `{consultant name} - {headline}`, `headline` already lives on `consultants`, and the name did not — so rendering it would have required widening `profiles` SELECT and exposing `email`, `phone_whatsapp` and every other private column to reach one public field. Both fields are written together, from one argument, in one transaction, by the service-role RPC `save_consultant_profile` — a non-null `p_full_name` sets both, a null preserves both — so they cannot diverge through the supported write path. Nothing else writes `display_name`. Public, client and admin cross-user consultant surfaces may read it **without reading `profiles`**, through the pre-existing `consultants_select_active_public` policy; migration 030 adds, drops and rewrites no policy. The column is nullable with no default: a consultant whose authoritative `full_name` is null projects null, never `''`. Migration 030 backfills it once from `profiles.full_name`, skipping rows whose authoritative name is null.
+
+Only these two public-safe fields are projected. No other `profiles` column — `email`, `phone_whatsapp`, role or profile metadata — is copied onto `consultants`.
 
 ---
 
