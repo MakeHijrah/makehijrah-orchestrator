@@ -56,13 +56,34 @@ of what changed.
 3.1 The authoritative profile photograph for every role, consultants included,
 is **`profiles.avatar_url`**.
 
-3.2 `consultants.photo_url` is **not** the completeness source. It is retained
-for backward compatibility and is not dropped by this amendment.
+3.2 `consultants.photo_url` is **not** the completeness source. It is the
+**denormalised public projection** of `profiles.avatar_url`, and is not dropped
+by this amendment.
 
-3.3 Where a consultant has a `photo_url` but no `avatar_url`, the orchestrator
-may copy the value into `profiles.avatar_url` during a profile submission, so
-existing consultants are not locked out by the new completeness rule. It never
-copies in the other direction.
+*Amended 2026-08-04 by the approved avatar architecture decision, implemented as
+migration 028.* The projection exists because public, client and anon surfaces
+may read `public.consultants` but may not read `public.profiles`. Without it the
+authoritative photograph would be invisible to exactly the audience a consultant
+photograph exists for, and the only alternative — widening `profiles` SELECT —
+would expose `email`, `phone_whatsapp` and every other private column to publish
+one public field. **RLS is unchanged; the projection is the mechanism that keeps
+it unchanged.**
+
+3.3 The two fields are maintained together by the service-role RPC
+`save_consultant_profile`, **atomically, in one transaction, from one argument**:
+when `p_avatar_url` is non-null both are set to it; when it is null both are
+preserved. They therefore cannot diverge through the supported write path. No
+other writer maintains the projection, and nothing else may write `photo_url`.
+
+3.4 Migration 028 additionally performs a one-time reconciliation: it adopts a
+legacy `consultants.photo_url` into `profiles.avatar_url` **only where the
+authoritative field is null**, then synchronises the projection from the
+authoritative field. An existing `avatar_url` is never overwritten, and a legacy
+`photo_url` is never cleared.
+
+3.5 Own-profile surfaces read `profiles.avatar_url`. Public, client and anon
+surfaces read `consultants.photo_url`. The profile-save response returns the
+authoritative `avatar_url` and never exposes `photo_url`.
 
 3.4 The storage bucket is unchanged: `public-media`, prefix
 `avatars/{auth.uid()}/*`.

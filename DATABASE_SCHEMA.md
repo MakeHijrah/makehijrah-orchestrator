@@ -68,7 +68,7 @@ create table consultants (
   profile_id uuid not null unique references profiles(id) on delete cascade,
   headline text,
   bio text,
-  photo_url text,
+  photo_url text,                                           -- public projection of profiles.avatar_url (Amendment 008, migration 028)
   timezone text not null,                                   -- IANA, e.g. 'Africa/Cairo'
   working_hours_jsonb jsonb not null default '{}'::jsonb,
   minimum_booking_notice_hours integer not null default 24,
@@ -91,6 +91,8 @@ create table consultants (
 ```
 
 Times are local to `timezone`. Slot generator (orchestrator) converts to UTC.
+
+**`photo_url` (Amendment 008, migration 028).** The **denormalised public projection** of `profiles.avatar_url`, which remains authoritative. It exists because public, client and anon surfaces may read `consultants` but not `profiles`; publishing the authoritative field directly would require widening `profiles` SELECT and exposing `email`, `phone_whatsapp` and every other private column. Both fields are written together, from one argument, in one transaction, by the service-role RPC `save_consultant_profile` — a non-null `p_avatar_url` sets both, a null preserves both — so they cannot diverge through the supported write path. Nothing else writes `photo_url`. Migration 028 also reconciles existing rows once: a legacy `photo_url` is adopted into a **null** `avatar_url` only, and a legacy `photo_url` is never cleared.
 
 ---
 

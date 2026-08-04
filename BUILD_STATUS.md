@@ -8,7 +8,7 @@
 **Project owner:** MakeHijrah
 **Lead architect:** Dave
 **Coordinator:** Abu Mansur
-**Next task:** consultant profile frontend integration; migration 026/027 production application; v1.1 planning
+**Next task:** migration 028 review and application; consultant profile frontend integration; v1.1 planning
 
 **Purpose:** Record what has actually been built and verified so completed work is not repeated and the next task is chosen from the real project state.
 
@@ -139,7 +139,8 @@ Deployment: 250874ba
 - No PaymentIntent consultation remains without `stripe_mode`.
 - No non-PaymentIntent consultation received `stripe_mode`.
 - Latest migration **applied to production**: `migration_025_admin_settings_and_dynamic_pricing.sql`.
-- Migrations **026 and 027 are applied and verified in STAGING only.** This repository holds no evidence of their application to production. Do not treat them as production-applied until that evidence exists.
+- Migrations **026 and 027 are applied and verified in PRODUCTION** (owner-confirmed 2026-08-04). **[M]**
+- Migration **028 is authored and NOT applied** — not to staging, not to production. **[D]**
 
 ---
 
@@ -190,8 +191,9 @@ All 25 migrations are present in `supabase/migrations/`. **[D]**
 | 023 | `migration_023_admin_consultant_direct_messages.sql` | Nullable `consultation_id`, 6 policies, 2 triggers | 005 | ✅ | ✅ **[M]** |
 | 024 | `migration_024_direct_message_admin_resolver.sql` | `get_direct_message_admin()` | 005 | ✅ | ✅ **[M]** |
 | 025 | `migration_025_admin_settings_and_dynamic_pricing.sql` | `app_settings` + `consultations.stripe_mode` | 007 | ✅ | ✅ production **[M]** |
-| 026 | `migration_026_consultant_onboarding_and_gender_lock.sql` | `consultants.onboarding_completed_at`; gender and marker locks in the column guard | 008 | ✅ | ✅ **staging only** **[M]** |
-| 027 | `migration_027_atomic_consultant_profile_save.sql` | `save_consultant_profile` transactional RPC, `service_role` only | 008 | ✅ | ✅ **staging only** **[M]** |
+| 026 | `migration_026_consultant_onboarding_and_gender_lock.sql` | `consultants.onboarding_completed_at`; gender and marker locks in the column guard | 008 | ✅ | ✅ production **[M]** |
+| 027 | `migration_027_atomic_consultant_profile_save.sql` | `save_consultant_profile` transactional RPC, `service_role` only | 008 | ✅ | ✅ production **[M]** |
+| 028 | `migration_028_consultant_avatar_projection.sql` | avatar backfill, `consultants.photo_url` public projection, RPC maintains both | 008 | ✅ | ❌ **NOT APPLIED** |
 
 ---
 
@@ -276,7 +278,9 @@ All 25 migrations are present in `supabase/migrations/`. **[D]**
 
 ### Consultant profile backend (Amendment 008) — v1.0.x patch
 
-**Database — STAGING ONLY.** Migrations 026 and 027 applied and verified in staging. **[M]** Migration 027's verification script is self-contained: it creates its own fixtures inside a transaction and rolls back, so it depends on no business record. Production application has **not** been evidenced in this repository.
+**Database.** Migrations 026 and 027 are applied and verified in **production** (owner-confirmed 2026-08-04). **[M]** Both verification scripts are self-contained: they create their own fixtures inside a transaction and roll back, so they depend on no business record.
+
+**Migration 028 — AUTHORED, NOT APPLIED.** `migration_028_consultant_avatar_projection.sql` makes `profiles.avatar_url` authoritative, adopts a legacy `consultants.photo_url` only where the authoritative field is null, synchronises the projection, and replaces the RPC so both avatar fields are written atomically from one argument. It changes **no** RLS policy, table, column or constraint. Awaiting review; **not applied to staging or production**. **[D]**
 
 **Orchestrator — DEPLOYED TO PRODUCTION.** Commit `59637eb`, Railway deployment `5732804402`, successful; `/health` 200 with Redis and Supabase connected. **[D]**
 
@@ -285,6 +289,8 @@ All 25 migrations are present in `supabase/migrations/`. **[D]**
 - **Admin activation validation expanded** from three checks (timezone, working hours, Google) to the full evaluator plus `onboarding_completed`. Failure code changed `ACTIVATION_BLOCKED` → `CONSULTANT_PROFILE_INCOMPLETE`. **[D]**
 - **Degraded Google update behaviour corrected.** The first implementation (`fac25a2`) wrongly required a healthy Google connection for an active consultant's profile update, which conflicted with Amendment 003. Corrected in `59637eb`: the evaluator is context-aware and Google is required only for `onboarding_submit` and `admin_activation`. A degraded connection never blocks edits, clears the marker, unlocks gender or deactivates. **[D]**
 - **300 tests passing** (235 pre-existing + 65 new). Typecheck, typecheck:test and build clean. **[D]**
+
+**Avatar architecture.** `profiles.avatar_url` is authoritative; `consultants.photo_url` is its denormalised public projection, required because public, client and anon surfaces may read `consultants` but not `profiles`. The projection avoids widening `profiles` SELECT, which would expose `email`, `phone_whatsapp` and every other private column. No runtime change was needed: the endpoint already reads and returns `profiles.avatar_url` and never references `photo_url`. **[D]**
 
 **Frontend — PENDING.** No frontend work has been done for this endpoint. The consultant onboarding and profile-editing interface remains unbuilt, and the admin UI still matches the retired `ACTIVATION_BLOCKED` code. See §13.
 
