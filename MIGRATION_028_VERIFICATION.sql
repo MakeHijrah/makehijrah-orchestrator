@@ -70,9 +70,28 @@ begin
     from pg_proc p
    where p.oid = v_oid;
 
+  /*
+   * pg_get_function_identity_arguments returns argument NAMES as
+   * well as types - "p_consultant_id uuid, p_mode text, ..." - not
+   * a bare type list. Comparing it to a types-only string can
+   * never match, which is a mistake worth stating plainly because
+   * it silently turns an identity check into an unconditional
+   * failure.
+   *
+   * The exact types are already pinned by the to_regprocedure
+   * lookup above, which resolves by signature. This comparison
+   * additionally pins the parameter NAMES, which the orchestrator
+   * depends on: supabase-js calls the RPC with named arguments, so
+   * a renamed parameter breaks every caller while leaving the
+   * signature intact.
+   */
   if v_args is distinct from
-     'uuid, text, text, text, text, text, text, text, integer, boolean, uuid[], jsonb' then
-    raise exception 'VERIFICATION FAILED 8: identity arguments are %', v_args;
+     'p_consultant_id uuid, p_mode text, p_full_name text, p_avatar_url text, '
+     || 'p_gender text, p_headline text, p_bio text, p_timezone text, '
+     || 'p_minimum_booking_notice_hours integer, p_available_for_general boolean, '
+     || 'p_country_ids uuid[], p_working_hours jsonb' then
+    raise exception
+      'VERIFICATION FAILED 8: identity arguments are "%"', v_args;
   end if;
 
   if not v_secdef then
@@ -194,46 +213,49 @@ end $$;
 
 begin;
 
+-- ------------------------------------------------------------
+-- STAGE 1 — backfill fixtures and statement A
+-- ------------------------------------------------------------
+--
+-- The null-authoritative projection fixture is deliberately NOT
+-- created yet. Statement A would adopt its legacy photo into the
+-- authoritative field, after which "avatar_url is null" would no
+-- longer hold and the statement B test would prove nothing. It is
+-- created in stage 2, after A has already run.
+
 do $$
 declare
   v_keep_profile   uuid := gen_random_uuid();
   v_adopt_profile  uuid := gen_random_uuid();
   v_stale_profile  uuid := gen_random_uuid();
-  v_legacy_profile uuid := gen_random_uuid();
   v_keep           uuid;
   v_adopt          uuid;
   v_stale          uuid;
-  v_legacy         uuid;
   v_n              integer;
   v_avatar         text;
   v_photo          text;
 begin
   insert into auth.users (id, email) values
-    (v_keep_profile,   'v28-keep@verification.invalid'),
-    (v_adopt_profile,  'v28-adopt@verification.invalid'),
-    (v_stale_profile,  'v28-stale@verification.invalid'),
-    (v_legacy_profile, 'v28-legacy@verification.invalid');
+    (v_keep_profile,  'v28-keep@verification.invalid'),
+    (v_adopt_profile, 'v28-adopt@verification.invalid'),
+    (v_stale_profile, 'v28-stale@verification.invalid');
 
   get diagnostics v_n = row_count;
-  if v_n <> 4 then
-    raise exception 'FIXTURE FAILED: expected 4 auth users, inserted %', v_n;
+  if v_n <> 3 then
+    raise exception 'FIXTURE FAILED: expected 3 auth users, inserted %', v_n;
   end if;
 
   insert into public.profiles (id, role, full_name, email, avatar_url)
   values
-    -- Authoritative value present, legacy photo different. Must survive.
-    (v_keep_profile,   'consultant', 'V28 Keep',   'v28-keep@verification.invalid',
+    -- Authoritative present, legacy photo different. Must survive A.
+    (v_keep_profile,  'consultant', 'V28 Keep',  'v28-keep@verification.invalid',
      'https://cdn.test/authoritative-keep.png'),
-    -- Authoritative null, legacy photo present. Must adopt the legacy value.
-    (v_adopt_profile,  'consultant', 'V28 Adopt',  'v28-adopt@verification.invalid',
+    -- Authoritative null, legacy photo present. Must adopt in A.
+    (v_adopt_profile, 'consultant', 'V28 Adopt', 'v28-adopt@verification.invalid',
      null),
-    -- Authoritative present, projection stale. Must be synchronised.
-    (v_stale_profile,  'consultant', 'V28 Stale',  'v28-stale@verification.invalid',
-     'https://cdn.test/authoritative-stale.png'),
-    -- Authoritative null, legacy photo present, used to prove the
-    -- projection is never cleared.
-    (v_legacy_profile, 'consultant', 'V28 Legacy', 'v28-legacy@verification.invalid',
-     null)
+    -- Authoritative present, projection stale. Must be synced in B.
+    (v_stale_profile, 'consultant', 'V28 Stale', 'v28-stale@verification.invalid',
+     'https://cdn.test/authoritative-stale.png')
   on conflict (id) do update
     set role = excluded.role,
         full_name = excluded.full_name,
@@ -251,20 +273,35 @@ begin
   values (v_stale_profile, 'Africa/Cairo', 'https://cdn.test/stale-projection.png')
   returning id into v_stale;
 
-  insert into public.consultants (profile_id, timezone, photo_url)
-  values (v_legacy_profile, 'Africa/Cairo', 'https://cdn.test/legacy-only.png')
-  returning id into v_legacy;
+  perform set_config('app.v28_keep',    v_keep::text,          true);
+  perform set_config('app.v28_adopt',   v_adopt::text,         true);
+  perform set_config('app.v28_stale',   v_stale::text,         true);
+  perform set_config('app.v28_keep_pr', v_keep_profile::text,  true);
+  perform set_config('app.v28_adopt_pr',v_adopt_profile::text, true);
+  perform set_config('app.v28_stale_pr',v_stale_profile::text, true);
 
-  -- Deliberately leave v_legacy's authoritative value null for the
-  -- whole of Part 2, so the "never cleared" property is testable.
-  update public.profiles set avatar_url = null where id = v_legacy_profile;
+  -- Fixture state assertions BEFORE statement A.
+  select avatar_url into v_avatar from public.profiles where id = v_keep_profile;
+  if v_avatar is distinct from 'https://cdn.test/authoritative-keep.png' then
+    raise exception 'PRECHECK FAILED: keep fixture avatar_url is %', v_avatar;
+  end if;
 
-  perform set_config('app.v28_keep',   v_keep::text,   true);
-  perform set_config('app.v28_adopt',  v_adopt::text,  true);
-  perform set_config('app.v28_stale',  v_stale::text,  true);
-  perform set_config('app.v28_legacy', v_legacy::text, true);
+  select avatar_url into v_avatar from public.profiles where id = v_adopt_profile;
+  if v_avatar is not null then
+    raise exception 'PRECHECK FAILED: adopt fixture avatar_url is not null';
+  end if;
 
-  raise notice 'FIXTURES CREATED';
+  select photo_url into v_photo from public.consultants where id = v_adopt;
+  if v_photo is distinct from 'https://cdn.test/legacy-adopt.png' then
+    raise exception 'PRECHECK FAILED: adopt fixture photo_url is %', v_photo;
+  end if;
+
+  select photo_url into v_photo from public.consultants where id = v_stale;
+  if v_photo is distinct from 'https://cdn.test/stale-projection.png' then
+    raise exception 'PRECHECK FAILED: stale fixture photo_url is %', v_photo;
+  end if;
+
+  raise notice 'STAGE 1 FIXTURES CREATED AND VERIFIED';
 
   -- ---------- the migration's statement A, verbatim ----------
   update public.profiles p
@@ -292,6 +329,92 @@ begin
   end if;
   raise notice 'PASS 2: null avatar_url adopted consultants.photo_url';
 
+  -- Idempotence of statement A: every eligible row is already
+  -- backfilled, so a second run must affect zero rows.
+  update public.profiles p
+  set avatar_url = c.photo_url
+  from public.consultants c
+  where c.profile_id = p.id
+    and p.avatar_url is null
+    and c.photo_url is not null;
+
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then
+    raise exception
+      'VERIFICATION FAILED: re-running statement A affected % row(s), expected 0', v_n;
+  end if;
+  raise notice 'PASS: statement A is idempotent (second run affected 0 rows)';
+end $$;
+
+
+-- ------------------------------------------------------------
+-- STAGE 2 — null-authoritative fixture, created AFTER statement A
+-- ------------------------------------------------------------
+--
+-- This is the fixture the previous version of this file got wrong.
+-- Creating it before statement A meant the backfill populated its
+-- authoritative field, so the later assertion compared photo_url
+-- against a value that was equal for the wrong reason and proved
+-- nothing about statement B.
+--
+-- Created here, after A has run and will not run again, its
+-- authoritative field is genuinely null when B executes.
+
+do $$
+declare
+  v_legacy_profile uuid := gen_random_uuid();
+  v_legacy         uuid;
+  v_avatar         text;
+  v_photo          text;
+begin
+  insert into auth.users (id, email)
+  values (v_legacy_profile, 'v28-legacy@verification.invalid');
+
+  insert into public.profiles (id, role, full_name, email, avatar_url)
+  values (v_legacy_profile, 'consultant', 'V28 Legacy',
+          'v28-legacy@verification.invalid', null)
+  on conflict (id) do update
+    set avatar_url = excluded.avatar_url;
+
+  insert into public.consultants (profile_id, timezone, photo_url)
+  values (v_legacy_profile, 'Africa/Cairo', 'https://cdn.test/legacy-only.png')
+  returning id into v_legacy;
+
+  perform set_config('app.v28_legacy',    v_legacy::text,         true);
+  perform set_config('app.v28_legacy_pr', v_legacy_profile::text, true);
+
+  -- Fixture state assertions IMMEDIATELY BEFORE statement B.
+  select avatar_url into v_avatar from public.profiles where id = v_legacy_profile;
+  if v_avatar is not null then
+    raise exception
+      'PRECHECK FAILED: null-authoritative fixture avatar_url is % - statement B cannot be tested',
+      v_avatar;
+  end if;
+
+  select photo_url into v_photo from public.consultants where id = v_legacy;
+  if v_photo is distinct from 'https://cdn.test/legacy-only.png' then
+    raise exception
+      'PRECHECK FAILED: null-authoritative fixture photo_url is %', v_photo;
+  end if;
+
+  raise notice 'STAGE 2 FIXTURE CREATED: avatar_url IS NULL, photo_url = legacy-only.png';
+end $$;
+
+
+-- ------------------------------------------------------------
+-- STAGE 3 — statement B and its assertions
+-- ------------------------------------------------------------
+
+do $$
+declare
+  v_keep      uuid := current_setting('app.v28_keep')::uuid;
+  v_stale     uuid := current_setting('app.v28_stale')::uuid;
+  v_legacy    uuid := current_setting('app.v28_legacy')::uuid;
+  v_legacy_pr uuid := current_setting('app.v28_legacy_pr')::uuid;
+  v_avatar    text;
+  v_photo     text;
+  v_n         integer;
+begin
   -- ---------- the migration's statement B, verbatim ----------
   update public.consultants c
   set photo_url = p.avatar_url
@@ -316,30 +439,44 @@ begin
   end if;
   raise notice 'PASS 3: projection synchronised from profiles.avatar_url';
 
-  -- Check 3b: a null authoritative value never clears the projection.
+  -- Check 3b: a NULL authoritative value never clears the projection.
+  --
+  -- This is now a real proof: the fixture's avatar_url was still
+  -- null when statement B ran, so B had to skip it by its own
+  -- predicate rather than by coincidence.
+  select avatar_url into v_avatar
+    from public.profiles where id = v_legacy_pr;
+  if v_avatar is not null then
+    raise exception
+      'VERIFICATION FAILED 3b: statement B populated avatar_url (now %) - it must never write profiles',
+      v_avatar;
+  end if;
+
   select photo_url into v_photo
     from public.consultants where id = v_legacy;
   if v_photo is distinct from 'https://cdn.test/legacy-only.png' then
     raise exception
       'VERIFICATION FAILED 3b: projection was cleared or altered where avatar_url is null (got %)', v_photo;
   end if;
-  raise notice 'PASS 3b: null authoritative value left the projection intact';
+  raise notice 'PASS 3b: avatar_url still NULL and photo_url unchanged at legacy-only.png';
 
-  -- Idempotence: a second run of both statements changes nothing.
-  update public.profiles p
-  set avatar_url = c.photo_url
-  from public.consultants c
-  where c.profile_id = p.id
-    and p.avatar_url is null
-    and c.photo_url is not null;
+  -- Idempotence of statement B: everything eligible is already
+  -- synchronised, so a second run must affect zero rows.
+  update public.consultants c
+  set photo_url = p.avatar_url
+  from public.profiles p
+  where p.id = c.profile_id
+    and p.avatar_url is not null
+    and c.photo_url is distinct from p.avatar_url;
 
   get diagnostics v_n = row_count;
-  if v_n <> 1 then
+  if v_n <> 0 then
     raise exception
-      'VERIFICATION FAILED: re-running the backfill touched % rows (expected only the deliberately-null legacy fixture)', v_n;
+      'VERIFICATION FAILED: re-running statement B affected % row(s), expected 0', v_n;
   end if;
+  raise notice 'PASS: statement B is idempotent (second run affected 0 rows)';
 
-  raise notice 'PASS: statements are re-runnable and converge';
+  raise notice 'PART 2 COMPLETE - backfill and projection proven independently';
 end $$;
 
 rollback;   -- discards Part 2 fixtures and changes
