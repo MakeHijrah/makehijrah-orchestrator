@@ -1,4 +1,5 @@
 import { DateTime } from "luxon";
+import { toNamedWeekdayKeys } from "../../lib/working-hours-format.js";
 import type {
   AvailabilitySlot,
   WeeklyWorkingHours,
@@ -41,7 +42,16 @@ export const normalizeWorkingHours = (
 ): WeeklyWorkingHours => {
   const normalized: WeeklyWorkingHours = {};
 
-  for (const [weekday, intervals] of Object.entries(value)) {
+  /*
+   * Storage became numeric weekday keys in migration 029, while
+   * slot generation matches on luxon's named weekday. Rows written
+   * before 029 are still named. Normalising keys first means both
+   * shapes generate slots; without this a numeric row silently
+   * produces an empty week and the consultant looks unbookable.
+   */
+  for (const [weekday, intervals] of Object.entries(
+    toNamedWeekdayKeys(value),
+  )) {
     if (!Array.isArray(intervals)) {
       normalized[weekday.toLowerCase()] = [];
       continue;

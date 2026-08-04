@@ -15,6 +15,7 @@ import {
   type ConsultantProfileRow,
   type RpcMarker,
 } from "./consultant-profile.repository.js";
+import { toNamedWorkingHours } from "../../lib/working-hours-format.js";
 import type { ConsultantProfileInput } from "./consultant-profile.schema.js";
 import { validateWorkingHours } from "./consultant-profile.working-hours.js";
 
@@ -132,8 +133,14 @@ const toView = ({
   available_for_general:
     consultant.available_for_general,
   country_ids: countryIds,
-  working_hours:
+  /*
+   * Storage is numeric weekday keys from migration 029 onward; the
+   * HTTP contract is named. The conversion happens here, on the way
+   * out, so numeric keys never cross the API boundary.
+   */
+  working_hours: toNamedWorkingHours(
     consultant.working_hours_jsonb,
+  ),
   onboarding_completed_at:
     consultant.onboarding_completed_at,
 });

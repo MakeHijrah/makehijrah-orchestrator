@@ -8,7 +8,7 @@
 **Project owner:** MakeHijrah
 **Lead architect:** Dave
 **Coordinator:** Abu Mansur
-**Next task:** migration 028 review and application; consultant profile frontend integration; v1.1 planning
+**Next task:** migrations 028 and 029 review and application (029 depends on 028); consultant profile frontend integration; v1.1 planning
 
 **Purpose:** Record what has actually been built and verified so completed work is not repeated and the next task is chosen from the real project state.
 
@@ -141,6 +141,7 @@ Deployment: 250874ba
 - Latest migration **applied to production**: `migration_025_admin_settings_and_dynamic_pricing.sql`.
 - Migrations **026 and 027 are applied and verified in PRODUCTION** (owner-confirmed 2026-08-04). **[M]**
 - Migration **028 is authored and NOT applied** — not to staging, not to production. **[D]**
+- Migration **029 is authored and NOT applied** — not to staging, not to production. **[D]**
 
 ---
 
@@ -194,6 +195,7 @@ All 25 migrations are present in `supabase/migrations/`. **[D]**
 | 026 | `migration_026_consultant_onboarding_and_gender_lock.sql` | `consultants.onboarding_completed_at`; gender and marker locks in the column guard | 008 | ✅ | ✅ production **[M]** |
 | 027 | `migration_027_atomic_consultant_profile_save.sql` | `save_consultant_profile` transactional RPC, `service_role` only | 008 | ✅ | ✅ production **[M]** |
 | 028 | `migration_028_consultant_avatar_projection.sql` | avatar backfill, `consultants.photo_url` public projection, RPC maintains both | 008 | ✅ | ❌ **NOT APPLIED** |
+| 029 | `migration_029_normalize_consultant_working_hours.sql` | repairs named weekday keys to numeric; RPC converts named input to numeric storage | 008 | ✅ | ❌ **NOT APPLIED** |
 
 ---
 
@@ -291,6 +293,12 @@ All 25 migrations are present in `supabase/migrations/`. **[D]**
 - **300 tests passing** (235 pre-existing + 65 new). Typecheck, typecheck:test and build clean. **[D]**
 
 **Avatar architecture.** `profiles.avatar_url` is authoritative; `consultants.photo_url` is its denormalised public projection, required because public, client and anon surfaces may read `consultants` but not `profiles`. The projection avoids widening `profiles` SELECT, which would expose `email`, `phone_whatsapp` and every other private column. No runtime change was needed: the endpoint already reads and returns `profiles.avatar_url` and never references `photo_url`. **[D]**
+
+**Working-hours storage (Amendment 008 §8a, migration 029) — AUTHORED, NOT APPLIED.** The HTTP wire format is named weekdays; database storage is numeric `"0"`–`"6"` with `0` = sunday. The migration 027/028 RPC stored the argument verbatim, so successful saves wrote **named** keys into `consultants.working_hours_jsonb` and profile loading failed against a production row shaped `{"sunday": [...]}`. Migration 029 repairs those rows and moves the conversion into the RPC. **[D]**
+
+Conversion boundaries: named → numeric in the RPC on the way in; numeric → named in the orchestrator response mapper on the way out. Numeric keys never cross the HTTP boundary. **[D]**
+
+Runtime readers were made format-tolerant in the same commit — availability slot generation and the completeness evaluator both accept either format. Without that, applying 029 would have produced **zero availability slots for every consultant** and reported `working_hours` missing on every profile, because slot generation matches on luxon's named weekday. **[D]**
 
 **Frontend — PENDING.** No frontend work has been done for this endpoint. The consultant onboarding and profile-editing interface remains unbuilt, and the admin UI still matches the retired `ACTIVATION_BLOCKED` code. See §13.
 

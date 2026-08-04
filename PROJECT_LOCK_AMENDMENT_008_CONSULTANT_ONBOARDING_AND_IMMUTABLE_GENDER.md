@@ -221,6 +221,40 @@ new logic.
 
 ---
 
+## 8a. Working-hours weekday key format
+
+*Added 2026-08-04 by the approved working-hours storage decision, implemented as
+migration 029.*
+
+8a.1 There are two representations and they are **not** interchangeable:
+
+| Layer | Format | Example |
+|---|---|---|
+| HTTP wire (`PUT /api/consultant/profile`, request and response) | **named** weekdays | `{"sunday": [...]}` |
+| Database storage (`consultants.working_hours_jsonb`) | **numeric** keys `"0"`–`"6"` | `{"0": [...]}` |
+
+8a.2 The mapping is fixed: `0` sunday, `1` monday, `2` tuesday, `3` wednesday,
+`4` thursday, `5` friday, `6` saturday.
+
+8a.3 **Named to numeric happens in the RPC**, on the way in. The RPC accepts
+named keys only; numeric, mixed and unrecognised keys are rejected with
+`CONSULTANT_WORKING_HOURS_FORMAT_INVALID`. It refuses to guess.
+
+8a.4 **Numeric to named happens in the orchestrator response mapper**, on the
+way out. Numeric keys never cross the HTTP boundary.
+
+8a.5 The database must never store named weekday keys. Migrations 027 and 028
+stored the argument verbatim and therefore did; **migration 029 repairs those
+rows** and moves the conversion into the RPC.
+
+8a.6 Internal readers — availability slot generation and the completeness
+evaluator — accept **either** format, because rows written before migration 029
+carry named keys. A reader understanding only one format would produce an empty
+week rather than an error, making a consultant appear unbookable instead of
+broken.
+
+---
+
 ## 9. Google Calendar and degraded availability
 
 9.1 A Google connection is required for **initial** onboarding submission and

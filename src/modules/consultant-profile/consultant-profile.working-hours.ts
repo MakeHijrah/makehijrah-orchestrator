@@ -1,3 +1,4 @@
+import { toNamedWeekdayKeys } from "../../lib/working-hours-format.js";
 import type {
   WeeklyWorkingHours,
   WorkingHoursInterval,
@@ -242,8 +243,24 @@ export const validateWorkingHours = (
 export const hasUsableWorkingHours = (
   value: unknown,
 ): boolean => {
+  /*
+   * Reads a STORED value, which is numeric-keyed from migration 029
+   * onward and named-keyed before it. Keys are normalised to named
+   * first so both shapes evaluate identically; otherwise every
+   * migrated consultant would be reported as missing working_hours
+   * and could neither update their profile nor be activated.
+   */
+  const normalized =
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+      ? toNamedWeekdayKeys(
+          value as Record<string, unknown>,
+        )
+      : value;
+
   const result =
-    validateWorkingHours(value);
+    validateWorkingHours(normalized);
 
   return (
     result.ok &&

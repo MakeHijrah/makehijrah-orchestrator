@@ -92,6 +92,18 @@ create table consultants (
 
 Times are local to `timezone`. Slot generator (orchestrator) converts to UTC.
 
+**Weekday key format (Amendment 008 §8a, migration 029).** Storage uses **numeric** weekday keys `"0"`–`"6"`, where `0` is sunday. The shape above shows the *HTTP wire* format, which is **named** — that is what the frontend sends and receives. The stored form of the same week is:
+
+```json
+{
+  "0": [],
+  "1": [{"start": "09:00", "end": "17:00"}],
+  "5": [{"start": "14:00", "end": "17:00"}]
+}
+```
+
+Named-to-numeric conversion happens inside `save_consultant_profile`; numeric-to-named happens in the orchestrator response mapper. The database must never store named keys. Migrations 027 and 028 stored the argument verbatim and did; migration 029 repairs those rows and moves the conversion into the RPC. Internal readers accept either format while un-migrated rows can still exist.
+
 **`photo_url` (Amendment 008, migration 028).** The **denormalised public projection** of `profiles.avatar_url`, which remains authoritative. It exists because public, client and anon surfaces may read `consultants` but not `profiles`; publishing the authoritative field directly would require widening `profiles` SELECT and exposing `email`, `phone_whatsapp` and every other private column. Both fields are written together, from one argument, in one transaction, by the service-role RPC `save_consultant_profile` — a non-null `p_avatar_url` sets both, a null preserves both — so they cannot diverge through the supported write path. Nothing else writes `photo_url`. Migration 028 also reconciles existing rows once: a legacy `photo_url` is adopted into a **null** `avatar_url` only, and a legacy `photo_url` is never cleared.
 
 ---

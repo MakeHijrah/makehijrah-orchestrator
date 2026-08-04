@@ -311,7 +311,9 @@ The consultant object is **re-read after the save**, so it is the authoritative 
 
 #### Working hours
 
-An object keyed by lowercase weekday (`monday`…`sunday`). Each value is an array of `{ "start": "HH:MM", "end": "HH:MM" }` in 24-hour form. `end` must be after `start`. Intervals on the same day must not overlap; touching intervals (`09:00–10:00` then `10:00–11:00`) are allowed. Not every weekday is required. Every problem is reported at once.
+**The wire format is named weekdays, in both directions.** An object keyed by lowercase weekday (`monday`…`sunday`). Each value is an array of `{ "start": "HH:MM", "end": "HH:MM" }` in 24-hour form.
+
+**Database storage is numeric** (`"0"`–`"6"`, `0` = sunday), which is an internal detail the HTTP contract never exposes. Named-to-numeric conversion happens inside `save_consultant_profile`; numeric-to-named happens in the orchestrator response mapper (Amendment 008 §8a, migration 029). Clients send and receive named keys only — **numeric keys in a request are rejected with `VALIDATION_ERROR`**, and a response never contains one. `end` must be after `start`. Intervals on the same day must not overlap; touching intervals (`09:00–10:00` then `10:00–11:00`) are allowed. Not every weekday is required. Every problem is reported at once.
 
 ---
 

@@ -68,8 +68,14 @@ const COUNTRY_B = "66666666-6666-4666-8666-666666666666";
 const COUNTRY_INACTIVE = "77777777-7777-4777-8777-777777777777";
 const COUNTRY_UNKNOWN = "88888888-8888-4888-8888-888888888888";
 
+/* HTTP wire format: named weekdays. */
 const GOOD_HOURS = {
   monday: [{ start: "09:00", end: "17:00" }],
+};
+
+/* Database storage after migration 029: numeric weekday keys. */
+const STORED_HOURS = {
+  "1": [{ start: "09:00", end: "17:00" }],
 };
 
 type Row = Record<string, unknown>;
@@ -317,8 +323,38 @@ supabaseAdmin.rpc = (async (
     consultant.minimum_booking_notice_hours;
   consultant.available_for_general =
     args.p_available_for_general ?? consultant.available_for_general;
-  consultant.working_hours_jsonb =
-    args.p_working_hours ?? consultant.working_hours_jsonb;
+  /*
+   * Migration 029: the RPC is the conversion point. Named keys in,
+   * numeric keys stored. Numeric, mixed or unknown input is
+   * rejected rather than guessed at.
+   */
+  const NAMED_TO_NUMERIC: Record<string, string> = {
+    sunday: "0",
+    monday: "1",
+    tuesday: "2",
+    wednesday: "3",
+    thursday: "4",
+    friday: "5",
+    saturday: "6",
+  };
+
+  if (args.p_working_hours !== null && args.p_working_hours !== undefined) {
+    const supplied = args.p_working_hours as Record<string, unknown>;
+    const keys = Object.keys(supplied);
+
+    if (keys.some((k) => /^[0-6]$/.test(k))) {
+      return fail("CONSULTANT_WORKING_HOURS_FORMAT_INVALID");
+    }
+    if (keys.some((k) => !(k in NAMED_TO_NUMERIC))) {
+      return fail("CONSULTANT_WORKING_HOURS_FORMAT_INVALID");
+    }
+
+    const converted: Record<string, unknown> = {};
+    for (const k of keys) {
+      converted[NAMED_TO_NUMERIC[k]!] = supplied[k];
+    }
+    consultant.working_hours_jsonb = converted;
+  }
 
   const nextMarker = mode === "submit" ? new Date().toISOString() : marker;
   consultant.onboarding_completed_at = nextMarker;
@@ -383,7 +419,7 @@ const completeConsultant = (overrides: Row = {}): Row => ({
   timezone: "Africa/Cairo",
   minimum_booking_notice_hours: 24,
   available_for_general: true,
-  working_hours_jsonb: { ...GOOD_HOURS },
+  working_hours_jsonb: { ...STORED_HOURS },
   is_active: false,
   onboarding_completed_at: null,
   ...overrides,
@@ -1201,8 +1237,15 @@ describe("Amendment 003: degraded Google does not block profile updates", () => 
     });
 
     assert.equal(response.statusCode, 200);
+    /* Sent named, stored numeric: wednesday -> "3" (migration 029). */
     assert.deepEqual(
       consultantRow().working_hours_jsonb,
+      { "3": [{ start: "08:00", end: "12:00" }] },
+    );
+
+    /* ...and the response converts it back to named for the wire. */
+    assert.deepEqual(
+      response.json().data.consultant.working_hours,
       { wednesday: [{ start: "08:00", end: "12:00" }] },
     );
   });
@@ -1409,6 +1452,89 @@ describe("Shared completeness evaluator", () => {
     assert.deepEqual(
       evaluateProfileCompleteness(broken, "onboarding_submit"),
       ["bio", "google_calendar"],
+    );
+  });
+});
+
+describe("Working hours: named wire format, numeric storage", () => {
+  it("sends named keys to the RPC, never numeric", async () => {
+    await save({
+      mode: "draft",
+      working_hours: {
+        sunday: [{ start: "09:00", end: "17:00" }],
+        friday: [{ start: "14:00", end: "16:00" }],
+      },
+    });
+
+    const sent = rpcCalls[0]!.args.p_working_hours as Record<string, unknown>;
+
+    assert.deepEqual(Object.keys(sent).sort(), ["friday", "sunday"]);
+    assert.ok(
+      !Object.keys(sent).some((k) => /^[0-6]$/.test(k)),
+      "the orchestrator must not convert to numeric; the RPC owns that",
+    );
+  });
+
+  it("delegates persistence conversion to the RPC", async () => {
+    await save({
+      mode: "draft",
+      working_hours: { sunday: [{ start: "09:00", end: "17:00" }] },
+    });
+
+    /* Stored numeric by the RPC, not by the orchestrator. */
+    assert.deepEqual(consultantRow().working_hours_jsonb, {
+      "0": [{ start: "09:00", end: "17:00" }],
+    });
+  });
+
+  it("returns named keys even though storage is numeric", async () => {
+    const response = await save({ mode: "draft", headline: "unchanged hours" });
+
+    assert.deepEqual(
+      response.json().data.consultant.working_hours,
+      { monday: [{ start: "09:00", end: "17:00" }] },
+      "the wire format is named; storage is numeric",
+    );
+    assert.deepEqual(consultantRow().working_hours_jsonb, {
+      "1": [{ start: "09:00", end: "17:00" }],
+    });
+  });
+
+  it("never exposes numeric keys over HTTP", async () => {
+    const body = (
+      await save({ mode: "draft", headline: "x" })
+    ).body;
+
+    const parsed = JSON.parse(body).data.consultant.working_hours;
+    for (const key of Object.keys(parsed)) {
+      assert.ok(
+        !/^[0-6]$/.test(key),
+        `numeric key "${key}" leaked over the HTTP contract`,
+      );
+    }
+  });
+
+  it("rejects numeric keys supplied over HTTP", async () => {
+    const response = await save({
+      mode: "draft",
+      working_hours: { "0": [{ start: "09:00", end: "17:00" }] },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error.code, "VALIDATION_ERROR");
+    assert.equal(rpcCalls.length, 0, "rejected before reaching the RPC");
+  });
+
+  it("still treats a numeric stored week as complete", async () => {
+    db.consultants[0]!.onboarding_completed_at = "2026-08-01T00:00:00.000Z";
+    db.consultants[0]!.is_active = true;
+
+    const response = await save({ mode: "update", headline: "Active edit" });
+
+    assert.equal(
+      response.statusCode,
+      200,
+      "numeric storage must satisfy the working_hours requirement",
     );
   });
 });
