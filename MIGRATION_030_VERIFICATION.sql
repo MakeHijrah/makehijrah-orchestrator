@@ -21,6 +21,19 @@
 -- fixtures, so it proves the statement itself rather than a
 -- paraphrase of it.
 --
+-- Two DIFFERENT failure modes are tested, and they prove different
+-- things. Conflating them is the defect this file was corrected
+-- for:
+--
+--   6a  EARLY REJECTION — an invalid country id is caught in RPC
+--       section 6, before section 7 or 8 has written anything.
+--       Proves validation order. Proves NOTHING about rollback,
+--       because no write had occurred.
+--
+--   6b  CONTROLLED FAILURE AFTER THE WRITES — a temporary trigger
+--       raises once every field under test has already been
+--       updated. This is the real rollback proof.
+--
 -- Every check raises on failure. A run that reaches the final
 -- notice without an exception has passed. There are no SKIP paths:
 -- no check is conditional on data that may or may not be present.
@@ -31,7 +44,8 @@
 --    3  matching projection remains stable            Part 2
 --    4  p_full_name updates both fields               Part 3
 --    5  null p_full_name preserves both fields        Part 3
---    6  failed RPC rolls back both name fields        Part 3
+--   6a  invalid country rejected before any mutation  Part 3
+--   6b  post-write failure rolls back every field     Part 3
 --    7  another consultant remains untouched          Part 3
 --    8  avatar projection still works                 Part 3
 --    9  working hours still store numeric keys        Part 3
@@ -46,7 +60,7 @@
 --   18  service_role retains EXECUTE                  Part 1
 --   19  RLS policies remain unchanged                 Part 4
 --   20  table count remains 16                        Part 4
---   21  all fixtures roll back                        Parts 2, 3
+--   21  all fixtures roll back, asserted not assumed  Parts 2, 3
 --   22  no SKIP paths                                 whole file
 -- ============================================================
 
@@ -371,8 +385,35 @@ begin
   raise notice 'PASS 3: backfill is idempotent (second run touched 0 rows)';
 end $$;
 
--- Check 21: every fixture above is discarded.
 rollback;
+
+-- Check 21 (Part 2): the rollback is asserted, not assumed.
+do $$
+declare
+  v_profiles    integer;
+  v_consultants integer;
+begin
+  select count(*) into v_profiles
+    from public.profiles
+   where email like 'v30-%@verification.invalid';
+
+  select count(*) into v_consultants
+    from public.consultants c
+    join public.profiles p on p.id = c.profile_id
+   where p.email like 'v30-%@verification.invalid';
+
+  if v_profiles <> 0 then
+    raise exception
+      'VERIFICATION FAILED 21: % Part 2 verification profile(s) survived the rollback', v_profiles;
+  end if;
+
+  if v_consultants <> 0 then
+    raise exception
+      'VERIFICATION FAILED 21: % Part 2 verification consultant(s) survived the rollback', v_consultants;
+  end if;
+
+  raise notice 'PASS 21 (Part 2): no verification profile or consultant survived';
+end $$;
 
 
 -- ============================================================
@@ -388,6 +429,7 @@ declare
   v_id    uuid;
   v_other uuid;
   v_cid   uuid;
+  v_cid2  uuid;
 begin
   insert into auth.users (id, email) values
     (v_pr,  'v30-rpc@verification.invalid'),
@@ -414,10 +456,19 @@ begin
   insert into public.countries (name, iso_code, is_active)
   values ('ZZ V30 Country', 'QW3', true) returning id into v_cid;
 
+  /*
+   * A second country exists so the post-write rollback check can
+   * attempt a country REPLACEMENT and prove the delete-then-insert
+   * in RPC section 6 is undone, not merely that no row was added.
+   */
+  insert into public.countries (name, iso_code, is_active)
+  values ('ZZ V30 Country Two', 'QW4', true) returning id into v_cid2;
+
   perform set_config('app.v30_rpc',       v_id::text,    true);
   perform set_config('app.v30_rpc_other', v_other::text, true);
   perform set_config('app.v30_rpc_pr',    v_pr::text,    true);
   perform set_config('app.v30_country',   v_cid::text,   true);
+  perform set_config('app.v30_country2',  v_cid2::text,  true);
 
   raise notice 'FIXTURES CREATED';
 end $$;
@@ -493,13 +544,23 @@ begin
 end $$;
 
 
--- Checks 6, 8, 9, 10: a failing save leaves nothing behind.
+-- Check 6a: EARLY REJECTION, BEFORE ANY MUTATION.
 --
--- The call below carries a valid new name, a valid new avatar, a
--- valid working-hours payload and an invalid country id. The
--- country failure must roll back the name pair, the avatar pair
--- and the working hours together — that atomicity is the entire
--- reason this work lives in one function.
+-- This is NOT a rollback proof, and must not be read as one.
+--
+-- An invalid country id is rejected in RPC section 6, which runs
+-- BEFORE the authoritative profile update in section 7 and before
+-- the consultant update in section 8. Nothing has been written
+-- when the exception is raised, so "the fields are unchanged"
+-- afterwards proves only that validation happens early. It would
+-- hold true even in a function with no transactional guarantees
+-- whatsoever.
+--
+-- What it does establish, and all it establishes: an invalid
+-- country id is caught before mutation begins.
+--
+-- The genuine rollback proof — a controlled failure raised AFTER
+-- the writes have happened — is check 6b, further below.
 
 do $$
 declare
@@ -523,7 +584,7 @@ begin
       '{"friday":[{"start":"14:00","end":"16:00"}]}'::jsonb);
 
     raise exception
-      'VERIFICATION FAILED 6: an invalid country id was accepted';
+      'VERIFICATION FAILED 6a: an invalid country id was accepted';
   exception when others then
     if sqlerrm not like 'CONSULTANT_COUNTRY_INVALID%' then
       raise;
@@ -540,19 +601,19 @@ begin
   if v_after.full_name is distinct from v_before.full_name
      or v_after.display_name is distinct from v_before.display_name then
     raise exception
-      'VERIFICATION FAILED 6: a failed save left full_name=% display_name=%',
+      'VERIFICATION FAILED 6a: early rejection left full_name=% display_name=%',
       coalesce(v_after.full_name, '(null)'), coalesce(v_after.display_name, '(null)');
   end if;
 
   if v_after.avatar_url is distinct from v_before.avatar_url
      or v_after.photo_url is distinct from v_before.photo_url then
     raise exception
-      'VERIFICATION FAILED 8: a failed save changed the avatar pair';
+      'VERIFICATION FAILED 6a: early rejection changed the avatar pair';
   end if;
 
   if v_after.working_hours_jsonb is distinct from v_before.working_hours_jsonb then
     raise exception
-      'VERIFICATION FAILED 9: a failed save changed working hours';
+      'VERIFICATION FAILED 6a: early rejection changed working hours';
   end if;
 
   select count(*) into v_n
@@ -561,11 +622,11 @@ begin
 
   if v_n <> 0 then
     raise exception
-      'VERIFICATION FAILED 10: a failed save left % country rows', v_n;
+      'VERIFICATION FAILED 6a: early rejection left % country rows', v_n;
   end if;
 
   raise notice
-    'PASS 6/8/9/10: a failed save rolled back the name pair, avatar pair, working hours and countries';
+    'PASS 6a: an invalid country id is rejected BEFORE any mutation (not a rollback proof)';
 end $$;
 
 
@@ -635,6 +696,194 @@ begin
 end $$;
 
 
+-- ------------------------------------------------------------
+-- Check 6b: CONTROLLED FAILURE AFTER THE WRITES — the real
+-- rollback proof.
+-- ------------------------------------------------------------
+--
+-- Check 6a could only show that validation happens early. This
+-- check forces a failure at a point where the RPC has ALREADY
+-- written every field under test, and then proves each one
+-- reverted.
+--
+-- Method: a temporary AFTER UPDATE trigger on public.consultants
+-- that raises only for this one consultant and only when a
+-- sentinel headline is written. AFTER (not BEFORE) is deliberate:
+-- the row modification is fully applied before the trigger fires,
+-- so what follows is genuine rollback of applied writes rather
+-- than a write that never happened.
+--
+-- By the time it fires, the RPC has completed:
+--   section 6  delete + insert on consultant_countries
+--   section 7  update profiles.full_name and avatar_url
+--   section 8  update consultants: display_name, photo_url,
+--              headline, working_hours_jsonb
+--
+-- The WHEN clause keeps the trigger inert for every other row and
+-- every other write, so the migration 026 guard trigger
+-- (trg_guard_consultants) and the migration 001 timestamp trigger
+-- (trg_consultants_updated) are unaffected. Both continue to run
+-- normally; this trigger is additive and fires last.
+--
+-- The function and trigger are created inside this transaction.
+-- PostgreSQL DDL is transactional, so both vanish on the rollback
+-- at the end of Part 3. Their absence is asserted afterwards.
+
+create function public.v30_tmp_rollback_probe()
+returns trigger
+language plpgsql
+as $probe$
+begin
+  raise exception
+    'V30_ROLLBACK_PROBE: controlled failure after the consultant update';
+end;
+$probe$;
+
+create trigger v30_tmp_rollback_probe
+  after update on public.consultants
+  for each row
+  when (new.headline = 'V30 SENTINEL HEADLINE')
+  execute function public.v30_tmp_rollback_probe();
+
+do $$
+declare
+  v_id    uuid := current_setting('app.v30_rpc')::uuid;
+  v_cid   uuid := current_setting('app.v30_country')::uuid;
+  v_cid2  uuid := current_setting('app.v30_country2')::uuid;
+  v_before record;
+  v_after  record;
+  v_fired  boolean := false;
+  v_before_countries uuid[];
+  v_after_countries  uuid[];
+begin
+  -- State established by the success-path check above.
+  select pr.full_name, c.display_name, pr.avatar_url, c.photo_url,
+         c.headline, c.working_hours_jsonb
+    into v_before
+    from public.consultants c
+    join public.profiles pr on pr.id = c.profile_id
+   where c.id = v_id;
+
+  select coalesce(array_agg(country_id order by country_id), '{}')
+    into v_before_countries
+    from public.consultant_countries
+   where consultant_id = v_id;
+
+  raise notice
+    'BEFORE  full_name=% display_name=% avatar_url=% photo_url=% headline=% hours=% countries=%',
+    v_before.full_name, v_before.display_name, v_before.avatar_url,
+    v_before.photo_url, v_before.headline, v_before.working_hours_jsonb,
+    v_before_countries;
+
+  /*
+   * Every argument below is VALID. The only thing that stops this
+   * save is the sentinel headline, and it stops it after the work
+   * is done. A country REPLACEMENT is requested too, so section
+   * 6's delete-then-insert must also unwind.
+   */
+  begin
+    perform public.save_consultant_profile(
+      v_id, 'draft',
+      'Rolled Back Name',
+      'https://cdn.test/rolled-back.png',
+      null,
+      'V30 SENTINEL HEADLINE',
+      null, null, null, null,
+      array[v_cid2]::uuid[],
+      '{"monday":[{"start":"07:00","end":"08:00"}]}'::jsonb);
+
+    raise exception
+      'VERIFICATION FAILED 6b: the controlled trigger did not fire';
+  exception when others then
+    if sqlerrm like 'V30_ROLLBACK_PROBE%' then
+      v_fired := true;
+    else
+      raise;
+    end if;
+  end;
+
+  if not v_fired then
+    raise exception
+      'VERIFICATION FAILED 6b: expected the controlled failure, got none';
+  end if;
+
+  select pr.full_name, c.display_name, pr.avatar_url, c.photo_url,
+         c.headline, c.working_hours_jsonb
+    into v_after
+    from public.consultants c
+    join public.profiles pr on pr.id = c.profile_id
+   where c.id = v_id;
+
+  select coalesce(array_agg(country_id order by country_id), '{}')
+    into v_after_countries
+    from public.consultant_countries
+   where consultant_id = v_id;
+
+  raise notice
+    'AFTER   full_name=% display_name=% avatar_url=% photo_url=% headline=% hours=% countries=%',
+    v_after.full_name, v_after.display_name, v_after.avatar_url,
+    v_after.photo_url, v_after.headline, v_after.working_hours_jsonb,
+    v_after_countries;
+
+  -- The authoritative name and its projection both reverted.
+  if v_after.full_name is distinct from v_before.full_name then
+    raise exception
+      'VERIFICATION FAILED 6b: profiles.full_name persisted as %',
+      coalesce(v_after.full_name, '(null)');
+  end if;
+
+  if v_after.display_name is distinct from v_before.display_name then
+    raise exception
+      'VERIFICATION FAILED 6b: consultants.display_name persisted as %',
+      coalesce(v_after.display_name, '(null)');
+  end if;
+
+  -- The authoritative avatar and its projection both reverted.
+  if v_after.avatar_url is distinct from v_before.avatar_url then
+    raise exception
+      'VERIFICATION FAILED 6b: profiles.avatar_url persisted as %',
+      coalesce(v_after.avatar_url, '(null)');
+  end if;
+
+  if v_after.photo_url is distinct from v_before.photo_url then
+    raise exception
+      'VERIFICATION FAILED 6b: consultants.photo_url persisted as %',
+      coalesce(v_after.photo_url, '(null)');
+  end if;
+
+  -- The sentinel itself must not survive.
+  if v_after.headline is distinct from v_before.headline then
+    raise exception
+      'VERIFICATION FAILED 6b: consultants.headline persisted as %',
+      coalesce(v_after.headline, '(null)');
+  end if;
+
+  if v_after.working_hours_jsonb is distinct from v_before.working_hours_jsonb then
+    raise exception
+      'VERIFICATION FAILED 6b: consultants.working_hours_jsonb persisted as %',
+      v_after.working_hours_jsonb;
+  end if;
+
+  -- Section 6 ran to completion before the failure, so this proves
+  -- the delete-then-insert unwound: the original assignment is
+  -- back and the replacement is gone.
+  if v_after_countries is distinct from v_before_countries then
+    raise exception
+      'VERIFICATION FAILED 6b: consultant_countries persisted as %, expected %',
+      v_after_countries, v_before_countries;
+  end if;
+
+  if v_after_countries <> array[v_cid]::uuid[] then
+    raise exception
+      'VERIFICATION FAILED 6b: expected the original country assignment, found %',
+      v_after_countries;
+  end if;
+
+  raise notice
+    'PASS 6b: a failure raised AFTER the writes rolled back full_name, display_name, avatar_url, photo_url, headline, working_hours_jsonb and consultant_countries';
+end $$;
+
+
 -- Check 7: a different consultant was never touched by any call above.
 
 do $$
@@ -664,8 +913,103 @@ begin
   raise notice 'PASS 7: another consultant remains untouched';
 end $$;
 
--- Check 21: every fixture above is discarded.
 rollback;
+
+-- Check 21 (Part 3): the rollback is asserted, not assumed.
+--
+-- The temporary probe is included: a trigger left attached to
+-- public.consultants would raise on a real save, so proving it is
+-- gone matters more than proving the fixture rows are.
+
+do $$
+declare
+  v_profiles    integer;
+  v_consultants integer;
+  v_countries   integer;
+  v_trigger     integer;
+  v_function    integer;
+begin
+  select count(*) into v_profiles
+    from public.profiles
+   where email like 'v30-%@verification.invalid';
+
+  select count(*) into v_consultants
+    from public.consultants c
+    join public.profiles p on p.id = c.profile_id
+   where p.email like 'v30-%@verification.invalid';
+
+  select count(*) into v_countries
+    from public.countries
+   where iso_code in ('QW3', 'QW4')
+      or name like 'ZZ V30 %';
+
+  select count(*) into v_trigger
+    from pg_trigger t
+    join pg_class c on c.oid = t.tgrelid
+    join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public'
+     and c.relname = 'consultants'
+     and t.tgname  = 'v30_tmp_rollback_probe';
+
+  select count(*) into v_function
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public'
+     and p.proname = 'v30_tmp_rollback_probe';
+
+  if v_profiles <> 0 then
+    raise exception
+      'VERIFICATION FAILED 21: % verification profile(s) survived the rollback', v_profiles;
+  end if;
+
+  if v_consultants <> 0 then
+    raise exception
+      'VERIFICATION FAILED 21: % verification consultant(s) survived the rollback', v_consultants;
+  end if;
+
+  if v_countries <> 0 then
+    raise exception
+      'VERIFICATION FAILED 21: % verification country row(s) survived the rollback', v_countries;
+  end if;
+
+  if v_trigger <> 0 then
+    raise exception
+      'VERIFICATION FAILED 21: the temporary probe TRIGGER is still attached to public.consultants';
+  end if;
+
+  if v_function <> 0 then
+    raise exception
+      'VERIFICATION FAILED 21: the temporary probe FUNCTION still exists in public';
+  end if;
+
+  raise notice
+    'PASS 21 (Part 3): no verification profile, consultant or country survived, and the temporary trigger and function are gone';
+end $$;
+
+-- The pre-existing triggers on public.consultants must be exactly
+-- what they were: the probe must not have displaced or replaced
+-- one of them.
+
+do $$
+declare v_triggers text;
+begin
+  select string_agg(t.tgname, ', ' order by t.tgname)
+    into v_triggers
+    from pg_trigger t
+    join pg_class c on c.oid = t.tgrelid
+    join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public'
+     and c.relname = 'consultants'
+     and not t.tgisinternal;
+
+  if v_triggers is distinct from 'trg_consultants_updated, trg_guard_consultants' then
+    raise exception
+      'VERIFICATION FAILED 21: triggers on public.consultants are now: %', v_triggers;
+  end if;
+
+  raise notice
+    'PASS 21: the migration 026 guard trigger and the timestamp trigger are intact and alone';
+end $$;
 
 
 -- ============================================================

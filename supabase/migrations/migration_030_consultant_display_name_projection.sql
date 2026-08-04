@@ -48,7 +48,17 @@
 --   16 tables.
 -- - No blank-name rule is invented here. See section A2.
 --
--- Idempotent: safe to run more than once.
+-- Rerun safety:
+-- - The schema and backfill statements are idempotent. ADD COLUMN
+--   IF NOT EXISTS is a no-op once the column exists, and the
+--   backfill's IS DISTINCT FROM predicate matches nothing on a
+--   second run.
+-- - The RPC replacement is NOT. Do not reapply this migration
+--   after a later migration has replaced save_consultant_profile,
+--   because CREATE OR REPLACE would reinstate migration 030's
+--   older function body and silently revert that later work.
+--   Reapply only the schema and backfill sections in that case,
+--   or reapply the newest migration afterwards.
 -- ============================================================
 
 begin;
