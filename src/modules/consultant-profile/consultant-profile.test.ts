@@ -1538,3 +1538,46 @@ describe("Working hours: named wire format, numeric storage", () => {
     );
   });
 });
+
+describe("Working hours: corrupt storage is refused, never partial", () => {
+  it("returns a controlled internal error rather than a partial week", async () => {
+    /* Storage a permissive reader would have silently truncated. */
+    db.consultants[0]!.working_hours_jsonb = {
+      "1": [{ start: "09:00", end: "17:00" }],
+      funday: [{ start: "00:00", end: "23:00" }],
+    };
+
+    const response = await save({ mode: "draft", headline: "x" });
+
+    assert.equal(response.statusCode, 500);
+    assert.equal(response.json().error.code, "INTERNAL_ERROR");
+  });
+
+  it("never leaks the stored value or a reason to the client", async () => {
+    db.consultants[0]!.working_hours_jsonb = {
+      Sunday: [{ start: "09:00", end: "17:00" }],
+    };
+
+    const body = (await save({ mode: "draft", headline: "x" })).body;
+
+    assert.ok(!body.includes("Sunday"));
+    assert.ok(!body.includes("non-canonical"));
+    assert.ok(!body.includes("09:00"));
+  });
+
+  it("treats a mixed-format row as incomplete rather than complete", async () => {
+    db.consultants[0]!.onboarding_completed_at = "2026-08-01T00:00:00.000Z";
+    db.consultants[0]!.is_active = true;
+    db.consultants[0]!.working_hours_jsonb = {
+      "1": [{ start: "09:00", end: "17:00" }],
+      monday: [{ start: "09:00", end: "17:00" }],
+    };
+
+    const response = await save({ mode: "update", headline: "x" });
+
+    assert.equal(response.statusCode, 409);
+    assert.ok(
+      response.json().error.details.missing.includes("working_hours"),
+    );
+  });
+});

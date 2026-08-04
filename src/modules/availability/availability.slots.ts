@@ -1,5 +1,5 @@
 import { DateTime } from "luxon";
-import { toNamedWeekdayKeys } from "../../lib/working-hours-format.js";
+import { parseStoredWorkingHours } from "../../lib/working-hours-format.js";
 import type {
   AvailabilitySlot,
   WeeklyWorkingHours,
@@ -43,14 +43,27 @@ export const normalizeWorkingHours = (
   const normalized: WeeklyWorkingHours = {};
 
   /*
-   * Storage became numeric weekday keys in migration 029, while
-   * slot generation matches on luxon's named weekday. Rows written
-   * before 029 are still named. Normalising keys first means both
-   * shapes generate slots; without this a numeric row silently
-   * produces an empty week and the consultant looks unbookable.
+   * Storage is numeric from migration 029 onward and named before
+   * it, so both are accepted. Anything else is refused WHOLE.
+   *
+   * Returning an empty week on a corrupt row is deliberate: a
+   * partial schedule would offer slots the consultant never agreed
+   * to, which is worse than offering none. The failure is logged so
+   * it is diagnosable rather than merely quiet.
    */
+  const parsed = parseStoredWorkingHours(value);
+
+  if (!parsed.ok) {
+    console.error(
+      "Consultant working hours could not be parsed; generating no slots",
+      { reason: parsed.reason },
+    );
+
+    return {};
+  }
+
   for (const [weekday, intervals] of Object.entries(
-    toNamedWeekdayKeys(value),
+    parsed.value,
   )) {
     if (!Array.isArray(intervals)) {
       normalized[weekday.toLowerCase()] = [];

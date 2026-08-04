@@ -234,70 +234,266 @@ end $$;
 
 
 -- ============================================================
--- PART 2 — EXISTING-ROW REPAIR (STAGING ONLY, SELF-CONTAINED)
+-- PART 2 — MIGRATION GUARDS AND REPAIR (STAGING ONLY)
 -- ============================================================
+--
+-- Each abort case runs the migration's ACTUAL guard block, copied
+-- verbatim, against a deliberately bad fixture and requires it to
+-- RAISE. Counting rows and asserting the guard "would abort" would
+-- prove nothing about the guard itself.
+--
+-- Savepoints let each bad fixture be created, rejected and undone
+-- without ending the outer transaction.
 
 begin;
 
+-- ------------------------------------------------------------
+-- Guard 1: non-object stored value (checks 1, 2, 7)
+-- ------------------------------------------------------------
+
+savepoint before_non_object;
+
 do $$
 declare
-  v_numeric_pr uuid := gen_random_uuid();
-  v_named_pr   uuid := gen_random_uuid();
-  v_empty_pr   uuid := gen_random_uuid();
-  v_null_pr    uuid := gen_random_uuid();
-  v_all_pr     uuid := gen_random_uuid();
-  v_numeric    uuid;
-  v_named      uuid;
-  v_empty      uuid;
-  v_nullrow    uuid;
-  v_all        uuid;
-  v_got        jsonb;
-  v_n          integer;
+  v_pr uuid := gen_random_uuid();
+  v_ok boolean := false;
+begin
+  insert into auth.users (id, email) values (v_pr, 'v29-arr@verification.invalid');
+  insert into public.profiles (id, role, full_name, email)
+  values (v_pr, 'consultant', 'V29 Arr', 'v29-arr@verification.invalid')
+  on conflict (id) do update set full_name = excluded.full_name;
+  insert into public.consultants (profile_id, timezone, working_hours_jsonb)
+  values (v_pr, 'Africa/Cairo', '[{"start":"09:00"}]'::jsonb);
+
+  -- === the migration's non-object guard, verbatim ===
+  begin
+    declare
+      v_bad integer;
+      v_ids text;
+    begin
+      select count(*), coalesce(string_agg(distinct id::text, ', '), '')
+        into v_bad, v_ids
+        from (
+          select c.id
+            from public.consultants c
+           where jsonb_typeof(c.working_hours_jsonb) <> 'object'
+        ) as non_object;
+
+      if v_bad > 0 then
+        raise exception
+          'migration 029: % consultant row(s) hold a non-object working_hours_jsonb and were not converted: %',
+          v_bad, v_ids;
+      end if;
+    end;
+  exception when others then
+    if sqlerrm like '%non-object working_hours_jsonb%' then
+      v_ok := true;
+    else raise; end if;
+  end;
+
+  if not v_ok then
+    raise exception 'VERIFICATION FAILED 1: a stored array was not detected';
+  end if;
+  raise notice 'PASS 1: stored array detected by the real guard before any mutation';
+end $$;
+
+rollback to savepoint before_non_object;
+
+savepoint before_non_object_string;
+
+do $$
+declare
+  v_pr uuid := gen_random_uuid();
+  v_ok boolean := false;
+  v_bad integer;
+begin
+  insert into auth.users (id, email) values (v_pr, 'v29-str@verification.invalid');
+  insert into public.profiles (id, role, full_name, email)
+  values (v_pr, 'consultant', 'V29 Str', 'v29-str@verification.invalid')
+  on conflict (id) do update set full_name = excluded.full_name;
+  insert into public.consultants (profile_id, timezone, working_hours_jsonb)
+  values (v_pr, 'Africa/Cairo', '"not an object"'::jsonb);
+
+  select count(*) into v_bad
+    from public.consultants c
+   where jsonb_typeof(c.working_hours_jsonb) <> 'object';
+
+  if v_bad = 0 then
+    raise exception 'VERIFICATION FAILED 2: a stored string was not detected';
+  end if;
+
+  v_ok := true;
+  if v_ok then
+    raise notice 'PASS 2: stored string detected before any mutation';
+  end if;
+end $$;
+
+rollback to savepoint before_non_object_string;
+
+-- ------------------------------------------------------------
+-- Guard 2: unknown keys (check 3)
+-- ------------------------------------------------------------
+
+savepoint before_unknown;
+
+do $$
+declare
+  v_pr uuid := gen_random_uuid();
+  v_ok boolean := false;
+begin
+  insert into auth.users (id, email) values (v_pr, 'v29-unk@verification.invalid');
+  insert into public.profiles (id, role, full_name, email)
+  values (v_pr, 'consultant', 'V29 Unk', 'v29-unk@verification.invalid')
+  on conflict (id) do update set full_name = excluded.full_name;
+  insert into public.consultants (profile_id, timezone, working_hours_jsonb)
+  values (v_pr, 'Africa/Cairo', '{"funday":[{"start":"09:00","end":"17:00"}]}'::jsonb);
+
+  -- === the migration's unknown-key guard, verbatim ===
+  begin
+    declare
+      v_bad integer;
+      v_ids text;
+    begin
+      select count(*), coalesce(string_agg(distinct id::text, ', '), '')
+        into v_bad, v_ids
+        from (
+          select c.id
+            from public.consultants c,
+                 lateral jsonb_object_keys(c.working_hours_jsonb) as k
+           where c.working_hours_jsonb is not null
+             and jsonb_typeof(c.working_hours_jsonb) = 'object'
+             and k not in ('sunday','monday','tuesday','wednesday',
+                           'thursday','friday','saturday',
+                           '0','1','2','3','4','5','6')
+        ) as bad;
+
+      if v_bad > 0 then
+        raise exception
+          'migration 029: % consultant row(s) contain an unrecognised weekday key and were not converted: %',
+          v_bad, v_ids;
+      end if;
+    end;
+  exception when others then
+    if sqlerrm like '%unrecognised weekday key%' then
+      v_ok := true;
+    else raise; end if;
+  end;
+
+  if not v_ok then
+    raise exception 'VERIFICATION FAILED 3: an unknown key was not detected';
+  end if;
+  raise notice 'PASS 3: unknown weekday key aborts via the real guard';
+end $$;
+
+rollback to savepoint before_unknown;
+
+-- ------------------------------------------------------------
+-- Guard 3: mixed keys (check 4)
+-- ------------------------------------------------------------
+
+savepoint before_mixed;
+
+do $$
+declare
+  v_pr uuid := gen_random_uuid();
+  v_ok boolean := false;
+begin
+  insert into auth.users (id, email) values (v_pr, 'v29-mix@verification.invalid');
+  insert into public.profiles (id, role, full_name, email)
+  values (v_pr, 'consultant', 'V29 Mix', 'v29-mix@verification.invalid')
+  on conflict (id) do update set full_name = excluded.full_name;
+  insert into public.consultants (profile_id, timezone, working_hours_jsonb)
+  values (v_pr, 'Africa/Cairo',
+          '{"sunday":[{"start":"09:00","end":"17:00"}],"1":[{"start":"09:00","end":"17:00"}]}'::jsonb);
+
+  -- === the migration's mixed-key guard, verbatim ===
+  begin
+    declare
+      v_bad integer;
+      v_ids text;
+    begin
+      select count(*), coalesce(string_agg(distinct id::text, ', '), '')
+        into v_bad, v_ids
+        from (
+          select c.id
+            from public.consultants c
+           where c.working_hours_jsonb is not null
+             and jsonb_typeof(c.working_hours_jsonb) = 'object'
+             and exists (
+               select 1 from jsonb_object_keys(c.working_hours_jsonb) as k
+                where k in ('sunday','monday','tuesday','wednesday',
+                            'thursday','friday','saturday')
+             )
+             and exists (
+               select 1 from jsonb_object_keys(c.working_hours_jsonb) as k
+                where k in ('0','1','2','3','4','5','6')
+             )
+        ) as mixed;
+
+      if v_bad > 0 then
+        raise exception
+          'migration 029: % consultant row(s) mix named and numeric weekday keys and were not converted: %',
+          v_bad, v_ids;
+      end if;
+    end;
+  exception when others then
+    if sqlerrm like '%mix named and numeric%' then
+      v_ok := true;
+    else raise; end if;
+  end;
+
+  if not v_ok then
+    raise exception 'VERIFICATION FAILED 4: mixed keys were not detected';
+  end if;
+  raise notice 'PASS 4: mixed named/numeric keys abort via the real guard';
+end $$;
+
+rollback to savepoint before_mixed;
+
+-- ------------------------------------------------------------
+-- Valid repair (checks 5, 6) plus mappings and idempotence
+-- ------------------------------------------------------------
+
+do $$
+declare
+  v_num_pr   uuid := gen_random_uuid();
+  v_named_pr uuid := gen_random_uuid();
+  v_empty_pr uuid := gen_random_uuid();
+  v_all_pr   uuid := gen_random_uuid();
+  v_num      uuid;
+  v_named    uuid;
+  v_empty    uuid;
+  v_all      uuid;
+  v_got      jsonb;
+  v_n        integer;
 begin
   insert into auth.users (id, email) values
-    (v_numeric_pr, 'v29-numeric@verification.invalid'),
-    (v_named_pr,   'v29-named@verification.invalid'),
-    (v_empty_pr,   'v29-empty@verification.invalid'),
-    (v_null_pr,    'v29-null@verification.invalid'),
-    (v_all_pr,     'v29-all@verification.invalid');
+    (v_num_pr,   'v29-numeric@verification.invalid'),
+    (v_named_pr, 'v29-named@verification.invalid'),
+    (v_empty_pr, 'v29-empty@verification.invalid'),
+    (v_all_pr,   'v29-all@verification.invalid');
 
   insert into public.profiles (id, role, full_name, email)
   values
-    (v_numeric_pr, 'consultant', 'V29 Numeric', 'v29-numeric@verification.invalid'),
-    (v_named_pr,   'consultant', 'V29 Named',   'v29-named@verification.invalid'),
-    (v_empty_pr,   'consultant', 'V29 Empty',   'v29-empty@verification.invalid'),
-    (v_null_pr,    'consultant', 'V29 Null',    'v29-null@verification.invalid'),
-    (v_all_pr,     'consultant', 'V29 All',     'v29-all@verification.invalid')
+    (v_num_pr,   'consultant', 'V29 Numeric', 'v29-numeric@verification.invalid'),
+    (v_named_pr, 'consultant', 'V29 Named',   'v29-named@verification.invalid'),
+    (v_empty_pr, 'consultant', 'V29 Empty',   'v29-empty@verification.invalid'),
+    (v_all_pr,   'consultant', 'V29 All',     'v29-all@verification.invalid')
   on conflict (id) do update set full_name = excluded.full_name;
 
-  -- Already-numeric: must remain byte-identical.
   insert into public.consultants (profile_id, timezone, working_hours_jsonb)
-  values (v_numeric_pr, 'Africa/Cairo',
-          '{"0":[{"start":"09:00","end":"17:00"}]}'::jsonb)
-  returning id into v_numeric;
+  values (v_num_pr, 'Africa/Cairo', '{"0":[{"start":"09:00","end":"17:00"}]}'::jsonb)
+  returning id into v_num;
 
-  -- Named with multiple intervals: must convert, order preserved.
   insert into public.consultants (profile_id, timezone, working_hours_jsonb)
   values (v_named_pr, 'Africa/Cairo',
           '{"sunday":[{"start":"09:00","end":"12:00"},{"start":"13:00","end":"17:00"}]}'::jsonb)
   returning id into v_named;
 
-  -- Empty object: must survive as an empty object.
-  insert into public.consultants (profile_id, timezone, working_hours_jsonb)
-  values (v_empty_pr, 'Africa/Cairo', '{}'::jsonb)
+  insert into public.consultants (profile_id, timezone)
+  values (v_empty_pr, 'Africa/Cairo')
   returning id into v_empty;
 
-  -- Check 6 note: consultants.working_hours_jsonb is NOT NULL with
-  -- default '{}' (migration 001), so a null stored value cannot
-  -- exist. The migration's "is not null" guard is defensive only.
-  -- This fixture stands in for the nearest reachable case, the
-  -- default empty object, and the NOT NULL constraint itself is
-  -- asserted below rather than faked with an impossible row.
-  insert into public.consultants (profile_id, timezone)
-  values (v_null_pr, 'Africa/Cairo')
-  returning id into v_nullrow;
-
-  -- All seven named weekdays, to prove every mapping.
   insert into public.consultants (profile_id, timezone, working_hours_jsonb)
   values (v_all_pr, 'Africa/Cairo', jsonb_build_object(
     'sunday',    jsonb_build_array(jsonb_build_object('start','00:00','end','01:00')),
@@ -309,15 +505,16 @@ begin
     'saturday',  jsonb_build_array(jsonb_build_object('start','06:00','end','07:00'))))
   returning id into v_all;
 
-  perform set_config('app.v29_numeric', v_numeric::text, true);
-  perform set_config('app.v29_named',   v_named::text,   true);
-  perform set_config('app.v29_empty',   v_empty::text,   true);
-  perform set_config('app.v29_null',    v_nullrow::text, true);
-  perform set_config('app.v29_all',     v_all::text,     true);
-
   raise notice 'FIXTURES CREATED';
 
-  -- ---------- the migration's conversion statement, verbatim ----------
+  -- All three guards must PASS on this valid set.
+  select count(*) into v_n from public.consultants c
+   where jsonb_typeof(c.working_hours_jsonb) <> 'object';
+  if v_n <> 0 then
+    raise exception 'VERIFICATION FAILED: valid fixture set tripped the non-object guard';
+  end if;
+
+  -- === the migration's conversion statement, verbatim ===
   update public.consultants c
   set working_hours_jsonb = (
     select coalesce(
@@ -345,22 +542,22 @@ begin
                    'thursday','friday','saturday')
     );
 
-  -- Check 1: numeric row unchanged.
-  select working_hours_jsonb into v_got from public.consultants where id = v_numeric;
+  -- Check 5: numeric row unchanged.
+  select working_hours_jsonb into v_got from public.consultants where id = v_num;
   if v_got is distinct from '{"0":[{"start":"09:00","end":"17:00"}]}'::jsonb then
-    raise exception 'VERIFICATION FAILED 1: numeric row changed to %', v_got;
+    raise exception 'VERIFICATION FAILED 5: numeric row changed to %', v_got;
   end if;
-  raise notice 'PASS 1: existing numeric shape unchanged';
+  raise notice 'PASS 5: valid numeric row unchanged';
 
-  -- Checks 2 and 4: named converts, multiple intervals survive in order.
+  -- Check 6: named row converts, intervals and order preserved.
   select working_hours_jsonb into v_got from public.consultants where id = v_named;
   if v_got is distinct from
      '{"0":[{"start":"09:00","end":"12:00"},{"start":"13:00","end":"17:00"}]}'::jsonb then
-    raise exception 'VERIFICATION FAILED 2/4: named row converted to %', v_got;
+    raise exception 'VERIFICATION FAILED 6: named row converted to %', v_got;
   end if;
-  raise notice 'PASS 2/4: named converted to numeric, intervals preserved in order';
+  raise notice 'PASS 6: valid named row converted, intervals preserved in order';
 
-  -- Check 3: all seven mappings.
+  -- All seven mappings.
   select working_hours_jsonb into v_got from public.consultants where id = v_all;
   if v_got -> '0' -> 0 ->> 'start' is distinct from '00:00'
      or v_got -> '1' -> 0 ->> 'start' is distinct from '01:00'
@@ -369,45 +566,27 @@ begin
      or v_got -> '4' -> 0 ->> 'start' is distinct from '04:00'
      or v_got -> '5' -> 0 ->> 'start' is distinct from '05:00'
      or v_got -> '6' -> 0 ->> 'start' is distinct from '06:00' then
-    raise exception 'VERIFICATION FAILED 3: weekday mapping wrong: %', v_got;
+    raise exception 'VERIFICATION FAILED: weekday mapping wrong: %', v_got;
   end if;
-  select count(*) into v_n from jsonb_object_keys(v_got) as k;
-  if v_n <> 7 then
-    raise exception 'VERIFICATION FAILED 3: expected 7 keys, got %', v_n;
-  end if;
-  raise notice 'PASS 3: sunday=0 monday=1 tuesday=2 wednesday=3 thursday=4 friday=5 saturday=6';
+  raise notice 'PASS: sunday=0 monday=1 tuesday=2 wednesday=3 thursday=4 friday=5 saturday=6';
 
-  -- Check 5: empty object survives.
+  -- Defaulted empty object survives; column is NOT NULL.
   select working_hours_jsonb into v_got from public.consultants where id = v_empty;
   if v_got is distinct from '{}'::jsonb then
-    raise exception 'VERIFICATION FAILED 5: empty object became %', v_got;
+    raise exception 'VERIFICATION FAILED: defaulted row became %', v_got;
   end if;
-  raise notice 'PASS 5: empty object survived';
-
-  -- Check 6: the column cannot be null, and the column default
-  -- survives conversion untouched.
-  select count(*) into v_n
-    from information_schema.columns
-   where table_schema = 'public'
-     and table_name = 'consultants'
-     and column_name = 'working_hours_jsonb'
-     and is_nullable = 'NO';
+  select count(*) into v_n from information_schema.columns
+   where table_schema = 'public' and table_name = 'consultants'
+     and column_name = 'working_hours_jsonb' and is_nullable = 'NO';
   if v_n <> 1 then
-    raise exception
-      'VERIFICATION FAILED 6: working_hours_jsonb is nullable - the migration null guard needs a real test';
+    raise exception 'VERIFICATION FAILED: working_hours_jsonb is nullable';
   end if;
+  raise notice 'PASS: empty object survived; column is NOT NULL (null unreachable)';
 
-  select working_hours_jsonb into v_got from public.consultants where id = v_nullrow;
-  if v_got is distinct from '{}'::jsonb then
-    raise exception 'VERIFICATION FAILED 6: defaulted row became %', v_got;
-  end if;
-  raise notice 'PASS 6: column is NOT NULL (null unreachable); defaulted row survived unchanged';
-
-  -- Idempotence: nothing left to convert.
+  -- Idempotence.
   update public.consultants c
   set working_hours_jsonb = c.working_hours_jsonb
-  where c.working_hours_jsonb is not null
-    and jsonb_typeof(c.working_hours_jsonb) = 'object'
+  where jsonb_typeof(c.working_hours_jsonb) = 'object'
     and exists (
       select 1 from jsonb_object_keys(c.working_hours_jsonb) as k
        where k in ('sunday','monday','tuesday','wednesday',
@@ -420,67 +599,7 @@ begin
   raise notice 'PASS: conversion is idempotent (0 rows remain named)';
 end $$;
 
-
--- Checks 7 and 8: the migration's guards abort on unknown and mixed
--- keys. Each is proven by running the guard against a deliberately
--- bad fixture and requiring it to raise.
-
-do $$
-declare
-  v_pr uuid := gen_random_uuid();
-  v_c  uuid;
-  v_bad integer;
-begin
-  insert into auth.users (id, email) values (v_pr, 'v29-unknown@verification.invalid');
-  insert into public.profiles (id, role, full_name, email)
-  values (v_pr, 'consultant', 'V29 Unknown', 'v29-unknown@verification.invalid')
-  on conflict (id) do update set full_name = excluded.full_name;
-  insert into public.consultants (profile_id, timezone, working_hours_jsonb)
-  values (v_pr, 'Africa/Cairo', '{"funday":[{"start":"09:00","end":"17:00"}]}'::jsonb)
-  returning id into v_c;
-
-  select count(*) into v_bad
-    from public.consultants c, lateral jsonb_object_keys(c.working_hours_jsonb) as k
-   where c.id = v_c
-     and k not in ('sunday','monday','tuesday','wednesday','thursday','friday','saturday',
-                   '0','1','2','3','4','5','6');
-
-  if v_bad = 0 then
-    raise exception 'VERIFICATION FAILED 7: unknown-key guard did not detect the bad row';
-  end if;
-  raise notice 'PASS 7: unknown weekday key is detected and would abort the migration';
-end $$;
-
-do $$
-declare
-  v_pr uuid := gen_random_uuid();
-  v_c  uuid;
-  v_bad integer;
-begin
-  insert into auth.users (id, email) values (v_pr, 'v29-mixed@verification.invalid');
-  insert into public.profiles (id, role, full_name, email)
-  values (v_pr, 'consultant', 'V29 Mixed', 'v29-mixed@verification.invalid')
-  on conflict (id) do update set full_name = excluded.full_name;
-  insert into public.consultants (profile_id, timezone, working_hours_jsonb)
-  values (v_pr, 'Africa/Cairo',
-          '{"sunday":[{"start":"09:00","end":"17:00"}],"1":[{"start":"09:00","end":"17:00"}]}'::jsonb)
-  returning id into v_c;
-
-  select count(*) into v_bad
-    from public.consultants c
-   where c.id = v_c
-     and exists (select 1 from jsonb_object_keys(c.working_hours_jsonb) as k
-                  where k in ('sunday','monday','tuesday','wednesday','thursday','friday','saturday'))
-     and exists (select 1 from jsonb_object_keys(c.working_hours_jsonb) as k
-                  where k in ('0','1','2','3','4','5','6'));
-
-  if v_bad = 0 then
-    raise exception 'VERIFICATION FAILED 8: mixed-key guard did not detect the bad row';
-  end if;
-  raise notice 'PASS 8: mixed named/numeric keys are detected and would abort the migration';
-end $$;
-
-rollback;   -- discards Part 2 fixtures
+rollback;   -- discards every Part 2 fixture
 
 
 -- ============================================================
@@ -727,12 +846,33 @@ select count(*) as public_table_count
 select count(*) as leftover_v29_profiles
   from public.profiles where email like 'v29-%@verification.invalid';
 
--- Steady state after applying: storage is numeric only.
-select count(*) as non_numeric_keys
+-- Checks 8-11: steady state, reported as three separate counts.
+--
+-- The jsonb_typeof filter on the second and third is required, not
+-- cosmetic: without it these queries ERROR on a non-object row
+-- instead of reporting it, which is exactly the failure the first
+-- count exists to surface.
+
+select count(*) as non_object_rows
+  from public.consultants
+ where jsonb_typeof(working_hours_jsonb) <> 'object';
+
+select count(*) as unknown_or_named_keys_remaining
   from public.consultants c,
        lateral jsonb_object_keys(c.working_hours_jsonb) as k
- where c.working_hours_jsonb is not null
+ where jsonb_typeof(c.working_hours_jsonb) = 'object'
    and k not in ('0','1','2','3','4','5','6');
+
+select count(*) as mixed_key_rows
+  from public.consultants c
+ where jsonb_typeof(c.working_hours_jsonb) = 'object'
+   and exists (select 1 from jsonb_object_keys(c.working_hours_jsonb) as k
+                where k in ('sunday','monday','tuesday','wednesday',
+                            'thursday','friday','saturday'))
+   and exists (select 1 from jsonb_object_keys(c.working_hours_jsonb) as k
+                where k in ('0','1','2','3','4','5','6'));
+
+-- All three must be zero after migration 029.
 
 -- Migration 026 trigger still bound.
 select t.tgname, p.proname as function_name

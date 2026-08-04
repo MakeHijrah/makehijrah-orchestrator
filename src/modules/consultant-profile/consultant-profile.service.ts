@@ -15,7 +15,10 @@ import {
   type ConsultantProfileRow,
   type RpcMarker,
 } from "./consultant-profile.repository.js";
-import { toNamedWorkingHours } from "../../lib/working-hours-format.js";
+import {
+  parseStoredWorkingHours,
+  StoredWorkingHoursError,
+} from "../../lib/working-hours-format.js";
 import type { ConsultantProfileInput } from "./consultant-profile.schema.js";
 import { validateWorkingHours } from "./consultant-profile.working-hours.js";
 
@@ -113,6 +116,21 @@ const merge = <T>(
     ? stored
     : supplied;
 
+const readStoredWorkingHours = (
+  stored: unknown,
+): Record<string, unknown> => {
+  const parsed =
+    parseStoredWorkingHours(stored);
+
+  if (!parsed.ok) {
+    throw new StoredWorkingHoursError(
+      parsed.reason,
+    );
+  }
+
+  return parsed.value;
+};
+
 const toView = ({
   consultant,
   countryIds,
@@ -134,11 +152,15 @@ const toView = ({
     consultant.available_for_general,
   country_ids: countryIds,
   /*
-   * Storage is numeric weekday keys from migration 029 onward; the
-   * HTTP contract is named. The conversion happens here, on the way
-   * out, so numeric keys never cross the API boundary.
+   * Storage is numeric from migration 029 onward; the HTTP contract
+   * is named. Conversion happens here so numeric keys never cross
+   * the API boundary.
+   *
+   * A stored value that cannot be parsed throws rather than
+   * degrading: returning a partial week would tell a consultant
+   * their schedule is something it is not.
    */
-  working_hours: toNamedWorkingHours(
+  working_hours: readStoredWorkingHours(
     consultant.working_hours_jsonb,
   ),
   onboarding_completed_at:
@@ -612,12 +634,38 @@ export const saveProfileForConsultant =
       return internalError();
     }
 
-    return {
-      ok: true,
-      consultant: toView({
-        consultant: finalResult.data,
-        countryIds:
-          finalCountries.data,
-      }),
-    };
+    /*
+     * The save itself has already committed. A stored row that
+     * cannot be projected is an internal read failure, not a save
+     * failure, and is reported as such rather than escaping as an
+     * unhandled exception. The reason is logged; the client sees
+     * only the generic message.
+     */
+    try {
+      return {
+        ok: true,
+        consultant: toView({
+          consultant: finalResult.data,
+          countryIds:
+            finalCountries.data,
+        }),
+      };
+    } catch (error) {
+      if (
+        error instanceof
+        StoredWorkingHoursError
+      ) {
+        console.error(
+          "Consultant profile could not be projected",
+          {
+            consultantId: consultant.id,
+            reason: error.reason,
+          },
+        );
+
+        return internalError();
+      }
+
+      throw error;
+    }
   };

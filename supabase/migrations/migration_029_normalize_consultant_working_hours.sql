@@ -92,6 +92,30 @@ declare
   v_bad integer;
   v_ids text;
 begin
+  -- Rows whose value is not a JSON object at all: an array, a
+  -- string, a number or a boolean.
+  --
+  -- This runs FIRST and before any mutation, because every guard and
+  -- the conversion below call jsonb_object_keys, which errors on a
+  -- non-object. Filtering such rows out instead of rejecting them
+  -- would leave them silently unconverted, which is the failure this
+  -- guard exists to prevent.
+  --
+  -- The column is NOT NULL, so there is no null case to handle.
+  select count(*), coalesce(string_agg(distinct id::text, ', '), '')
+    into v_bad, v_ids
+    from (
+      select c.id
+        from public.consultants c
+       where jsonb_typeof(c.working_hours_jsonb) <> 'object'
+    ) as non_object;
+
+  if v_bad > 0 then
+    raise exception
+      'migration 029: % consultant row(s) hold a non-object working_hours_jsonb and were not converted: %',
+      v_bad, v_ids;
+  end if;
+
   -- Rows carrying a key that is neither a known weekday name nor a
   -- known numeric key.
   select count(*), coalesce(string_agg(distinct id::text, ', '), '')
@@ -552,11 +576,20 @@ commit;
 -- Read-only. Run after applying. See MIGRATION_029_VERIFICATION.sql
 -- for the full self-contained suite.
 --
---  1. select count(*) from public.consultants c,
---          lateral jsonb_object_keys(c.working_hours_jsonb) as k
---      where c.working_hours_jsonb is not null
---        and k not in ('0','1','2','3','4','5','6');
---       -> 0   (no named or unrecognised key remains in storage)
+--  1. select count(*) as non_object_rows
+--       from public.consultants
+--      where jsonb_typeof(working_hours_jsonb) <> 'object';
+--       -> 0
+--
+--  1b. select count(*) as unknown_or_named_keys_remaining
+--        from public.consultants c,
+--             lateral jsonb_object_keys(c.working_hours_jsonb) as k
+--       where jsonb_typeof(c.working_hours_jsonb) = 'object'
+--         and k not in ('0','1','2','3','4','5','6');
+--       -> 0
+--
+--      The jsonb_typeof filter is required: without it this query
+--      ERRORS on a non-object row rather than reporting it.
 --
 --  2. select count(*) from information_schema.tables
 --      where table_schema = 'public' and table_type = 'BASE TABLE';

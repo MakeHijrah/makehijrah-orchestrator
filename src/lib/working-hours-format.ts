@@ -1,25 +1,34 @@
 /*
- * Working-hours weekday key formats.
- * PROJECT_LOCK Amendment 008, as amended by migration 029.
+ * Stored working-hours parsing.
+ * PROJECT_LOCK Amendment 008 §8a, migration 029.
  *
- * There are two representations and they are not interchangeable:
+ * Two representations exist and they are not interchangeable:
  *
  *   HTTP wire format   named   "sunday" … "saturday"
  *   Database storage   numeric "0" … "6", 0 = sunday
  *
- * The RPC converts named to numeric on the way in. The orchestrator
- * converts numeric back to named on the way out. Everything
- * in between - slot generation, completeness evaluation - works in
- * the named form, because that is what luxon's weekday formatting
- * produces and what the availability module has always used.
+ * The RPC converts named to numeric on the way in. This module
+ * converts stored values back to named on the way out, and is the
+ * single reader every consumer goes through.
  *
- * toNamedWeekdayKeys accepts EITHER representation deliberately.
- * Rows written before migration 029 carry named keys and rows
- * written after carry numeric ones, so every internal reader has to
- * cope with both for as long as un-migrated rows can exist. A
- * reader that understood only one format would silently produce an
- * empty week for the other, which is exactly the failure that
- * makes a consultant look unbookable rather than broken.
+ * It is deliberately STRICT, and that is a reversal of the earlier
+ * permissive behaviour. A permissive reader that drops unknown keys
+ * turns a corrupt row into a PARTIAL schedule, and a partial
+ * schedule is worse than none: a consultant is shown bookable at
+ * hours they never agreed to. Silence is the wrong failure mode
+ * here, so anything it cannot parse with certainty is rejected
+ * whole.
+ *
+ * Rejected outright:
+ *   - non-objects, including arrays, strings and numbers
+ *   - unknown keys
+ *   - mixed numeric and named keys
+ *   - semantic duplicates, e.g. "0" alongside "sunday"
+ *   - keys valid only after trimming, e.g. " sunday "
+ *   - keys valid only after case folding, e.g. "Sunday"
+ *
+ * Nothing is trimmed, lower-cased or coerced. A key is either
+ * exactly right or the whole schedule is refused.
  */
 
 export const NUMERIC_TO_NAMED_WEEKDAY: Readonly<
@@ -34,130 +43,221 @@ export const NUMERIC_TO_NAMED_WEEKDAY: Readonly<
   "6": "saturday",
 };
 
-export const NAMED_TO_NUMERIC_WEEKDAY: Readonly<
-  Record<string, string>
-> = {
-  sunday: "0",
-  monday: "1",
-  tuesday: "2",
-  wednesday: "3",
-  thursday: "4",
-  friday: "5",
-  saturday: "6",
-};
+const NAMED_WEEKDAYS: ReadonlySet<string> =
+  new Set(
+    Object.values(
+      NUMERIC_TO_NAMED_WEEKDAY,
+    ),
+  );
 
+const NUMERIC_WEEKDAYS: ReadonlySet<string> =
+  new Set(
+    Object.keys(
+      NUMERIC_TO_NAMED_WEEKDAY,
+    ),
+  );
+
+/*
+ * Exact membership. No trimming, no case folding: a key that would
+ * only become valid after normalisation is not valid, because
+ * accepting it would mean guessing what the writer meant.
+ */
 export const isNamedWeekday = (
   key: string,
-): boolean =>
-  Object.prototype.hasOwnProperty.call(
-    NAMED_TO_NUMERIC_WEEKDAY,
-    key.trim().toLowerCase(),
-  );
+): boolean => NAMED_WEEKDAYS.has(key);
 
 export const isNumericWeekday = (
   key: string,
 ): boolean =>
-  Object.prototype.hasOwnProperty.call(
-    NUMERIC_TO_NAMED_WEEKDAY,
-    key.trim(),
-  );
+  NUMERIC_WEEKDAYS.has(key);
 
-/*
- * Rewrite an arbitrary working-hours object so every recognised
- * weekday key is named.
- *
- * Values are passed through untouched: this converts keys only and
- * never inspects, reorders or rewrites an interval. Unrecognised
- * keys are dropped, matching the permissive contract the
- * availability module has always had - slot generation must never
- * throw on a malformed stored row.
- */
-export const toNamedWeekdayKeys = (
-  value: Record<string, unknown>,
-): Record<string, unknown> => {
-  const result: Record<
-    string,
-    unknown
-  > = {};
+export type StoredWorkingHoursFormat =
+  | "numeric"
+  | "named";
 
-  for (const [
-    rawKey,
-    intervals,
-  ] of Object.entries(value)) {
-    const trimmed = rawKey.trim();
-
-    const named =
-      NUMERIC_TO_NAMED_WEEKDAY[
-        trimmed
-      ] ??
-      (isNamedWeekday(trimmed)
-        ? trimmed.toLowerCase()
-        : null);
-
-    if (named === null) {
-      continue;
+export type ParsedWorkingHours =
+  | {
+      ok: true;
+      /* Always named, whatever the stored format was. */
+      value: Record<string, unknown>;
+      sourceFormat: StoredWorkingHoursFormat;
     }
-
-    result[named] = intervals;
-  }
-
-  return result;
-};
-
-/*
- * The inverse, used by the HTTP response mapper so the wire format
- * stays named regardless of how the row is stored.
- */
-export const toNumericWeekdayKeys = (
-  value: Record<string, unknown>,
-): Record<string, unknown> => {
-  const result: Record<
-    string,
-    unknown
-  > = {};
-
-  for (const [
-    rawKey,
-    intervals,
-  ] of Object.entries(value)) {
-    const trimmed = rawKey.trim();
-
-    const numeric = isNumericWeekday(
-      trimmed,
-    )
-      ? trimmed
-      : (NAMED_TO_NUMERIC_WEEKDAY[
-          trimmed.toLowerCase()
-        ] ?? null);
-
-    if (numeric === null) {
-      continue;
-    }
-
-    result[numeric] = intervals;
-  }
-
-  return result;
-};
+  | {
+      ok: false;
+      /*
+       * Short, safe reason. Never contains stored values, only key
+       * names and shape facts, so it is safe to log.
+       */
+      reason: string;
+    };
 
 /*
- * Response projection: whatever is stored, present it named.
+ * Parse a stored working-hours value into the named form.
  *
- * Returns the input unchanged when it is not an object, so a null
- * or malformed stored value round-trips rather than becoming {}.
+ * An empty object is valid and parses as numeric: it carries no
+ * key that could contradict either format, and the column default
+ * is '{}'.
  */
-export const toNamedWorkingHours = (
+export const parseStoredWorkingHours = (
   value: unknown,
-): unknown => {
+): ParsedWorkingHours => {
   if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value)
+    value === null ||
+    value === undefined
   ) {
-    return value;
+    return {
+      ok: false,
+      reason:
+        "stored working hours are null or undefined",
+    };
   }
 
-  return toNamedWeekdayKeys(
+  if (typeof value !== "object") {
+    return {
+      ok: false,
+      reason: `stored working hours are ${typeof value}, expected an object`,
+    };
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      ok: false,
+      reason:
+        "stored working hours are an array, expected an object",
+    };
+  }
+
+  const entries = Object.entries(
     value as Record<string, unknown>,
   );
+
+  if (entries.length === 0) {
+    return {
+      ok: true,
+      value: {},
+      sourceFormat: "numeric",
+    };
+  }
+
+  let numericCount = 0;
+  let namedCount = 0;
+
+  for (const [key] of entries) {
+    if (isNumericWeekday(key)) {
+      numericCount += 1;
+      continue;
+    }
+
+    if (isNamedWeekday(key)) {
+      namedCount += 1;
+      continue;
+    }
+
+    /*
+     * Report whether a near-miss would have been accepted by a
+     * looser reader, so a corrupt row is diagnosable without
+     * echoing its contents.
+     */
+    const trimmedLower = key
+      .trim()
+      .toLowerCase();
+
+    const nearMiss =
+      isNamedWeekday(trimmedLower) ||
+      isNumericWeekday(key.trim());
+
+    return {
+      ok: false,
+      reason: nearMiss
+        ? `stored working hours contain the non-canonical weekday key "${key}"`
+        : `stored working hours contain the unknown weekday key "${key}"`,
+    };
+  }
+
+  if (numericCount > 0 && namedCount > 0) {
+    return {
+      ok: false,
+      reason:
+        "stored working hours mix numeric and named weekday keys",
+    };
+  }
+
+  if (namedCount > 0) {
+    return {
+      ok: true,
+      value: Object.fromEntries(entries),
+      sourceFormat: "named",
+    };
+  }
+
+  /*
+   * Numeric. Collisions cannot arise here - a numeric-only object
+   * has no named key to collide with, and JSON object keys are
+   * already unique - but the mapping is built explicitly rather
+   * than by mutation so a future change cannot introduce a silent
+   * overwrite.
+   */
+  const named: Record<
+    string,
+    unknown
+  > = {};
+
+  for (const [
+    key,
+    intervals,
+  ] of entries) {
+    const mapped =
+      NUMERIC_TO_NAMED_WEEKDAY[key]!;
+
+    if (mapped in named) {
+      return {
+        ok: false,
+        reason: `stored working hours map two keys onto ${mapped}`,
+      };
+    }
+
+    named[mapped] = intervals;
+  }
+
+  return {
+    ok: true,
+    value: named,
+    sourceFormat: "numeric",
+  };
 };
+
+/*
+ * Convenience for consumers that only need the named form and
+ * treat any parse failure as "no usable hours". Callers that must
+ * distinguish "empty" from "corrupt" use parseStoredWorkingHours
+ * directly.
+ */
+export const toNamedWorkingHoursOrNull = (
+  value: unknown,
+): Record<string, unknown> | null => {
+  const parsed =
+    parseStoredWorkingHours(value);
+
+  return parsed.ok
+    ? parsed.value
+    : null;
+};
+
+/*
+ * Raised when a stored row cannot be parsed and the caller cannot
+ * meaningfully continue - notably the profile response mapper,
+ * which must not return a partial week.
+ */
+export class StoredWorkingHoursError extends Error {
+  public readonly reason: string;
+
+  constructor(reason: string) {
+    super(
+      "The stored working hours could not be read.",
+    );
+
+    this.name =
+      "StoredWorkingHoursError";
+    this.reason = reason;
+  }
+}
