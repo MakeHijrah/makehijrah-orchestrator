@@ -17,6 +17,13 @@ import type { FastifyCorsOptions } from "@fastify/cors";
 export const ALLOWED_METHODS = [
   "GET",
   "POST",
+  /*
+   * PUT is required by PUT /api/consultant/profile (Amendment
+   * 008). Without it a browser rejects the preflight before the
+   * request ever reaches the route, so the endpoint appears
+   * broken from the frontend while responding normally to curl.
+   */
+  "PUT",
   "PATCH",
   "DELETE",
   "OPTIONS",

@@ -30,6 +30,11 @@ const REQUESTED_HEADERS =
 
 const preflight = async (
   origin: string,
+  options: {
+    url?: string;
+    method?: string;
+    headers?: string;
+  } = {},
 ): Promise<{
   statusCode: number;
   allowOrigin?: string;
@@ -49,16 +54,24 @@ const preflight = async (
       async () => ({ ok: true }),
     );
 
+    app.put(
+      "/api/consultant/profile",
+      async () => ({ ok: true }),
+    );
+
     await app.ready();
 
     const response = await app.inject({
       method: "OPTIONS",
-      url: "/api/admin/services",
+      url:
+        options.url ??
+        "/api/admin/services",
       headers: {
         origin,
         "access-control-request-method":
-          "POST",
+          options.method ?? "POST",
         "access-control-request-headers":
+          options.headers ??
           REQUESTED_HEADERS,
       },
     });
@@ -136,13 +149,64 @@ describe("CORS preflight", () => {
     }
   });
 
-  it("keeps PATCH and DELETE allowed", async () => {
+  it("allows PUT, which the consultant profile endpoint requires", async () => {
+    const result = await preflight(APP_URL);
+
+    assert.ok(
+      result.allowMethods.includes("put"),
+      `expected PUT to be allowed, received "${result.allowMethods}"`,
+    );
+  });
+
+  it("allows a PUT preflight for /api/consultant/profile", async () => {
+    const result = await preflight(APP_URL, {
+      url: "/api/consultant/profile",
+      method: "PUT",
+      headers: "authorization,content-type",
+    });
+
+    assert.ok(
+      result.statusCode < 300,
+      `expected a successful preflight, received ${result.statusCode}`,
+    );
+
+    assert.equal(result.allowOrigin, APP_URL);
+
+    assert.ok(
+      result.allowMethods.includes("put"),
+      "PUT must appear in the allowed methods",
+    );
+
+    for (const header of [
+      "authorization",
+      "content-type",
+    ]) {
+      assert.ok(
+        result.allowHeaders.includes(header),
+        `expected ${header} to be allowed for the profile preflight`,
+      );
+    }
+  });
+
+  it("does not widen the origin policy for the profile preflight", async () => {
+    const result = await preflight(FOREIGN_ORIGIN, {
+      url: "/api/consultant/profile",
+      method: "PUT",
+      headers: "authorization,content-type",
+    });
+
+    assert.notEqual(result.allowOrigin, FOREIGN_ORIGIN);
+    assert.notEqual(result.allowOrigin, "*");
+  });
+
+  it("keeps every previously allowed method allowed", async () => {
     const result =
       await preflight(APP_URL);
 
     for (const method of [
       "get",
       "post",
+      "put",
       "patch",
       "delete",
       "options",
