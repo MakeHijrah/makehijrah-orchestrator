@@ -16,6 +16,12 @@ type DeclineConsultationRow = {
   stripe_mode: string | null;
   declined_at: string | null;
   admin_attention_reason: string | null;
+  /*
+   * Migration 032. Null on every consultation declined before it,
+   * because finalize_consultation_decline accepted the argument
+   * and discarded it until then.
+   */
+  consultant_decline_reason: string | null;
 };
 
 export type DeclineConsultationResult =
@@ -55,7 +61,7 @@ const loadDeclineConsultation = async (
     await supabaseAdmin
       .from("consultations")
       .select(
-        "id, consultant_id, status, stripe_payment_intent_id, stripe_mode, declined_at, admin_attention_reason",
+        "id, consultant_id, status, stripe_payment_intent_id, stripe_mode, declined_at, admin_attention_reason, consultant_decline_reason",
       )
       .eq("id", consultationId)
       .maybeSingle();
