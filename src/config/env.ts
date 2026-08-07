@@ -173,6 +173,21 @@ const envSchema = z.object({
 
   APP_URL: z.string().url(),
 
+  /*
+   * Additional browser origins allowed by CORS, beyond APP_URL
+   * and the production frontends listed in config/cors.ts.
+   *
+   * Comma or whitespace separated, each one an explicit origin.
+   * Optional: the production frontends are allowed without it,
+   * and it exists so a new frontend domain can be added by
+   * configuration alone. APP_URL stays a single value because
+   * links in emails and Stripe redirects are built from it.
+   */
+  CORS_ALLOWED_ORIGINS: z
+    .string()
+    .trim()
+    .optional(),
+
   OAUTH_STATE_SECRET: z.string().min(32),
 
   MANDRILL_API_KEY: z.string().min(1),

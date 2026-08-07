@@ -54,7 +54,10 @@ const app = Fastify({
 
 await app.register(
   cors,
-  buildCorsOptions(env.APP_URL),
+  buildCorsOptions(
+    env.APP_URL,
+    env.CORS_ALLOWED_ORIGINS,
+  ),
 );
 
 await app.register(rateLimit, {
