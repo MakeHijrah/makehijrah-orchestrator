@@ -28,6 +28,8 @@ import {
 } from "./modules/consultations/decline-notification.worker.js";
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
+import { registerAdminFinanceRoutes } from "./modules/finance/admin-finance.route.js";
+import { registerConsultantPayoutRoute } from "./modules/finance/consultant-payout.route.js";
 import { registerInviteRoutes } from "./modules/invites/invite.route.js";
 import { registerMessageNotificationRoute } from "./modules/messages/message-notification.route.js";
 import {
@@ -233,6 +235,12 @@ await registerInviteRoutes(
   app,
 );
 await registerSettingsRoutes(
+  app,
+);
+await registerConsultantPayoutRoute(
+  app,
+);
+await registerAdminFinanceRoutes(
   app,
 );
 await registerStripeWebhookRoute(

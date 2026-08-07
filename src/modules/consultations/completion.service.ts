@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../../lib/supabase.js";
+import { syncConsultationEarning } from "../finance/finance.service.js";
 
 type CompletionConsultationRow = {
   id: string;
@@ -280,6 +281,53 @@ export const completeConsultation =
         message:
           finalizationResult.message,
       };
+    }
+
+    /*
+     * Completion is half of what makes a consultation earning
+     * withdrawable; capture is the other half, and it may have
+     * happened already or not yet. syncConsultationEarning
+     * settles whichever half is now true and is a no-op for the
+     * other, so this call is correct in both orderings.
+     *
+     * Secondary to the completion itself. The consultation is
+     * already completed and the caller must be told so; a
+     * finance failure is logged and swallowed, and the capture
+     * webhook will make the same call again.
+     */
+    try {
+      const earning =
+        await syncConsultationEarning(
+          consultation.id,
+        );
+
+      if (
+        !earning.recorded &&
+        !earning.released &&
+        earning.reason !== "not_captured" &&
+        earning.reason !==
+          "already_available"
+      ) {
+        console.warn(
+          "Consultation earning unchanged after completion",
+          {
+            consultationId:
+              consultation.id,
+            reason: earning.reason,
+          },
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Consultation earning sync threw after completion",
+        {
+          consultationId: consultation.id,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unknown error",
+        },
+      );
     }
 
     return {

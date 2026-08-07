@@ -1,6 +1,10 @@
 import type Stripe from "stripe";
 
 import { supabaseAdmin } from "../../lib/supabase.js";
+import {
+  reverseConsultationEarning,
+  syncConsultationEarning,
+} from "../finance/finance.service.js";
 
 type ConsultationStatus =
   | "pending_acceptance"
@@ -623,6 +627,61 @@ export const processStripeWebhookEvent =
         message:
           "The Stripe event returned no processing result.",
       };
+    }
+
+    /*
+     * Ledger side effects of a payment that has now been
+     * recorded.
+     *
+     * Run on replays as well as first delivery. Both finance
+     * operations are idempotent — the ledger's unique index
+     * refuses a second earning and the reversal guard refuses to
+     * claw back twice — and running them again is what lets a
+     * replay repair an earning that a previous delivery failed to
+     * write. Skipping already-processed events would make that
+     * failure permanent.
+     *
+     * Secondary to the payment, exactly like the Stripe mode
+     * backfill above: every failure is logged and swallowed. A
+     * non-2xx here would have Stripe redeliver the event, and
+     * redelivery re-runs the payment transition, which is a far
+     * worse outcome than a ledger row the next delivery recreates.
+     */
+    if (normalized.consultationId) {
+      try {
+        if (
+          normalized.eventType ===
+          "payment_intent.succeeded"
+        ) {
+          await syncConsultationEarning(
+            normalized.consultationId,
+          );
+        } else if (
+          normalized.eventType ===
+          "charge.refunded"
+        ) {
+          await reverseConsultationEarning({
+            consultationId:
+              normalized.consultationId,
+            reason:
+              "Stripe refund processed by webhook",
+          });
+        }
+      } catch (error) {
+        console.error(
+          "Consultation ledger sync threw during webhook processing",
+          {
+            consultationId:
+              normalized.consultationId,
+            eventType:
+              normalized.eventType,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unknown error",
+          },
+        );
+      }
     }
 
     return {

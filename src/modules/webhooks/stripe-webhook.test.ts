@@ -240,6 +240,25 @@ const assertNoConsultationSideEffects = (): void => {
   );
 };
 
+/*
+ * The payment transition RPC, isolated from the ledger RPCs the
+ * webhook now also calls (migration 035). The invariant these
+ * tests protect is that a payment is transitioned exactly once;
+ * counting every RPC would conflate that with the finance side
+ * effects, which are separate, idempotent, and asserted below.
+ */
+const paymentRpcCalls = (): RpcCall[] =>
+  rpcCalls.filter(
+    (call) => call.name === "process_stripe_webhook_event",
+  );
+
+const ledgerRpcNames = (): string[] =>
+  rpcCalls
+    .filter(
+      (call) => call.name !== "process_stripe_webhook_event",
+    )
+    .map((call) => call.name);
+
 describe("Stripe webhook: non-consultation events", () => {
   beforeEach(() => {
     installStubs();
@@ -352,9 +371,9 @@ describe("Stripe webhook: consultation events are unchanged", () => {
     assert.equal(response.body.data?.reason, null);
     assert.equal(response.body.data?.processed, true);
 
-    assert.equal(rpcCalls.length, 1);
+    assert.equal(paymentRpcCalls().length, 1);
 
-    const call = rpcCalls[0];
+    const call = paymentRpcCalls()[0];
     assert.ok(call);
     assert.equal(call.name, "process_stripe_webhook_event");
     assert.equal(call.params.p_consultation_id, consultationId);
@@ -384,9 +403,9 @@ describe("Stripe webhook: consultation events are unchanged", () => {
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.body.data?.ignored, false);
-    assert.equal(rpcCalls.length, 1);
+    assert.equal(paymentRpcCalls().length, 1);
     assert.equal(
-      rpcCalls[0]?.params.p_consultation_status,
+      paymentRpcCalls()[0]?.params.p_consultation_status,
       "pending_acceptance",
     );
   });
@@ -402,9 +421,9 @@ describe("Stripe webhook: consultation events are unchanged", () => {
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.body.data?.ignored, false);
-    assert.equal(rpcCalls.length, 1);
+    assert.equal(paymentRpcCalls().length, 1);
     assert.equal(
-      rpcCalls[0]?.params.p_consultation_status,
+      paymentRpcCalls()[0]?.params.p_consultation_status,
       "authorization_cancelled",
     );
   });
@@ -419,15 +438,85 @@ describe("Stripe webhook: consultation events are unchanged", () => {
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.body.data?.ignored, false);
-    assert.equal(rpcCalls.length, 1);
+    assert.equal(paymentRpcCalls().length, 1);
     assert.equal(
-      rpcCalls[0]?.params.p_consultation_id,
+      paymentRpcCalls()[0]?.params.p_consultation_id,
       consultationId,
     );
     assert.equal(
-      rpcCalls[0]?.params.p_consultation_status,
+      paymentRpcCalls()[0]?.params.p_consultation_status,
       "refunded",
     );
+  });
+});
+
+/*
+ * Migration 035 side effects. The webhook reaches the ledger only
+ * through RPCs — the stub above throws on any direct table access
+ * — and only for the two events that move money.
+ */
+describe("Stripe webhook: consultation ledger side effects", () => {
+  beforeEach(() => {
+    installStubs();
+    refundPaymentIntentMetadata = {};
+    rpcRow = {
+      processed: true,
+      already_processed: false,
+      payment_id: "11111111-1111-1111-1111-111111111111",
+      consultation_status: "captured",
+    };
+  });
+
+  it("records and releases the earning on a captured payment", async () => {
+    await post(
+      paymentIntentEvent("payment_intent.succeeded", {
+        consultation_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+
+    assert.deepEqual(ledgerRpcNames(), [
+      "record_consultation_earning",
+      "release_consultation_earning",
+    ]);
+  });
+
+  it("reverses the earning on a refund", async () => {
+    refundPaymentIntentMetadata = {
+      consultation_id: "55555555-5555-5555-5555-555555555555",
+    };
+
+    await post(chargeRefundedEvent());
+
+    assert.deepEqual(ledgerRpcNames(), [
+      "reverse_consultation_earning",
+    ]);
+  });
+
+  it("leaves the ledger alone for an authorization or a cancellation", async () => {
+    await post(
+      paymentIntentEvent(
+        "payment_intent.amount_capturable_updated",
+        { consultation_id: "33333333-3333-3333-3333-333333333333" },
+      ),
+    );
+
+    assert.deepEqual(ledgerRpcNames(), []);
+
+    installStubs();
+
+    await post(
+      paymentIntentEvent("payment_intent.canceled", {
+        consultation_id: "44444444-4444-4444-4444-444444444444",
+      }),
+    );
+
+    assert.deepEqual(ledgerRpcNames(), []);
+  });
+
+  it("touches the ledger for no ignored event", async () => {
+    await post(paymentIntentEvent("payment_intent.succeeded", {}));
+
+    assert.deepEqual(ledgerRpcNames(), []);
   });
 });
 
