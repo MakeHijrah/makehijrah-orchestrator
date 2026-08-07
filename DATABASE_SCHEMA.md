@@ -143,12 +143,15 @@ create table countries (
   id uuid primary key default gen_random_uuid(),
   name text not null unique,
   iso_code text not null unique,            -- ISO 3166-1 alpha-2, e.g. 'EG'
+  tagline text,                             -- migration 033; nullable, no default
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
 ```
 
 Booking form only offers countries that have ≥1 active consultant (derived at query time via join — no flag duplication).
+
+**`tagline` (migration 033 — authored, not applied).** A short public line rendered under the country name. Nullable with no default: a country without one reads null, never `''`. It is **normalised on write** by `trg_countries_normalize_tagline`, a `before insert or update of tagline` row trigger that trims the value and stores a blank or whitespace-only tagline as null. The rule lives in the database because `countries` has no orchestrator route: it is written directly against Supabase by the admin frontend under `countries_insert_admin` / `countries_update_admin`, and read directly by anon and authenticated clients under `countries_select_active_public`. The orchestrator reads the table only to check that a submitted country id is active and to prove Supabase is reachable, and reads no column beyond `id`. Migration 033 adds, drops and rewrites no policy, and every country predating it keeps a null tagline — there is no backfill.
 
 ---
 

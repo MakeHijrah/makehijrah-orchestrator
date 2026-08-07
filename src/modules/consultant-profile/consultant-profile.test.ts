@@ -466,13 +466,32 @@ beforeEach(() => {
     }),
   ];
 
+  /*
+   * tagline is migration 033's column. It is carried here so the
+   * country rows match the deployed table: an orchestrator that
+   * started reading or forwarding it would be visible in the
+   * country tests below rather than in production.
+   */
   db.countries = [
-    { id: COUNTRY_A, name: "A", iso_code: "AA", is_active: true },
-    { id: COUNTRY_B, name: "B", iso_code: "BB", is_active: true },
+    {
+      id: COUNTRY_A,
+      name: "A",
+      iso_code: "AA",
+      tagline: "The first country",
+      is_active: true,
+    },
+    {
+      id: COUNTRY_B,
+      name: "B",
+      iso_code: "BB",
+      tagline: null,
+      is_active: true,
+    },
     {
       id: COUNTRY_INACTIVE,
       name: "Inactive",
       iso_code: "II",
+      tagline: "Not offered",
       is_active: false,
     },
   ];
@@ -816,6 +835,54 @@ describe("Consultant profile: countries", () => {
       ).length,
       0,
     );
+  });
+
+  /*
+   * Migration 033 adds countries.tagline. A country is still
+   * accepted or rejected on id and is_active alone, and a tagline
+   * neither qualifies a country nor reaches the response: the
+   * profile carries country_ids, not country records.
+   */
+  it("saves a country the same way whether or not it carries a tagline", async () => {
+    const response = await save({
+      mode: "draft",
+      country_ids: [COUNTRY_A, COUNTRY_B],
+    });
+
+    assert.equal(response.statusCode, 200);
+
+    assert.deepEqual(
+      [...response.json().data.consultant.country_ids].sort(),
+      [COUNTRY_A, COUNTRY_B].sort(),
+    );
+
+    const body = response.body;
+
+    assert.ok(
+      !body.includes("tagline"),
+      "the profile response must not carry country taglines",
+    );
+
+    assert.ok(
+      !body.includes("The first country"),
+      "the profile response must not carry a tagline value",
+    );
+  });
+
+  it("still rejects an inactive country that carries a tagline", async () => {
+    const response = await save({
+      mode: "draft",
+      country_ids: [COUNTRY_INACTIVE],
+    });
+
+    assert.equal(response.statusCode, 409);
+
+    assert.equal(
+      response.json().error.code,
+      "CONSULTANT_COUNTRY_INVALID",
+    );
+
+    assert.equal(rpcCalls.length, 0);
   });
 });
 

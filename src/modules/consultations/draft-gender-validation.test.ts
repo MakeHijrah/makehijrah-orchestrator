@@ -161,9 +161,22 @@ const installStubs = (): void => {
       available_for_general: false,
     },
   ];
+  /*
+   * tagline arrives with migration 033. Booking validation turns
+   * on id and is_active only, so it is carried here to keep the
+   * rows shaped like the deployed table.
+   */
   db.countries = [
-    { id: COUNTRY_ID, is_active: true },
-    { id: OTHER_COUNTRY_ID, is_active: true },
+    {
+      id: COUNTRY_ID,
+      tagline: "The first country",
+      is_active: true,
+    },
+    {
+      id: OTHER_COUNTRY_ID,
+      tagline: null,
+      is_active: true,
+    },
   ];
   db.consultant_countries = [
     { consultant_id: CONSULTANT_ID, country_id: COUNTRY_ID },
@@ -276,6 +289,30 @@ describe("draft consultant destination validation", () => {
       result.ok === false && result.message,
       "The selected consultant is not available for this destination.",
     );
+  });
+
+  it("decides on is_active, not on whether a tagline is set", async () => {
+    /*
+     * The country the consultant is assigned to carries a
+     * tagline; the one they are not carries none. Neither fact
+     * may move the decision.
+     */
+    const assigned = await validate({ countryId: COUNTRY_ID });
+    assert.equal(assigned.ok, true);
+
+    (db.countries[0] as Row).tagline = null;
+
+    const withoutTagline = await validate({
+      countryId: COUNTRY_ID,
+    });
+    assert.equal(withoutTagline.ok, true);
+
+    (db.countries[1] as Row).tagline = "A tagline";
+
+    const unassigned = await validate({
+      countryId: OTHER_COUNTRY_ID,
+    });
+    assert.equal(unassigned.ok, false);
   });
 
   it("does not consult country tables for a general booking", async () => {
