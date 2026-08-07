@@ -99,6 +99,30 @@ const nextId = (): string => {
   return `99999999-9999-4999-8999-${suffix}`;
 };
 
+/*
+ * Migration 037 reference generators. The database assigns these
+ * from a sequence in a BEFORE INSERT trigger; the fake mirrors
+ * the same shape and the same "always overwrite" rule, which is
+ * what makes the forgery test below real.
+ */
+const REFERENCE_YEAR = 2026;
+let payoutReferenceCounter = 0;
+let adjustmentReferenceCounter = 0;
+
+const nextPayoutReference = (): string => {
+  payoutReferenceCounter += 1;
+  return `PAY-${REFERENCE_YEAR}-${String(
+    payoutReferenceCounter,
+  ).padStart(6, "0")}`;
+};
+
+const nextAdjustmentReference = (): string => {
+  adjustmentReferenceCounter += 1;
+  return `ADJ-${REFERENCE_YEAR}-${String(
+    adjustmentReferenceCounter,
+  ).padStart(6, "0")}`;
+};
+
 class FakeQuery {
   private readonly table: string;
   private readonly filters: Array<(row: Row) => boolean> = [];
@@ -528,6 +552,8 @@ const fakeRpc = async (
 
       const entry: Row = {
         id: nextId(),
+        /* Overwritten by the trigger, never taken from input. */
+        adjustment_reference: nextAdjustmentReference(),
         consultant_id: args.p_consultant_id,
         entry_type: "adjustment",
         source_type: "manual",
@@ -550,6 +576,7 @@ const fakeRpc = async (
 
       return ok({
         entry_id: entry.id,
+        adjustment_reference: entry.adjustment_reference,
         consultant_id: entry.consultant_id,
         consultant_amount_minor: entry.consultant_amount_minor,
         currency: entry.currency,
@@ -613,6 +640,7 @@ const fakeRpc = async (
 
       const payout: Row = {
         id: nextId(),
+        payout_reference: nextPayoutReference(),
         consultant_id: args.p_consultant_id,
         status: "requested",
         currency,
@@ -640,6 +668,7 @@ const fakeRpc = async (
 
       return ok({
         payout_id: payout.id,
+        payout_reference: payout.payout_reference,
         status: payout.status,
         currency: payout.currency,
         requested_amount_minor: payout.requested_amount_minor,
@@ -716,6 +745,7 @@ const fakeRpc = async (
 
       return ok({
         payout_id: payout.id,
+        payout_reference: payout.payout_reference,
         status: payout.status,
         currency: payout.currency,
         requested_amount_minor: payout.requested_amount_minor,
@@ -772,6 +802,7 @@ const fakeRpc = async (
 
       return ok({
         payout_id: payout.id,
+        payout_reference: payout.payout_reference,
         status: payout.status,
         currency: payout.currency,
         requested_amount_minor: payout.requested_amount_minor,
@@ -841,6 +872,8 @@ const availableBalance = (
 
 beforeEach(() => {
   idCounter = 0;
+  payoutReferenceCounter = 0;
+  adjustmentReferenceCounter = 0;
 
   db.profiles = [
     {
@@ -1615,6 +1648,145 @@ describe("Payout decisions", () => {
     );
 
     assert.equal(response.statusCode, 404);
+  });
+});
+
+/*
+ * Migration 037. The references exist so a consultant or an admin
+ * can name a payout or an adjustment in a conversation, so what
+ * matters is that the API returns them and that they are stable.
+ */
+describe("Human-readable finance references", () => {
+  it("returns a PAY reference when a payout is requested", async () => {
+    await syncConsultationEarning(COMPLETED_CAPTURED);
+
+    const response = await post(
+      "/api/consultant/payouts",
+      { currency: "usd" },
+      CONSULTANT_PROFILE,
+    );
+
+    assert.equal(response.statusCode, 201);
+
+    const reference = response.json().data!
+      .payout_reference as string;
+
+    assert.match(reference, /^PAY-\d{4}-\d{6}$/);
+    assert.equal(reference, "PAY-2026-000001");
+  });
+
+  it("returns an ADJ reference when an adjustment is recorded", async () => {
+    const response = await post(
+      "/api/admin/finance/adjustments",
+      {
+        consultant_id: CONSULTANT_ID,
+        amount_minor: 2_500,
+        currency: "usd",
+        memo: "goodwill",
+      },
+      ADMIN_PROFILE,
+    );
+
+    assert.equal(response.statusCode, 201);
+
+    const reference = response.json().data!
+      .adjustment_reference as string;
+
+    assert.match(reference, /^ADJ-\d{4}-\d{6}$/);
+    assert.equal(reference, "ADJ-2026-000001");
+  });
+
+  it("never repeats a reference", async () => {
+    const references: string[] = [];
+
+    for (const amount of [100, 200, 300]) {
+      const response = await post(
+        "/api/admin/finance/adjustments",
+        {
+          consultant_id: CONSULTANT_ID,
+          amount_minor: amount,
+          currency: "usd",
+          memo: `credit ${amount}`,
+        },
+        ADMIN_PROFILE,
+      );
+
+      references.push(
+        response.json().data!.adjustment_reference as string,
+      );
+    }
+
+    assert.deepEqual(references, [
+      "ADJ-2026-000001",
+      "ADJ-2026-000002",
+      "ADJ-2026-000003",
+    ]);
+
+    assert.equal(new Set(references).size, 3);
+  });
+
+  it("keeps the same payout reference through every decision", async () => {
+    await syncConsultationEarning(COMPLETED_CAPTURED);
+
+    const request = await post(
+      "/api/consultant/payouts",
+      { currency: "usd" },
+      CONSULTANT_PROFILE,
+    );
+
+    const payoutId = request.json().data!.payout_id as string;
+    const reference = request.json().data!
+      .payout_reference as string;
+
+    const approved = await post(
+      `/api/admin/payouts/${payoutId}/approve`,
+      {},
+      ADMIN_PROFILE,
+    );
+
+    assert.equal(
+      approved.json().data!.payout_reference,
+      reference,
+    );
+
+    const paid = await post(
+      `/api/admin/payouts/${payoutId}/paid`,
+      {
+        paid_amount_minor: 7_500,
+        external_reference: "WISE-1",
+      },
+      ADMIN_PROFILE,
+    );
+
+    assert.equal(
+      paid.json().data!.payout_reference,
+      reference,
+    );
+
+    /* The stored row never moved either. */
+    assert.equal(
+      db.payouts[0]!.payout_reference,
+      reference,
+    );
+  });
+
+  it("does not put an adjustment reference on an earning", async () => {
+    await syncConsultationEarning(COMPLETED_CAPTURED);
+
+    await reverseConsultationEarning({
+      consultationId: COMPLETED_CAPTURED,
+      reason: "refund",
+    });
+
+    for (const entry of db.consultant_ledger_entries) {
+      if (entry.entry_type !== "adjustment") {
+        assert.equal(
+          entry.adjustment_reference ?? null,
+          null,
+          `a ${entry.entry_type} carries an adjustment reference`,
+        );
+      }
+    }
   });
 });
 

@@ -110,6 +110,8 @@ export const registerConsultantPayoutRoute =
           {
             payout_id:
               result.payout.payout_id,
+            payout_reference:
+              result.payout.payout_reference,
             status: result.payout.status,
             currency:
               result.payout.currency,

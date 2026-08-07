@@ -596,9 +596,15 @@ begin
     from information_schema.tables
    where table_schema = 'public' and table_type = 'BASE TABLE';
 
-  if v_tables <> 16 then
+  /*
+   * 20 since migration 034 added the four finance tables. This
+   * check exists to prove migration 033 added none of its own, so
+   * the number tracks the current model size and moves whenever a
+   * later migration legitimately adds a table.
+   */
+  if v_tables <> 20 then
     raise exception
-      'check 15 failed: public holds % base tables, expected 16',
+      'check 15 failed: public holds % base tables, expected 20',
       v_tables;
   end if;
 

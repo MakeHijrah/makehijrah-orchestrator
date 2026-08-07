@@ -119,6 +119,9 @@ export const registerAdminFinanceRoutes =
           {
             entry_id:
               result.adjustment.entry_id,
+            adjustment_reference:
+              result.adjustment
+                .adjustment_reference,
             consultant_id:
               result.adjustment
                 .consultant_id,
@@ -219,6 +222,8 @@ export const registerAdminFinanceRoutes =
           return sendSuccess(reply, {
             payout_id:
               result.payout.payout_id,
+            payout_reference:
+              result.payout.payout_reference,
             status: result.payout.status,
             currency:
               result.payout.currency,
@@ -321,6 +326,8 @@ export const registerAdminFinanceRoutes =
         return sendSuccess(reply, {
           payout_id:
             result.payout.payout_id,
+          payout_reference:
+            result.payout.payout_reference,
           status: result.payout.status,
           currency: result.payout.currency,
           requested_amount_minor:
