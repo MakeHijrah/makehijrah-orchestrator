@@ -321,7 +321,10 @@ create table services (
   stripe_product_id text,
   stripe_price_id text,
   stripe_payment_link_id text,
-  stripe_payment_link_url text
+  stripe_payment_link_url text,
+
+  -- Consultant commission (migration 034). Nullable, no default.
+  consultant_commission_bps integer   -- basis points of gross, 0..10000
 );
 
 -- Value constraints
@@ -537,6 +540,9 @@ create table app_settings (
   stripe_mode text not null,
   support_email text,
   default_timezone text not null,
+  -- Migration 034. Consultant share of a standard consultation,
+  -- in basis points of gross. Seeded at 5000 = the locked 50/50.
+  consultation_consultant_commission_bps integer not null default 5000,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   updated_by_admin_profile_id uuid references profiles(id),
@@ -565,6 +571,81 @@ create table app_settings (
 **Access:** RLS enabled with **zero policies**, and all privileges revoked from `anon` and `authenticated`. Only the service role reaches this table. Not in the `supabase_realtime` publication. See `RLS_POLICY_PLAN.md` §2.
 
 **Deliberately absent:** `consultant_acceptance_timeout_hours` (deferred by Amendment 007 §7 — the 48-hour timeout remains hardcoded in both the orchestrator scheduler and `finalize_authorization_timeout`), any JSON settings blob, any key/value column, and any credential field.
+
+---
+
+## 17–20. Financial foundation (migration 034 — authored, not applied)
+
+Phase 1 of the Finance, Payouts & Direct Booking plan. Four tables, taking the model to **20**. No client reads any of them under any policy.
+
+**Locked rules encoded here.** Commission is always computed on the **gross** amount charged — Stripe fees never reduce a consultant's share. A standard consultation is 50/50. A direct booking splits: the standard-price portion 50/50, the premium above it 80/20 in the consultant's favour. Each service carries its own rate and a recurring service earns on **every** successful renewal. Balances are per currency with **no FX conversion**. A negative balance after a post-payout reversal is legal and is offset by future earnings.
+
+### 17. `consultant_ledger_entries`
+
+Append-only. One row per financial event affecting one consultant, in the minor unit of `currency`.
+
+```sql
+create table consultant_ledger_entries (
+  id uuid primary key default gen_random_uuid(),
+  consultant_id uuid not null references consultants(id),
+  entry_type text not null,        -- 'earning' | 'reversal' | 'adjustment'
+  source_type text not null,       -- 'consultation' | 'service_purchase'
+                                   -- | 'direct_booking' | 'manual'
+  source_id uuid,                  -- null only when source_type = 'manual'
+  source_component text not null default 'full',  -- 'full' | 'standard' | 'premium'
+  gross_amount_minor integer not null,
+  consultant_amount_minor integer not null,       -- the only balance-moving column
+  platform_amount_minor integer not null,
+  commission_bps integer,          -- 5000 = 50.00%
+  commission_basis text not null,
+  currency text not null,
+  available_at timestamptz,        -- null = earned, not yet withdrawable
+  reverses_entry_id uuid references consultant_ledger_entries(id),
+  created_by_admin_profile_id uuid references profiles(id),
+  memo text,
+  created_at timestamptz not null default now()
+);
+```
+
+**The commission snapshot lives here, not on `consultations` or `services`,** because a client can read their own consultation row and every active service row. This table is the only one they can never reach, so it is the only safe place for the platform's margin.
+
+**Append-only is enforced, not conventional.** `trg_ledger_append_only` blocks every `DELETE` and every `UPDATE` except `available_at` advancing once from null to a timestamp — with **no exemption for the service role**. A wrong amount is corrected by inserting an adjustment; a refund by inserting a reversal. The original is never touched.
+
+**The amount identity** `consultant_amount_minor + platform_amount_minor = gross_amount_minor` holds on every row, including reversals, which negate all three together. Rounding is the orchestrator's decision and is deliberately not asserted by a constraint.
+
+**A direct booking is two rows**, `source_component` `standard` and `premium`, each with its own flat rate, so every row satisfies one simple statement rather than needing a nested breakdown.
+
+**Duplicate-earning guard:** `unique (source_type, source_id, source_component) where entry_type = 'earning'`. A replayed webhook, a double-submitted completion or a retried renewal cannot credit twice.
+
+### 18. `payouts`
+
+One payout request. The only table here whose status moves: `requested → approved → paid`, or `→ rejected | cancelled`. V1 pays **manually**; no Stripe Connect, no automatic bank transfer. `destination_note` is a free-text snapshot captured per request, so a later change of bank details cannot rewrite what an old payout says.
+
+`unique (consultant_id, currency) where status in ('requested','approved')` — one open request per consultant per currency. Each terminal status carries the evidence it happened (`paid` requires an amount, a date, an approval and an admin), and an unpaid row may not carry a paid amount.
+
+### 19. `payout_allocations`
+
+`(payout_id, ledger_entry_id)` with **`unique (ledger_entry_id)`** — the double-payment guarantee, enforced by the database rather than by application care. Two concurrent requests cannot both claim an entry.
+
+`trg_payout_allocation_guard` refuses an allocation whose entry is still pending, belongs to another consultant, or is in another currency, and refuses to release the allocations of a **paid** payout. Rejecting or cancelling a payout deletes its allocations, returning the earnings to available; the payout row survives with its status and reason.
+
+### 20. `service_purchases`
+
+The financial record of a service being paid for. **Deliberately not `service_requests`**, which remains the operational fulfillment record — a purchase *may* reference one, and for a recurring service several purchases reference the same one, which is exactly why they cannot be the same row. Each renewal is its own purchase, keyed by `billing_period_sequence` and its own Stripe invoice. Redelivery is blocked by unique partial indexes on `stripe_payment_intent_id`, `stripe_invoice_id` and `stripe_checkout_session_id`.
+
+### `consultant_balances` (view)
+
+**No balance is stored anywhere.** A `security_invoker` view derives `pending`, `available`, `reserved`, `paid` and `lifetime` per consultant per currency, all coalesced to zero, never summed across currencies. `available` is defined as "not claimed by a payout in `requested`, `approved` or `paid`", so an allocation left behind on a cancelled request cannot hide a withdrawable earning.
+
+### Access
+
+| Table | consultant | admin | client | writes |
+|---|---|---|---|---|
+| all four | own records | all records | **none** | service role only |
+
+RLS on, exactly one `SELECT` policy each, no write policy anywhere. `anon` holds no privilege at all; `authenticated` holds `SELECT` only. The client's exclusion is structural — no policy on any finance table names `client_profile_id`, so there is no clause to loosen by accident. `service_purchases.client_profile_id` is attribution data, not an access key.
+
+**`services.consultant_commission_bps` is hidden by column privilege**, because `services_select_active` is readable by every authenticated user and RLS filters rows, not columns. Migration 034 replaces the table-level `SELECT` grant with an explicit column list that omits it. A future migration adding a client-visible column to `services` **must grant it explicitly** — the list fails closed.
 
 ---
 
