@@ -123,23 +123,42 @@ export const fulfillServicePurchase = async ({
 export type ServiceReversalRow = {
   purchase_id: string;
   reversed: boolean;
-  reason: "reversed" | "no_entry" | "already_refunded";
+  reason:
+    | "reversed"
+    | "no_entry"
+    | "already_refunded"
+    /* Migration 043: this cumulative total adds nothing. */
+    | "no_change";
   entry_id: string | null;
   reversal_entry_id: string | null;
   refunded_amount_minor: number;
   status: string;
   consultant_amount_minor: number | null;
+  /* How much of the total was newly applied. Zero on a no-op. */
+  applied_delta_minor: number | null;
 };
 
+/*
+ * Migration 043. The amount is a CUMULATIVE TOTAL, not a delta:
+ * "Stripe reports this purchase has now been refunded by this much
+ * in total". The RPC computes the difference against what it has
+ * already recorded and reverses only that, which is what makes a
+ * redelivered event a no-op and a second partial reverse only its
+ * own share.
+ *
+ * The parameter was renamed in the database precisely so a stale
+ * caller passing a delta fails loudly here rather than silently
+ * double-counting a consultant's ledger.
+ */
 export const reverseServicePurchaseEarning =
   async ({
     purchaseId,
     reason,
-    grossAmountMinor,
+    refundedTotalMinor,
   }: {
     purchaseId: string;
     reason: string;
-    grossAmountMinor?: number | null;
+    refundedTotalMinor?: number | null;
   }): Promise<
     FinanceRpcResult<ServiceReversalRow>
   > =>
@@ -148,8 +167,8 @@ export const reverseServicePurchaseEarning =
       {
         p_purchase_id: purchaseId,
         p_reason: reason,
-        p_gross_amount_minor:
-          grossAmountMinor ?? null,
+        p_refunded_total_minor:
+          refundedTotalMinor ?? null,
       },
     );
 
@@ -159,6 +178,7 @@ export type ServiceReversalLookupRow =
       | "reversed"
       | "no_entry"
       | "already_refunded"
+      | "no_change"
       | "not_a_service_purchase";
   };
 
@@ -181,11 +201,11 @@ export const reverseServicePurchaseForPaymentIntentRpc =
   async ({
     paymentIntentId,
     reason,
-    grossAmountMinor,
+    refundedTotalMinor,
   }: {
     paymentIntentId: string;
     reason: string;
-    grossAmountMinor?: number | null;
+    refundedTotalMinor?: number | null;
   }): Promise<
     FinanceRpcResult<ServiceReversalLookupRow>
   > =>
@@ -194,7 +214,7 @@ export const reverseServicePurchaseForPaymentIntentRpc =
       {
         p_stripe_payment_intent_id: paymentIntentId,
         p_reason: reason,
-        p_gross_amount_minor:
-          grossAmountMinor ?? null,
+        p_refunded_total_minor:
+          refundedTotalMinor ?? null,
       },
     );

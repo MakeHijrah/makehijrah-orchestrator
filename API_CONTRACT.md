@@ -547,6 +547,46 @@ Every refusal is the **same `404 NOT_FOUND`**. Unknown service, unknown consulta
 
 **Webhook independence.** The browser routinely returns from Stripe before `checkout.session.completed` has written the purchase row. The Checkout Session path exists precisely for that window — there is no polling, and the redirect itself is never treated as proof.
 
+### `POST /api/admin/service-purchases/:id/refund` — admin, Amendment 009 + migration 043
+
+Rate limit: 30 / minute. Strict discriminated union — unknown keys are a `400`:
+
+```json
+{ "type": "full" }
+{ "type": "partial", "amount_minor": 500 }
+```
+
+`amount_minor` is an **integer in minor units**. No decimal or floating-point currency value crosses this boundary; converting `"5.00"` to `500` is the caller's job and must be done by string manipulation, never `Math.round(value * 100)`.
+
+**The request carries no trusted value.** `payment_intent_id`, `charge_id`, `stripe_invoice_id`, `client_profile_id`, `consultant_id`, `service_id`, `currency`, commission, platform or ledger amounts, a success URL and arbitrary metadata all have **no field to be sent in**. Everything is resolved from the purchase by id: the PaymentIntent, the Stripe mode, the gross, the amount already refunded, the service and the client.
+
+`type: "full"` refunds exactly `gross_amount_minor − refunded_amount_minor` — the **remaining** balance, not the gross.
+
+**This endpoint INITIATES a refund and records no accounting.** It does not move `refunded_amount_minor`, does not set a status, creates no ledger reversal and calls no finance RPC. **`charge.refunded` remains the sole financial recorder.** The one permitted local write is described below.
+
+**Stripe mode** is taken from the purchase's own `stripe_mode`, never the current global mode — the rule Amendment 007 locked for consultations, for the same reason.
+
+**PaymentIntent resolution, and the repair.** A one-time purchase stores its PaymentIntent. A subscription invoice may not, because migration 040 reads it from `invoice.payments`, an expandable list that can be absent from the webhook payload. When it is null and `stripe_invoice_id` exists, the endpoint calls `stripe.invoicePayments.list({ invoice })`, takes the first row whose own `invoice` matches and whose `payment.type` is `payment_intent`, and **persists that PaymentIntent onto the purchase before creating the refund**. This is metadata repair, not financial state: the later `charge.refunded` webhook finds the purchase *by* PaymentIntent, so refunding without the repair would return money to the client with no reversal recorded against the consultant. If neither source resolves, the endpoint returns `409` and **never calls `refunds.create`**.
+
+**Idempotency.** Key `service-refund-{purchaseId}-{amountMinor}-{refundedSoFarMinor}`, plus a short-lived Redis in-flight claim. Two identical submissions before the webhook lands produce **one** Stripe refund; a deliberate second refund of the same amount after the webhook has moved `refunded_amount_minor` gets a different key and goes through.
+
+Response — submission information only, with **no local status**:
+
+```json
+{ "purchase_id": "…", "refund_submitted": true,
+  "amount_minor": 500, "currency": "usd", "stripe_refund_id": "re_…" }
+```
+
+Errors: `404 NOT_FOUND`; `409 INVALID_TRANSITION` (cancelled, already fully refunded, amount above remaining, unresolvable payment reference); `409 STRIPE_MODE_NOT_CONFIGURED`; `409 CONFLICT` (a submission is already in flight); `502 STRIPE_ERROR` — **nothing local is mutated on failure**; `403`/`401`.
+
+> **Refunding a recurring purchase refunds that invoice period only.** It does **not** cancel the Stripe subscription, stop future billing, or change subscription status. The refund dialog must say so: *"Refunding this payment does not cancel recurring billing."* Subscription cancellation is not part of this system.
+
+### Cumulative refund semantics — migration 043
+
+`charge.refunded` carries `charge.amount_refunded`, which is **cumulative**: the total refunded on that charge to date, not the amount of the refund that just happened. The webhook passes it as a **total**, and `reverse_service_purchase_earning` computes `delta = total − refunded_amount_minor` itself, reversing only the delta.
+
+That makes refund processing idempotent by construction: a redelivered event applies nothing, a second partial reverses only its own share, and partial-then-full completes correctly. Migration 040 treated the figure as a delta, which double-counted redeliveries, over-reversed a consultant's ledger on a second partial, and silently dropped a partial-then-full. Status reaches `refunded` only when the cumulative total reaches the gross.
+
 ### `GET /api/me/service-purchases` — client
 
 Rate limit: 60 / minute. No path parameter, no query, no body — `me` is the entire parameter surface, so a client cannot ask for anybody else's purchases and there is no field a later edit could start trusting. The caller's `client_profile_id` is resolved from the bearer token.

@@ -387,12 +387,24 @@ const handleChargeRefunded = async (
     return null;
   }
 
+  /*
+   * charge.amount_refunded is CUMULATIVE — the total refunded on
+   * this charge to date, not the amount of the refund that just
+   * happened. It is passed as a TOTAL (migration 043), and the RPC
+   * works out what is new.
+   *
+   * Treating it as a delta is precisely the bug migration 043
+   * fixed: a redelivered event double-counted, a second partial
+   * over-reversed the consultant's ledger by the first refund's
+   * amount, and partial-then-full exceeded the remainder and was
+   * silently dropped.
+   */
   const outcome =
     await reverseServicePurchaseForPaymentIntent({
       paymentIntentId,
       reason:
         "Stripe refund processed by webhook",
-      grossAmountMinor:
+      refundedTotalMinor:
         charge.amount_refunded > 0
           ? charge.amount_refunded
           : null,

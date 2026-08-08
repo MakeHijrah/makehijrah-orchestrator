@@ -520,34 +520,43 @@ const fulfillServicePurchaseFake = (args: Row) => {
   });
 };
 
+/*
+ * Migration 043 semantics, mirrored: the amount is a CUMULATIVE
+ * TOTAL, not a delta. The delta is computed here exactly as the
+ * RPC computes it, so a redelivered event is a no-op and a second
+ * partial reverses only its own share. The equivalent arithmetic is
+ * proved against real PostgreSQL in MIGRATION_043_VERIFICATION.sql.
+ */
 const reverseServicePurchaseFake = (purchase: Row, args: Row) => {
   const gross = purchase.gross_amount_minor as number;
   const refunded = purchase.refunded_amount_minor as number;
-  const remaining = gross - refunded;
 
-  if (remaining <= 0) {
+  const target =
+    (args.p_refunded_total_minor as number | null) ?? gross;
+
+  if (target > gross) {
+    return fail("FINANCE_REFUND_EXCEEDS_PURCHASE");
+  }
+
+  if (target < 0) {
+    return fail("FINANCE_REVERSAL_AMOUNT_INVALID");
+  }
+
+  const portion = target - refunded;
+
+  if (portion <= 0) {
     return ok({
       purchase_id: purchase.id,
       reversed: false,
-      reason: "already_refunded",
+      reason:
+        refunded >= gross ? "already_refunded" : "no_change",
       entry_id: null,
       reversal_entry_id: null,
       refunded_amount_minor: refunded,
       status: purchase.status,
       consultant_amount_minor: null,
+      applied_delta_minor: 0,
     });
-  }
-
-  const portion =
-    (args.p_gross_amount_minor as number | null) ??
-    remaining;
-
-  if (portion <= 0) {
-    return fail("FINANCE_REVERSAL_AMOUNT_INVALID");
-  }
-
-  if (portion > remaining) {
-    return fail("FINANCE_REFUND_EXCEEDS_PURCHASE");
   }
 
   const entry = db.consultant_ledger_entries.find(
@@ -597,7 +606,7 @@ const reverseServicePurchaseFake = (purchase: Row, args: Row) => {
     db.consultant_ledger_entries.push(reversal);
   }
 
-  purchase.refunded_amount_minor = refunded + portion;
+  purchase.refunded_amount_minor = target;
 
   if (
     (purchase.refunded_amount_minor as number) >= gross
@@ -617,6 +626,7 @@ const reverseServicePurchaseFake = (purchase: Row, args: Row) => {
     status: purchase.status,
     consultant_amount_minor:
       (reversal?.consultant_amount_minor as number) ?? null,
+    applied_delta_minor: portion,
   });
 };
 
@@ -661,6 +671,7 @@ supabaseAdmin.rpc = (async (name: string, args: Row) => {
           refunded_amount_minor: null,
           status: null,
           consultant_amount_minor: null,
+          applied_delta_minor: null,
         });
       }
 
@@ -1890,5 +1901,133 @@ describe("Service checkout endpoint", () => {
     );
 
     assert.equal(response.statusCode, 404);
+  });
+});
+
+/*
+ * Migration 043. Cumulative refund semantics at the webhook level.
+ *
+ * These four cases are the ones the delta interpretation got
+ * wrong. The same arithmetic is proved against real PostgreSQL in
+ * MIGRATION_043_VERIFICATION.sql; asserted here is that the
+ * webhook passes Stripe's cumulative figure through unchanged and
+ * that the outcome it reports matches.
+ */
+describe("Service purchase: cumulative refunds", () => {
+  const refundTo = async (cumulativeTotal: number) =>
+    handleEvent({
+      type: "charge.refunded",
+      data: {
+        object: {
+          id: "ch_one",
+          object: "charge",
+          payment_intent: "pi_one",
+          amount_refunded: cumulativeTotal,
+        },
+      },
+    });
+
+  const purchaseRow = () => db.service_purchases[0]!;
+
+  const reversedTotal = (): number =>
+    db.consultant_ledger_entries
+      .filter((row) => row.entry_type === "reversal")
+      .reduce(
+        (sum, row) =>
+          sum - (row.gross_amount_minor as number),
+        0,
+      );
+
+  it("is a no-op when the same total is delivered twice", async () => {
+    await handleEvent(checkoutSessionEvent());
+
+    await refundTo(3_000);
+    const outcome = await refundTo(3_000);
+
+    assert.equal(outcome?.action, "refund_noop");
+    assert.equal(outcome?.reason, "no_change");
+
+    assert.equal(
+      purchaseRow().refunded_amount_minor,
+      3_000,
+      "a redelivered cumulative total must not be added again",
+    );
+    assert.equal(reversedTotal(), 3_000);
+  });
+
+  it("applies only the difference on a second partial", async () => {
+    await handleEvent(checkoutSessionEvent());
+
+    await refundTo(3_000);
+    await refundTo(5_000);
+
+    assert.equal(
+      purchaseRow().refunded_amount_minor,
+      5_000,
+      "3000 then a cumulative 5000 is 5000 refunded, not 8000",
+    );
+    assert.equal(
+      reversedTotal(),
+      5_000,
+      "the consultant's ledger must be reversed by what was actually refunded",
+    );
+    assert.equal(purchaseRow().status, "paid");
+  });
+
+  it("completes a partial with a full refund", async () => {
+    await handleEvent(checkoutSessionEvent());
+
+    await refundTo(3_000);
+    const outcome = await refundTo(9_999);
+
+    assert.equal(outcome?.action, "refund_reversed");
+    assert.equal(
+      purchaseRow().refunded_amount_minor,
+      9_999,
+    );
+    assert.equal(purchaseRow().status, "refunded");
+    assert.equal(reversedTotal(), 9_999);
+    assert.equal(
+      availableFor(CONSULTANT_ID, "usd") +
+        pendingFor(CONSULTANT_ID, "usd"),
+      0,
+      "a fully refunded purchase leaves the consultant owed nothing",
+    );
+  });
+
+  it("accumulates three partials correctly", async () => {
+    await handleEvent(checkoutSessionEvent());
+
+    await refundTo(1_000);
+    await refundTo(4_000);
+    await refundTo(6_000);
+
+    assert.equal(
+      purchaseRow().refunded_amount_minor,
+      6_000,
+    );
+    assert.equal(reversedTotal(), 6_000);
+    assert.equal(
+      db.consultant_ledger_entries.filter(
+        (row) => row.entry_type === "reversal",
+      ).length,
+      3,
+      "each delivery writes its own reversal entry; none is rewritten",
+    );
+  });
+
+  it("never mutates the original earning across many refunds", async () => {
+    await handleEvent(checkoutSessionEvent());
+
+    await refundTo(2_000);
+    await refundTo(7_000);
+    await refundTo(9_999);
+
+    const earning = db.consultant_ledger_entries.find(
+      (row) => row.entry_type === "earning",
+    )!;
+
+    assert.equal(earning.gross_amount_minor, 9_999);
+    assert.equal(earning.consultant_amount_minor, 4_500);
   });
 });

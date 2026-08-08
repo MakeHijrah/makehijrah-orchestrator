@@ -397,6 +397,24 @@ Verification: `MIGRATION_042_VERIFICATION.sql`, 13 checks against PostgreSQL 16,
 
 ---
 
+## 9e. Admin service refunds + cumulative refund fix — migration 043 **[D]**
+
+An admin can refund a service purchase from Admin Finance without opening the Stripe Dashboard. Building it required fixing the refund accounting first.
+
+- **Migration 043 fixes a real accounting bug.** `charge.amount_refunded` is cumulative; migration 040 treated it as a delta. Duplicate partial deliveries double-counted, a second partial **over-reversed the consultant's ledger by the first refund's amount**, and partial-then-full was silently dropped. The RPC now takes a cumulative total and applies only the difference. **[D]**
+- Migration 043 also fixes a latent `record is not assigned yet` fault on the no-earning path, present in migration 040 and never reached until an unattributed refund was tested. **[D]**
+- `POST /api/admin/service-purchases/:id/refund`, admin only, strict `full`/`partial` union, integer minor units. **[D]**
+- **The endpoint records no accounting** — no `refunded_amount_minor`, no status, no ledger, no finance RPC. `charge.refunded` remains the sole financial recorder, asserted by tests. **[D]**
+- Recurring purchases with a null PaymentIntent are repaired from `stripe.invoicePayments.list({ invoice })` and the id is **persisted before** the refund, so the later webhook can find the purchase. **[D]**
+- Idempotency: Stripe key derived from purchase + amount + refunded-so-far, plus a Redis in-flight claim. **[D]**
+- Refunding a recurring purchase refunds that period only and does **not** cancel the subscription. **[D]**
+
+Verification: `MIGRATION_043_VERIFICATION.sql`, 14 checks against PostgreSQL 16 — three of which fail against migration 040 and pass against 043. Migrations 038–042 re-verified against the same database. 35 orchestrator tests added. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Not done:** no frontend. The refund button, confirmation modal, decimal→minor-units helper and post-submit refetch are a separate build in the frontend repo, which is not present in this workspace.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -508,7 +526,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 042
+- `supabase/migrations/` — migrations 001 through 043
 
 ---
 

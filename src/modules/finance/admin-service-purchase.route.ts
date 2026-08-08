@@ -5,6 +5,7 @@ import {
   sendSuccess,
 } from "../../lib/api-response.js";
 import { requireRole } from "../../lib/auth.js";
+import { refundServicePurchaseAsAdmin } from "./admin-service-refund.service.js";
 import { fulfillServicePurchase } from "./service-purchase.repository.js";
 
 const paramsSchema = z
@@ -12,6 +13,31 @@ const paramsSchema = z
     id: z.string().uuid(),
   })
   .strict();
+
+/*
+ * The refund request, and what it deliberately cannot carry.
+ *
+ * A discriminated union of exactly two shapes, both .strict(), so
+ * payment_intent_id, charge_id, stripe_invoice_id,
+ * client_profile_id, consultant_id, service_id, currency,
+ * commission, a ledger amount, a success URL and arbitrary
+ * metadata are not merely ignored — there is no field for any of
+ * them and an attempt to send one is a 400.
+ *
+ * amount_minor is an INTEGER in minor units. No decimal or
+ * floating-point currency value crosses this boundary; converting
+ * "5.00" to 500 is the caller's job, done by string manipulation
+ * rather than multiplication.
+ */
+const refundBodySchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("full") }).strict(),
+  z
+    .object({
+      type: z.literal("partial"),
+      amount_minor: z.number().int().positive(),
+    })
+    .strict(),
+]);
 
 /*
  * POST /api/admin/service-purchases/:id/fulfill — admin
@@ -124,6 +150,142 @@ export const registerAdminServicePurchaseRoutes =
           reason: result.row.reason,
           entry_id: result.row.entry_id,
           available_at: result.row.available_at,
+        });
+      },
+    );
+
+    /*
+     * POST /api/admin/service-purchases/:id/refund — admin
+     *
+     * INITIATES a Stripe refund and records no accounting. It does
+     * not move refunded_amount_minor, does not set a status, and
+     * creates no ledger reversal: charge.refunded remains the sole
+     * financial recorder, exactly as it was before this button
+     * existed. A test asserts zero finance RPCs are called from
+     * here.
+     *
+     * Everything trusted — the PaymentIntent, the Stripe mode, the
+     * gross, the amount already refunded, the service and the
+     * client — is read from the purchase by id.
+     */
+    app.post(
+      "/api/admin/service-purchases/:id/refund",
+      {
+        config: {
+          rateLimit: {
+            max: 30,
+            timeWindow: "1 minute",
+          },
+        },
+      },
+      async (request, reply) => {
+        const authentication =
+          await requireRole(request, [
+            "admin",
+          ]);
+
+        if (!authentication.ok) {
+          return sendError(
+            reply,
+            authentication.statusCode,
+            authentication.code,
+            authentication.message,
+          );
+        }
+
+        const parsedParams =
+          paramsSchema.safeParse(
+            request.params ?? {},
+          );
+
+        if (!parsedParams.success) {
+          return sendError(
+            reply,
+            400,
+            "VALIDATION_ERROR",
+            "The service purchase id is invalid.",
+            parsedParams.error.flatten(),
+          );
+        }
+
+        const parsedBody =
+          refundBodySchema.safeParse(
+            request.body ?? {},
+          );
+
+        if (!parsedBody.success) {
+          return sendError(
+            reply,
+            400,
+            "VALIDATION_ERROR",
+            "The refund request is invalid.",
+            parsedBody.error.flatten(),
+          );
+        }
+
+        const result =
+          await refundServicePurchaseAsAdmin({
+            purchaseId: parsedParams.data.id,
+            intent:
+              parsedBody.data.type === "full"
+                ? { type: "full" }
+                : {
+                    type: "partial",
+                    amountMinor:
+                      parsedBody.data.amount_minor,
+                  },
+          });
+
+        if (!result.ok) {
+          switch (result.code) {
+            case "NOT_FOUND":
+              return sendError(
+                reply,
+                404,
+                result.code,
+                result.message,
+              );
+
+            case "INVALID_TRANSITION":
+            case "STRIPE_MODE_NOT_CONFIGURED":
+            case "CONFLICT":
+              return sendError(
+                reply,
+                409,
+                result.code,
+                result.message,
+              );
+
+            case "STRIPE_ERROR":
+              return sendError(
+                reply,
+                502,
+                result.code,
+                result.message,
+              );
+
+            default:
+              return sendError(
+                reply,
+                500,
+                "INTERNAL_ERROR",
+                result.message,
+              );
+          }
+        }
+
+        /*
+         * Submission information only. Deliberately no status and
+         * no refunded total: the row has not changed yet, and
+         * returning either would let the UI render a refund that
+         * MakeHijrah has not recorded.
+         */
+        return sendSuccess(reply, {
+          purchase_id: result.purchaseId,
+          refund_submitted: true,
+          amount_minor: result.amountMinor,
+          currency: result.currency,
+          stripe_refund_id: result.stripeRefundId,
         });
       },
     );

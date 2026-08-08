@@ -690,8 +690,10 @@ create index idx_service_purchases_subscription
 |---|---|
 | `record_service_purchase(...)` | Payment → purchase + **pending** earning, in one transaction |
 | `fulfill_service_purchase(purchase, admin)` | Delivery → `fulfilled_at` + earning becomes available. Idempotent |
-| `reverse_service_purchase_earning(purchase, reason, gross?)` | Refund → negative ledger entry via `reverse_ledger_entry` |
-| `reverse_service_purchase_for_payment_intent(pi, reason, gross?)` | The webhook's refund entry point, so it never reads a table |
+| `reverse_service_purchase_earning(purchase, reason, refunded_total?)` | Refund → negative ledger entry via `reverse_ledger_entry` |
+| `reverse_service_purchase_for_payment_intent(pi, reason, refunded_total?)` | The webhook's refund entry point, so it never reads a table |
+
+**Refund amounts are CUMULATIVE TOTALS, not deltas (migration 043).** `p_refunded_total_minor` means "Stripe reports this purchase has now been refunded by this much in total"; the function computes `delta = total − refunded_amount_minor` and reverses only the delta. Stripe's `charge.amount_refunded` is cumulative and monotonic, so this is idempotent **by construction** — a redelivered event applies nothing (`no_change`), a second partial reverses only its own share, and partial-then-full completes to the gross. Migration 040 treated the figure as a delta, which double-counted redeliveries and **over-reversed a consultant's ledger** on a second partial. The parameter was renamed and the old signature dropped so a stale caller fails loudly rather than silently double-counting.
 
 **`record_service_purchase` accepts no consultant and no commission rate.** Attribution is re-derived on every call from `service_recommendations` joined to `consultations` — a consultant id in Stripe metadata cannot influence who is credited, because there is no parameter through which it could be passed. A client *candidate* may be supplied; it is validated against `profiles` and an unresolvable one produces an **unattributed** purchase rather than an error. Unattributed revenue is recorded and visible; it is never discarded.
 

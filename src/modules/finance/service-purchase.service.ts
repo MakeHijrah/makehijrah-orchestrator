@@ -117,6 +117,7 @@ export type ServiceRefundOutcome = {
     | "reversed"
     | "no_entry"
     | "already_refunded"
+    | "no_change"
     | "not_a_service_purchase"
     | "failed";
 };
@@ -134,17 +135,17 @@ export const reverseServicePurchaseForPaymentIntent =
   async ({
     paymentIntentId,
     reason,
-    grossAmountMinor,
+    refundedTotalMinor,
   }: {
     paymentIntentId: string;
     reason: string;
-    grossAmountMinor?: number | null;
+    refundedTotalMinor?: number | null;
   }): Promise<ServiceRefundOutcome> => {
     const result =
       await reverseServicePurchaseForPaymentIntentRpc({
         paymentIntentId,
         reason,
-        grossAmountMinor,
+        refundedTotalMinor,
       });
 
     if (!result.ok) {
