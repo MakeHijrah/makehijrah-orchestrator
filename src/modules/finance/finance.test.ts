@@ -79,6 +79,7 @@ const db: {
   consultant_ledger_entries: Row[];
   payouts: Row[];
   payout_allocations: Row[];
+  consultant_payout_settings: Row[];
 } = {
   profiles: [],
   consultants: [],
@@ -87,6 +88,35 @@ const db: {
   consultant_ledger_entries: [],
   payouts: [],
   payout_allocations: [],
+  consultant_payout_settings: [],
+};
+
+/*
+ * Migration 039's build_payout_destination_note(), mirrored.
+ *
+ * Same rule as the database function: null for anything that is
+ * not a complete, known destination, so a single null test
+ * answers "is this consultant payable". Verified against
+ * PostgreSQL 16 before it was written here.
+ */
+const buildPayoutDestinationNote = (
+  method: unknown,
+  email: unknown,
+): string | null => {
+  const trimmedEmail = String(email ?? "").trim();
+
+  if (trimmedEmail === "") {
+    return null;
+  }
+
+  switch (String(method ?? "").trim().toLowerCase()) {
+    case "paypal":
+      return `PayPal | ${trimmedEmail}`;
+    case "wise":
+      return `Wise | ${trimmedEmail}`;
+    default:
+      return null;
+  }
 };
 
 const tableRows = (table: string): Row[] =>
@@ -603,6 +633,24 @@ const fakeRpc = async (
         return fail("FINANCE_CONSULTANT_NOT_FOUND");
       }
 
+      /*
+       * Migration 039. Where the money goes, before anything is
+       * reserved. A missing settings row and an incomplete one
+       * are the same refusal, exactly as in the RPC.
+       */
+      const settings = db.consultant_payout_settings.find(
+        (row) => row.consultant_id === args.p_consultant_id,
+      );
+
+      const destinationNote = buildPayoutDestinationNote(
+        settings?.payout_method,
+        settings?.payout_email,
+      );
+
+      if (destinationNote === null) {
+        return fail("FINANCE_PAYOUT_METHOD_MISSING");
+      }
+
       if (
         db.payouts.some(
           (row) =>
@@ -646,7 +694,11 @@ const fakeRpc = async (
         currency,
         requested_amount_minor: total,
         paid_amount_minor: null,
-        destination_note: args.p_destination_note ?? null,
+        /*
+         * Snapshotted from the setting, never from an argument —
+         * the RPC has no destination parameter to take one from.
+         */
+        destination_note: destinationNote,
         external_reference: null,
         admin_note: null,
         requested_at: now,
@@ -674,6 +726,7 @@ const fakeRpc = async (
         requested_amount_minor: payout.requested_amount_minor,
         entry_count: eligible.length,
         requested_at: payout.requested_at,
+        destination_note: payout.destination_note,
       });
     }
 
@@ -943,6 +996,25 @@ beforeEach(() => {
   db.consultant_ledger_entries = [];
   db.payouts = [];
   db.payout_allocations = [];
+
+  /*
+   * Migration 039. Both consultants are payable by default, so
+   * the tests that are about balances and allocations stay about
+   * balances and allocations. The tests that are about the payout
+   * method clear or change this deliberately.
+   */
+  db.consultant_payout_settings = [
+    {
+      consultant_id: CONSULTANT_ID,
+      payout_method: "paypal",
+      payout_email: "consultant@example.test",
+    },
+    {
+      consultant_id: OTHER_CONSULTANT_ID,
+      payout_method: "wise",
+      payout_email: "other@example.test",
+    },
+  ];
 });
 
 describe("Consultation earnings", () => {
@@ -1787,6 +1859,292 @@ describe("Human-readable finance references", () => {
         );
       }
     }
+  });
+});
+
+/*
+ * Migration 039. The consultant's payout method, and the
+ * destination snapshot it produces.
+ *
+ * The RLS on consultant_payout_settings — who may read and write
+ * a row — is a database claim and is proved in
+ * MIGRATION_039_VERIFICATION.sql against PostgreSQL, because a
+ * fake cannot prove a policy. What is proved here is the part the
+ * orchestrator owns: that a payout cannot be opened without a
+ * destination, that the destination is snapshotted rather than
+ * supplied, and that history does not move when the setting does.
+ */
+describe("Consultant payout method", () => {
+  const seedAvailable = async (): Promise<void> => {
+    await syncConsultationEarning(COMPLETED_CAPTURED);
+  };
+
+  const requestPayout = async (): Promise<{
+    statusCode: number;
+    json: () => { ok: boolean; data?: Row; error?: Row };
+  }> =>
+    post(
+      "/api/consultant/payouts",
+      { currency: "usd" },
+      CONSULTANT_PROFILE,
+    );
+
+  const settingsFor = (consultantId: string): Row =>
+    db.consultant_payout_settings.find(
+      (row) => row.consultant_id === consultantId,
+    )!;
+
+  it("refuses the payout when no payout method is configured", async () => {
+    await seedAvailable();
+    db.consultant_payout_settings = [];
+
+    const response = await requestPayout();
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(
+      response.json().error!.code,
+      "PAYOUT_METHOD_MISSING",
+    );
+    assert.match(
+      String(response.json().error!.message),
+      /Consultant Profile/,
+    );
+
+    /* Nothing may have been reserved by the refusal. */
+    assert.equal(db.payouts.length, 0);
+    assert.equal(db.payout_allocations.length, 0);
+    assert.equal(
+      availableBalance(CONSULTANT_ID, "usd"),
+      7_500,
+    );
+  });
+
+  it("refuses the payout when the method has no email", async () => {
+    await seedAvailable();
+    settingsFor(CONSULTANT_ID).payout_email = null;
+
+    const response = await requestPayout();
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(
+      response.json().error!.code,
+      "PAYOUT_METHOD_MISSING",
+    );
+    assert.equal(db.payouts.length, 0);
+  });
+
+  it("refuses the payout when the email is set but no method is chosen", async () => {
+    await seedAvailable();
+    settingsFor(CONSULTANT_ID).payout_method = null;
+
+    const response = await requestPayout();
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(
+      response.json().error!.code,
+      "PAYOUT_METHOD_MISSING",
+    );
+  });
+
+  it("snapshots a PayPal destination onto the payout", async () => {
+    await seedAvailable();
+
+    const response = await requestPayout();
+
+    assert.equal(response.statusCode, 201);
+    assert.equal(
+      response.json().data!.destination_note,
+      "PayPal | consultant@example.test",
+    );
+
+    assert.equal(
+      db.payouts[0]!.destination_note,
+      "PayPal | consultant@example.test",
+    );
+  });
+
+  it("snapshots a Wise destination onto the payout", async () => {
+    await seedAvailable();
+    settingsFor(CONSULTANT_ID).payout_method = "wise";
+    settingsFor(CONSULTANT_ID).payout_email =
+      "consultant-wise@example.test";
+
+    const response = await requestPayout();
+
+    assert.equal(response.statusCode, 201);
+    assert.equal(
+      response.json().data!.destination_note,
+      "Wise | consultant-wise@example.test",
+    );
+  });
+
+  it("ignores a destination the caller tries to supply", async () => {
+    await seedAvailable();
+
+    const response = await post(
+      "/api/consultant/payouts",
+      {
+        currency: "usd",
+        destination_note: "Wise | attacker@example.test",
+        payout_email: "attacker@example.test",
+      },
+      CONSULTANT_PROFILE,
+    );
+
+    assert.equal(response.statusCode, 201);
+    assert.equal(
+      response.json().data!.destination_note,
+      "PayPal | consultant@example.test",
+    );
+    assert.equal(
+      db.payouts[0]!.destination_note,
+      "PayPal | consultant@example.test",
+    );
+  });
+
+  it("does not rewrite an existing payout when the setting changes", async () => {
+    await seedAvailable();
+
+    const first = await requestPayout();
+    const payoutId = first.json().data!.payout_id as string;
+
+    settingsFor(CONSULTANT_ID).payout_method = "wise";
+    settingsFor(CONSULTANT_ID).payout_email =
+      "changed@example.test";
+
+    const stored = db.payouts.find(
+      (row) => row.id === payoutId,
+    )!;
+
+    assert.equal(
+      stored.destination_note,
+      "PayPal | consultant@example.test",
+      "an existing payout must record where the money was actually going",
+    );
+
+    /* And the next payout picks up the new destination. */
+    await post(
+      "/api/admin/payouts/" + payoutId + "/cancel",
+      {},
+      ADMIN_PROFILE,
+    );
+
+    const second = await requestPayout();
+
+    assert.equal(
+      second.json().data!.destination_note,
+      "Wise | changed@example.test",
+    );
+  });
+
+  it("keeps the snapshot through approval and mark-paid, which admin finance reads", async () => {
+    await seedAvailable();
+
+    const requested = await requestPayout();
+    const payoutId = requested.json().data!
+      .payout_id as string;
+
+    await post(
+      `/api/admin/payouts/${payoutId}/approve`,
+      {},
+      ADMIN_PROFILE,
+    );
+
+    const paid = await post(
+      `/api/admin/payouts/${payoutId}/paid`,
+      {
+        paid_amount_minor: 7_500,
+        external_reference: "PP-99887766",
+      },
+      ADMIN_PROFILE,
+    );
+
+    assert.equal(paid.statusCode, 200);
+
+    const stored = db.payouts.find(
+      (row) => row.id === payoutId,
+    )!;
+
+    assert.equal(stored.status, "paid");
+    assert.equal(
+      stored.destination_note,
+      "PayPal | consultant@example.test",
+      "the admin must still be able to see which service and recipient were used",
+    );
+  });
+
+  it("exposes no payout email through any orchestrator projection", async () => {
+    const { readFile, readdir } = await import(
+      "node:fs/promises"
+    );
+    const { join } = await import("node:path");
+
+    const walk = async (
+      directory: string,
+    ): Promise<string[]> => {
+      const entries = await readdir(directory, {
+        withFileTypes: true,
+      });
+
+      const files = await Promise.all(
+        entries.map(async (entry) => {
+          const full = join(directory, entry.name);
+
+          if (entry.isDirectory()) {
+            return walk(full);
+          }
+
+          return entry.name.endsWith(".ts") &&
+            !entry.name.endsWith(".test.ts")
+            ? [full]
+            : [];
+        }),
+      );
+
+      return files.flat();
+    };
+
+    const sources = await walk(
+      new URL("../..", import.meta.url).pathname,
+    );
+
+    assert.ok(
+      sources.length > 20,
+      "the source scan found suspiciously few files",
+    );
+
+    /*
+     * Comments are stripped first. This test is about what the
+     * orchestrator READS, and the finance repository explains in
+     * prose why the destination now comes from the database —
+     * which is documentation of the rule, not a breach of it.
+     */
+    const stripComments = (text: string): string =>
+      text
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+    const offenders = (
+      await Promise.all(
+        sources.map(async (file) => {
+          const code = stripComments(
+            await readFile(file, "utf8"),
+          );
+
+          return /payout_email|consultant_payout_settings/.test(
+            code,
+          )
+            ? [file]
+            : [];
+        }),
+      )
+    ).flat();
+
+    assert.deepEqual(
+      offenders,
+      [],
+      "the orchestrator must never select a payout email; it reads only the destination the RPC snapshotted",
+    );
   });
 });
 

@@ -664,6 +664,44 @@ One row **per currency**, never summed across them and never converted. The peri
 
 Migration 038 also adds `idx_ledger_created_at`, since migration 034's indexes all serve per-consultant questions and a finance period is a range over the whole table. No table, column, constraint, trigger or policy changed.
 
+## 21. `consultant_payout_settings` (migration 039)
+
+How MakeHijrah manually pays a consultant. V1 pays **by hand** — an admin opens PayPal or Wise and sends the money — and until this table existed the system never recorded where to send it.
+
+```sql
+create table consultant_payout_settings (
+  consultant_id uuid primary key
+    references consultants(id) on delete cascade,
+  payout_method text,          -- 'paypal' | 'wise', null until chosen
+  payout_email text,           -- required whenever a method is set
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+```
+
+**Deliberately not columns on `consultants`.** That table is the booking projection every client and anonymous visitor reads, so a column added there is world-readable unless a column privilege is maintained to say otherwise — the surgery migration 034 had to perform for `services.consultant_commission_bps`, which fails closed only for as long as every future migration remembers it. A payout email is not booking data, and a table that is private by default cannot leak it by forgetting a grant.
+
+**Constraints.** `payout_method in ('paypal','wise')`; a method requires a non-blank `payout_email` (`btrim(...) <> ''`, because `''` is what a cleared form field submits); the address must contain an `@`, no whitespace, and be at most 320 characters. The converse is permitted on purpose — an email with no method chosen is a half-finished form, and the payout request is where incompleteness actually matters. `trg_payout_settings_normalize` trims both fields, lowercases the method so `PayPal` from a select box passes the vocabulary check, and turns blanks into null. The address itself is **not** lowercased: the local part of an email is case-sensitive by specification.
+
+**No `DELETE` policy and no delete grant.** Clearing a method is an `UPDATE` to null, which preserves `created_at`. **No admin write policy** either: an admin can see where a consultant is paid; changing it is the consultant's own act.
+
+| | consultant | admin | client | anon |
+|---|---|---|---|---|
+| `consultant_payout_settings` | **select, insert, update** own | select all | none | none |
+
+Every policy identifies the consultant through `my_consultant_id()`. The `INSERT` policy's `WITH CHECK` compares the row being written against the caller's own consultant id, so a `consultant_id` in the request body is never consulted — writing somebody else's row fails the check rather than depending on the client having sent the right value. `my_consultant_id()` is null for a client, and `consultant_id = null` is null, so a client is excluded by the same expression that scopes a consultant.
+
+### `build_payout_destination_note()` and the payout snapshot
+
+```sql
+build_payout_destination_note(p_method text, p_email text) returns text
+--  'PayPal | consultant@example.com'  |  'Wise | consultant@example.com'  |  null
+```
+
+Returns null for any unknown method or blank address, so one null test answers "is this consultant payable". Same single-formatter reasoning as migration 037's `build_finance_reference()`.
+
+**`request_consultant_payout` lost its `p_destination_note` argument** (migration 039; signature is now `(uuid, text)`). The destination is read from the consultant's saved setting inside the RPC, refused with `FINANCE_PAYOUT_METHOD_MISSING` if incomplete, and **snapshotted** onto `payouts.destination_note`. It is never read back from the setting afterwards: if payout history read through to the current value, correcting a typo would silently rewrite where every past payout claims to have been sent, and the admin's record of a transfer they already made would change under them. A destination the caller cannot supply is a destination the caller cannot forge — the same treatment the amount already had.
+
 ### Access
 
 | Table | consultant | admin | client | writes |
@@ -716,4 +754,6 @@ Role stays `client` by default; consultant role is granted by the orchestrator d
 3. One storage bucket `public-media` with prefixes `avatars/{auth.uid()}/*`, `consultants/{auth.uid()}/*`, `giveaways/*`. **Unchanged by Amendment 007** — the admin avatar reuses this exact path, with no new bucket, column or policy.
 4. The global consultation price is `app_settings.consultation_price_cents`, not an environment variable (Amendment 007, migration 025). It is snapshotted into `consultations.price_cents` at draft creation, so existing consultations and drafts never change price.
 
-**Schema status: FROZEN v1.1** — v1.0 plus Amendment 004 (`services` structured pricing, migration 022), Amendment 005 (nullable `messages.consultation_id`, migrations 023–024) and Amendment 007 (`app_settings` plus `consultations.stripe_mode`, migration 025). Table count is **16**. Any further table requires a new amendment.
+**Schema status: FROZEN v1.1** — v1.0 plus Amendment 004 (`services` structured pricing, migration 022), Amendment 005 (nullable `messages.consultation_id`, migrations 023–024) and Amendment 007 (`app_settings` plus `consultations.stripe_mode`, migration 025). Any further table requires a new amendment.
+
+**Table count is 21:** the 16 above, plus the four finance tables of migration 034 (`consultant_ledger_entries`, `payouts`, `payout_allocations`, `service_purchases`) and `consultant_payout_settings` from migration 039. The verification suites for migrations 034 and 038 assert this total, so it moves only with a deliberate, approved addition.

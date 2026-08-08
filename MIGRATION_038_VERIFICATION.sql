@@ -273,9 +273,11 @@ begin
    where table_schema = 'public'
      and table_type = 'BASE TABLE';
 
-  if v_tables <> 20 then
+  /* 20 when written; 21 since migration 039 added
+     public.consultant_payout_settings. */
+  if v_tables <> 21 then
     raise exception
-      'VERIFICATION FAILED 5: % base tables in public, expected 20',
+      'VERIFICATION FAILED 5: % base tables in public, expected 21',
       v_tables;
   end if;
 

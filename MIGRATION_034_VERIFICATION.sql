@@ -900,9 +900,17 @@ begin
     from information_schema.tables
    where table_schema = 'public' and table_type = 'BASE TABLE';
 
-  if v_tables <> 20 then
+  /*
+   * 20 when this file was written; 21 since migration 039 added
+   * public.consultant_payout_settings. The count is asserted at
+   * all because migration 034's claim is that it adds exactly
+   * four tables and no more, and that claim is still checked —
+   * the expected total simply moved with a later, deliberate
+   * addition.
+   */
+  if v_tables <> 21 then
     raise exception
-      'VERIFICATION FAILED 26: public holds % base tables, expected 20',
+      'VERIFICATION FAILED 26: public holds % base tables, expected 21 (16 + migration 034''s four + migration 039''s one)',
       v_tables;
   end if;
 

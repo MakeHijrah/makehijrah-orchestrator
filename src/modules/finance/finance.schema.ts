@@ -26,9 +26,23 @@ const noteSchema = z
   .optional()
   .transform((value) => value || null);
 
+/*
+ * Currency and nothing else.
+ *
+ * destination_note was removed with migration 039: the payout
+ * destination is now read from the consultant's saved payout
+ * setting inside the RPC and snapshotted onto the payout, so
+ * there is no longer a field in which one could be supplied — the
+ * same treatment the amount and the consultant id already had.
+ *
+ * Deliberately NOT .strict(). A frontend still sending the old
+ * destination_note field has it ignored rather than rejected,
+ * which is what lets the database and the orchestrator ship
+ * before the UI does. It is ignored, not stored: nothing below
+ * reads it.
+ */
 export const payoutRequestSchema = z.object({
   currency: currencySchema,
-  destination_note: noteSchema,
 });
 
 export type PayoutRequestInput = z.infer<

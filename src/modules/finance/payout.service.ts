@@ -35,6 +35,7 @@ export type PayoutRequestResult =
         | "NOT_FOUND"
         | "VALIDATION_ERROR"
         | "CONFLICT"
+        | "PAYOUT_METHOD_MISSING"
         | "INTERNAL_ERROR";
       message: string;
     };
@@ -43,11 +44,9 @@ export const requestPayoutForProfile =
   async ({
     profileId,
     currency,
-    destinationNote,
   }: {
     profileId: string;
     currency: string;
-    destinationNote: string | null;
   }): Promise<PayoutRequestResult> => {
     const consultantResult =
       await loadConsultantIdForProfile(
@@ -76,7 +75,6 @@ export const requestPayoutForProfile =
         consultantId:
           consultantResult.consultantId,
         currency,
-        destinationNote,
       });
 
     if (result.ok) {
@@ -106,6 +104,21 @@ export const requestPayoutForProfile =
           code: "CONFLICT",
           message:
             "You already have an open payout request in this currency.",
+        };
+
+      /*
+       * Migration 039. Its own code rather than a plain CONFLICT,
+       * because this is the one payout refusal the consultant can
+       * fix themselves and the message has somewhere specific to
+       * send them. The dialog disables the button before it gets
+       * here; this is the backstop for a stale page.
+       */
+      case "FINANCE_PAYOUT_METHOD_MISSING":
+        return {
+          ok: false,
+          code: "PAYOUT_METHOD_MISSING",
+          message:
+            "Add your payout method and payout email in Consultant Profile before requesting a payout.",
         };
 
       case "FINANCE_NO_AVAILABLE_EARNINGS":

@@ -63,9 +63,6 @@ export const registerConsultantPayoutRoute =
               authentication.profile.id,
             currency:
               parsedBody.data.currency,
-            destinationNote:
-              parsedBody.data
-                .destination_note,
           });
 
         if (!result.ok) {
@@ -87,6 +84,13 @@ export const registerConsultantPayoutRoute =
               );
 
             case "CONFLICT":
+            /*
+             * Also 409: the request is well formed and the
+             * consultant's account is simply not ready. The code
+             * is distinct so the dialog can link straight to the
+             * payout method section instead of parsing a message.
+             */
+            case "PAYOUT_METHOD_MISSING":
               return sendError(
                 reply,
                 409,
@@ -122,6 +126,14 @@ export const registerConsultantPayoutRoute =
               result.payout.entry_count,
             requested_at:
               result.payout.requested_at,
+            /*
+             * Migration 039. The destination the database
+             * snapshotted onto this payout, so the consultant is
+             * shown where the money is going by the same response
+             * that confirms the request.
+             */
+            destination_note:
+              result.payout.destination_note,
           },
           201,
         );

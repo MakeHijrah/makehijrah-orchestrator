@@ -27,6 +27,7 @@ export type FinanceMarker =
   | "FINANCE_CONSULTANT_NOT_FOUND"
   | "FINANCE_ADMIN_REQUIRED"
   | "FINANCE_PAYOUT_ALREADY_OPEN"
+  | "FINANCE_PAYOUT_METHOD_MISSING"
   | "FINANCE_NO_AVAILABLE_EARNINGS"
   | "FINANCE_BALANCE_NOT_POSITIVE"
   | "FINANCE_PAYOUT_NOT_FOUND"
@@ -52,6 +53,7 @@ const FINANCE_MARKERS: FinanceMarker[] = [
   "FINANCE_CONSULTANT_NOT_FOUND",
   "FINANCE_ADMIN_REQUIRED",
   "FINANCE_PAYOUT_ALREADY_OPEN",
+  "FINANCE_PAYOUT_METHOD_MISSING",
   "FINANCE_NO_AVAILABLE_EARNINGS",
   "FINANCE_BALANCE_NOT_POSITIVE",
   "FINANCE_PAYOUT_NOT_FOUND",
@@ -273,17 +275,34 @@ export type PayoutRequestRow = {
   requested_amount_minor: number;
   entry_count: number;
   requested_at: string;
+  /*
+   * Migration 039: "PayPal | email" or "Wise | email", built by
+   * the database from the consultant's saved payout setting and
+   * snapshotted onto the payout row. Returned so the consultant
+   * sees where the money is going in the same response that
+   * confirms the request.
+   */
+  destination_note: string;
 };
 
+/*
+ * Migration 039 removed p_destination_note from this RPC.
+ *
+ * The destination is no longer something a caller can pass — it
+ * is read from consultant_payout_settings inside the function and
+ * snapshotted onto the payout, exactly as the amount is summed
+ * from the ledger rather than accepted. There is therefore no
+ * argument here through which a wrong or forged destination could
+ * be supplied, and a consultant with no payout method configured
+ * is refused with FINANCE_PAYOUT_METHOD_MISSING.
+ */
 export const requestConsultantPayout =
   async ({
     consultantId,
     currency,
-    destinationNote,
   }: {
     consultantId: string;
     currency: string;
-    destinationNote: string | null;
   }): Promise<
     FinanceRpcResult<PayoutRequestRow>
   > =>
@@ -292,7 +311,6 @@ export const requestConsultantPayout =
       {
         p_consultant_id: consultantId,
         p_currency: currency,
-        p_destination_note: destinationNote,
       },
     );
 
