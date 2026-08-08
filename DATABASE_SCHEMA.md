@@ -711,6 +711,33 @@ The financial record of a service being paid for. **Deliberately not `service_re
 
 **No balance is stored anywhere.** A `security_invoker` view derives `pending`, `available`, `reserved`, `paid` and `lifetime` per consultant per currency, all coalesced to zero, never summed across currencies. `available` is defined as "not claimed by a payout in `requested`, `approved` or `paid`", so an allocation left behind on a cancelled request cannot hide a withdrawable earning.
 
+### `get_admin_revenue_by_source()` and `get_admin_dashboard_operations()` (migration 044)
+
+The `/admin` dashboard read model. Two admin-only `SECURITY DEFINER` functions, read directly by an administrator's Supabase client exactly as `get_admin_finance_kpis` is — there is no orchestrator dashboard endpoint. Both take four explicit period bounds and call no `now()`, so the same arguments always give the same answer.
+
+```sql
+get_admin_revenue_by_source(current_from, current_to, compare_from, compare_to)
+returns (period, currency, source_type,
+         gross_revenue_minor, platform_revenue_minor,
+         consultant_earnings_minor, reversals_minor, entry_count)
+```
+
+`period` is `current` | `comparison`; both come back in one call. Grouped by **currency and ledger `source_type`**, so consultation, service purchase and direct-booking revenue are separate rows of the same result. **Every** source type is returned — including `manual` adjustments — which is what makes the sum of the rows *be* the recorded total: a scoped KPI is a subset, not a second computation, so nothing can double-count. `direct_booking` returns no rows today; migration 034 admitted the source type before the feature existed, so it starts reporting with no change here.
+
+**`RECORDED REVENUE` IS NOT TOTAL COLLECTED REVENUE.** It aggregates `consultant_ledger_entries` only. An **unattributed** service purchase — no consultant to credit, or a service with no commission rate — creates a `service_purchases` row and **no ledger entry** (migration 040), so its gross appears in none of these figures. The UI must label the metric **"Recorded Revenue"**, never "Revenue". The gap is surfaced beside it: `get_admin_dashboard_operations` reports unattributed purchase gross per currency as an alert. Folding `service_purchases.gross_amount_minor` into this function would produce a larger number that double-counts every attributed sale and reconciles to nothing.
+
+```sql
+get_admin_dashboard_operations(current_from, current_to, compare_from, compare_to)
+```
+
+One row: booking counts for both periods (`consultations.created_at` in period, **`status <> 'draft'`** — a draft is an abandoned hold, and this counts bookings *created*, not consultations *completed*), active and new consultant counts, pending payout liability and available consultant earnings, and five alert categories with counts and ages.
+
+Per-currency figures are `jsonb` arrays of `{currency, amount_minor}`, ordered by currency and defaulting to `[]` rather than null — **never combined, never converted**. The two balances are deliberately not period-scoped: what is owed right now is a balance, not a flow.
+
+The five alerts, and only these five: consultations in `admin_attention`; payouts in `requested`/`approved`; service purchases still `paid` (money taken, nothing released); purchases with `attributed_consultant_id is null` (the recorded-revenue gap); and purchases with `0 < refunded_amount_minor < gross_amount_minor`. Ages use `updated_at` where the state is entered later than creation — and for partial refunds because `refunded_at` is set only on a *full* refund.
+
+An inactive consultant, a service with no commission rate, a consultant without Google or without working hours, and a long-open service request are all legitimate states in this system, so none is reported as needing attention.
+
 ### `get_admin_finance_kpis()` (migration 038)
 
 The admin finance **period** read model. PostgREST aggregates are disabled, so without it an admin finance screen would have to download up to 5,000 ledger rows into a browser and add them up — shipping every consultant's individual earning, every commission rate and every memo to the client, truncating at the page size, and inviting the browser to add two currencies together. Aggregates stay disabled; the totals are computed in the database and only the totals cross the wire.

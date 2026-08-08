@@ -415,6 +415,24 @@ Verification: `MIGRATION_043_VERIFICATION.sql`, 14 checks against PostgreSQL 16 
 
 ---
 
+## 9f. Admin dashboard read model — migration 044 **[D]**
+
+`/admin` can now answer "how is the business performing" and "what needs my attention" without downloading the ledger into a browser.
+
+- Two admin-only `SECURITY DEFINER` RPCs, read directly by the admin's Supabase client. **No orchestrator endpoint** — matches `get_admin_finance_kpis`. **[D]**
+- `get_admin_revenue_by_source` returns both periods in one call, grouped by currency and ledger source type. Sources sum to the recorded total, so a scoped KPI is a subset and nothing double-counts. **[D]**
+- **Recorded Revenue is ledger-derived and excludes unattributed service purchases**, whose gross is surfaced separately per currency as an alert. The UI must label it "Recorded Revenue", never "Revenue". **[D]**
+- `direct_booking` is supported and silent — migration 034 admitted the source type before the feature existed. Nothing is faked. **[D]**
+- Bookings count `created_at` in period excluding drafts, not consultations completed. **[D]**
+- Five alerts only: admin attention, pending payouts, paid-but-unfulfilled, unattributed purchases, partial refunds. Categories that are not unambiguously errors were deliberately excluded. **[D]**
+- Currencies never combined, no FX; per-currency figures are ordered jsonb arrays defaulting to `[]`. **[D]**
+
+Verification: `MIGRATION_044_VERIFICATION.sql`, 33 checks against PostgreSQL 16, with point-in-time figures asserted as deltas against a pre-fixture baseline so they hold on a database that already has real rows. Migrations 038–043 re-verified against the same database; `get_admin_finance_kpis` asserted unchanged. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Not done:** no frontend. The KPI cards, Action Required section, month-boundary helpers and mobile layout are a separate build in the frontend repo, which is not present in this workspace.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -526,7 +544,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 043
+- `supabase/migrations/` — migrations 001 through 044
 
 ---
 
