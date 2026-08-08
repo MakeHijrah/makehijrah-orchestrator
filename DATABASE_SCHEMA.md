@@ -637,6 +637,33 @@ The financial record of a service being paid for. **Deliberately not `service_re
 
 **No balance is stored anywhere.** A `security_invoker` view derives `pending`, `available`, `reserved`, `paid` and `lifetime` per consultant per currency, all coalesced to zero, never summed across currencies. `available` is defined as "not claimed by a payout in `requested`, `approved` or `paid`", so an allocation left behind on a cancelled request cannot hide a withdrawable earning.
 
+### `get_admin_finance_kpis()` (migration 038)
+
+The admin finance **period** read model. PostgREST aggregates are disabled, so without it an admin finance screen would have to download up to 5,000 ledger rows into a browser and add them up — shipping every consultant's individual earning, every commission rate and every memo to the client, truncating at the page size, and inviting the browser to add two currencies together. Aggregates stay disabled; the totals are computed in the database and only the totals cross the wire.
+
+```sql
+get_admin_finance_kpis(p_from timestamptz, p_to timestamptz)
+returns table (
+  currency                   text,
+  gross_revenue_minor        bigint,
+  platform_revenue_minor     bigint,
+  consultant_earnings_minor  bigint,
+  reversals_minor            bigint,
+  adjustments_minor          bigint,
+  ledger_entry_count         bigint
+)
+```
+
+One row **per currency**, never summed across them and never converted. The period is **half-open**, `created_at >= p_from and created_at < p_to`, so consecutive periods tile exactly. `created_at` is the period column, not `available_at`: this answers "what did this window transact", which is a different question from "what can be withdrawn now".
+
+**The three revenue figures are NET.** They sum every entry in the period whatever its type, so a reversal — negative on all three columns by `ledger_sign_check` — reduces them, and an adjustment moves them by its signed amount. Because `consultant + platform = gross` holds on every row it holds on the totals, so a screen showing all three can never display figures that do not add up. `reversals_minor` and `adjustments_minor` break out those two **components of the same sums** for a refunds tile; they are not a further deduction to apply. The earnings-only reading is exact arithmetic on the client: `gross_revenue_minor - reversals_minor - adjustments_minor`.
+
+**`SECURITY DEFINER`, admin only.** It raises `insufficient_privilege` (42501 → HTTP 403) unless `is_admin()` holds for the calling JWT, so a consultant and a client both get nothing; identity cannot be supplied, only proved. `EXECUTE` is revoked from `PUBLIC`, `anon` and `service_role`, and granted to `authenticated` — the caller is an admin's browser, `authenticated` is the door and `is_admin()` is the lock. Bypassing the ledger RLS is safe because the function has **no row-returning path**: it aggregates before it returns, and its entire parameter surface is two timestamps, so no ledger row, consultant id, commission rate, memo or source id is reachable through any argument.
+
+**Point-in-time balances are deliberately not duplicated here.** `available`, `reserved` and `pending` stay on `consultant_balances`. A period sum and a current balance are not the same figure and must not be produced by the same function.
+
+Migration 038 also adds `idx_ledger_created_at`, since migration 034's indexes all serve per-consultant questions and a finance period is a range over the whole table. No table, column, constraint, trigger or policy changed.
+
 ### Access
 
 | Table | consultant | admin | client | writes |
