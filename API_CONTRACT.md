@@ -551,11 +551,12 @@ Every refusal is the **same `404 NOT_FOUND`**. Unknown service, unknown consulta
 
 Rate limit: 60 / minute. No path parameter, no query, no body — `me` is the entire parameter surface, so a client cannot ask for anybody else's purchases and there is no field a later edit could start trusting. The caller's `client_profile_id` is resolved from the bearer token.
 
-Response `data.purchases[]`, newest first, **exactly these ten fields**:
+Response `data.purchases[]`, newest first, **exactly these eleven fields**:
 
 ```json
 {
-  "id": "…", "service_id": "…", "consultation_id": "… | null",
+  "id": "…", "service_id": "…", "service_name": "Visa Pack",
+  "consultation_id": "… | null",
   "status": "paid | fulfilled | refunded | cancelled",
   "gross_amount_minor": 9999, "currency": "usd",
   "purchased_at": "2026-08-01T10:00:00.000Z",
@@ -564,6 +565,8 @@ Response `data.purchases[]`, newest first, **exactly these ten fields**:
   "billing_period_sequence": 1
 }
 ```
+
+`service_name` is the service's **current** name, resolved in a **single batched read** of `services` selecting only `id, name` — never one query per purchase, and the id list is de-duplicated so a subscription's many renewal rows ask once. Read with the service role, so a **deactivated** service still names itself: withdrawing a catalogue entry must not take away the name of something already bought. No other service field travels through this endpoint — not the description, price, Stripe identifiers, commission rate or post-purchase instructions.
 
 **Never returned:** `attributed_consultant_id`, `refunded_amount_minor`, any `stripe_*` identifier, `stripe_mode`, `service_request_id`, `client_profile_id`, or any ledger, commission, platform-revenue or payout data. The projection is an explicit column list, so a column added to `service_purchases` later is invisible here until somebody deliberately adds it.
 

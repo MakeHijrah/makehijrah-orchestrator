@@ -27,6 +27,19 @@ import { supabaseAdmin } from "../../lib/supabase.js";
 export type ClientServicePurchase = {
   id: string;
   service_id: string;
+  /*
+   * The service's CURRENT name, resolved with the service role so
+   * a deactivated service still names itself — a client who bought
+   * something must be able to see what it was called, whether or
+   * not it is still on sale.
+   *
+   * Nullable defensively only. service_purchases.service_id is NOT
+   * NULL and references services(id), so an unresolvable name is
+   * unreachable through any supported path; null here would mean
+   * the foreign key had been violated, and reporting that honestly
+   * beats inventing an empty string.
+   */
+  service_name: string | null;
   consultation_id: string | null;
   status: string;
   gross_amount_minor: number;
@@ -133,9 +146,80 @@ export const listServicePurchasesForClient =
       };
     }
 
+    const purchases = (data ?? []) as unknown as Array<
+      Omit<ClientServicePurchase, "service_name">
+    >;
+
+    if (purchases.length === 0) {
+      return { ok: true, purchases: [] };
+    }
+
+    /*
+     * ONE query for every name, not one per purchase.
+     *
+     * The ids are de-duplicated first, which matters more than it
+     * looks: a recurring service produces a purchase row per
+     * renewal, so a client with a two-year subscription has 24
+     * rows naming the same service. Without the Set this would ask
+     * for the same name 24 times in one `in` list.
+     *
+     * Read with the service role, so a DEACTIVATED service still
+     * resolves. services_select_active would hide it from the
+     * client's own session; the name of something they bought is
+     * not something deactivating the catalogue entry should take
+     * away.
+     */
+    const serviceIds = [
+      ...new Set(
+        purchases.map((row) => row.service_id),
+      ),
+    ];
+
+    const { data: serviceData, error: serviceError } =
+      await supabaseAdmin
+        .from("services")
+        .select("id, name")
+        .in("id", serviceIds);
+
+    if (serviceError) {
+      console.error(
+        "Service name lookup failed for client purchases",
+        {
+          clientProfileId,
+          code: serviceError.code,
+          message: serviceError.message,
+        },
+      );
+
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "Your service purchases could not be loaded.",
+      };
+    }
+
+    /*
+     * Only id and name are selected. Nothing else about a service
+     * — not its description, its price, its Stripe identifiers,
+     * its commission rate or its post-purchase instructions —
+     * travels through this endpoint.
+     */
+    const names = new Map<string, string>(
+      (
+        (serviceData ?? []) as unknown as Array<{
+          id: string;
+          name: string;
+        }>
+      ).map((service) => [service.id, service.name]),
+    );
+
     return {
       ok: true,
-      purchases: (data ??
-        []) as unknown as ClientServicePurchase[],
+      purchases: purchases.map((row) => ({
+        ...row,
+        service_name:
+          names.get(row.service_id) ?? null,
+      })),
     };
   };

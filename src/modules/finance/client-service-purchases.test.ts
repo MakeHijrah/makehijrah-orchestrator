@@ -53,6 +53,7 @@ const ADMIN_PROFILE = "33333333-3333-4333-8333-333333333333";
 
 const CONSULTANT_ID = "44444444-4444-4444-8444-444444444444";
 const SERVICE_ID = "55555555-5555-4555-8555-555555555555";
+const RETIRED_SERVICE_ID = "5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a";
 const CONSULTATION_ID = "66666666-6666-4666-8666-666666666666";
 
 /* Values that must NEVER reach a client. Each is distinctive so a
@@ -64,10 +65,22 @@ const SECRET_SUBSCRIPTION = "sub_secret_leak_marker";
 
 type Row = Record<string, unknown>;
 
-const db: { profiles: Row[]; service_purchases: Row[] } = {
+const db: {
+  profiles: Row[];
+  service_purchases: Row[];
+  services: Row[];
+} = {
   profiles: [],
   service_purchases: [],
+  services: [],
 };
+
+/*
+ * Every table read, in order, so "no N+1" can be ASSERTED rather
+ * than reasoned about. A regression that resolved names one row at
+ * a time would show up here as N services reads instead of one.
+ */
+const queryLog: Array<{ table: string; columns: string }> = [];
 
 /*
  * The fake honours the SELECT column list, exactly as PostgREST
@@ -84,6 +97,7 @@ class FakeQuery {
     ascending: boolean;
   }> = [];
   private max: number | null = null;
+  public inValues: unknown[] | null = null;
 
   constructor(table: string) {
     this.table = table;
@@ -95,11 +109,27 @@ class FakeQuery {
       .map((column) => column.trim())
       .filter(Boolean);
 
+    queryLog.push({
+      table: this.table,
+      columns: columns ?? "",
+    });
+
     return this;
   }
 
   eq(column: string, value: unknown): this {
     this.filters.push((row) => row[column] === value);
+    return this;
+  }
+
+  in(column: string, values: unknown[]): this {
+    this.filters.push((row) =>
+      values.includes(row[column]),
+    );
+
+    /* Remembered so a test can assert the batch was de-duplicated. */
+    this.inValues = values;
+
     return this;
   }
 
@@ -185,8 +215,17 @@ class FakeQuery {
   }
 }
 
-supabaseAdmin.from = ((table: string) =>
-  new FakeQuery(table)) as unknown as typeof supabaseAdmin.from;
+let lastServicesQuery: FakeQuery | null = null;
+
+supabaseAdmin.from = ((table: string) => {
+  const query = new FakeQuery(table);
+
+  if (table === "services") {
+    lastServicesQuery = query;
+  }
+
+  return query;
+}) as unknown as typeof supabaseAdmin.from;
 
 supabaseAdmin.auth = {
   getUser: async (token: string) => {
@@ -277,6 +316,18 @@ beforeEach(() => {
   ];
 
   db.service_purchases = [];
+
+  db.services = [
+    { id: SERVICE_ID, name: "Visa Pack", is_active: true },
+    {
+      id: RETIRED_SERVICE_ID,
+      name: "Retired Relocation Pack",
+      is_active: false,
+    },
+  ];
+
+  queryLog.length = 0;
+  lastServicesQuery = null;
 });
 
 describe("Client service purchases: scoping", () => {
@@ -455,7 +506,7 @@ describe("Client service purchases: authorization", () => {
 });
 
 describe("Client service purchases: privacy of the projection", () => {
-  it("returns exactly the ten approved fields", async () => {
+  it("returns exactly the eleven approved fields", async () => {
     db.service_purchases = [purchase()];
 
     const row = (await get(CLIENT_PROFILE)).json().data!
@@ -473,6 +524,7 @@ describe("Client service purchases: privacy of the projection", () => {
         "purchased_at",
         "recurring_interval",
         "service_id",
+        "service_name",
         "status",
       ],
       "the projection is the only thing standing between a client and the finance row",
@@ -538,6 +590,170 @@ describe("Client service purchases: privacy of the projection", () => {
     assert.ok(
       !response.raw.includes("client_profile_id"),
       "the caller already knows who they are; echoing it back widens the surface for nothing",
+    );
+  });
+});
+
+describe("Client service purchases: service name", () => {
+  it("returns the service name alongside the purchase", async () => {
+    db.service_purchases = [purchase()];
+
+    const row = (await get(CLIENT_PROFILE)).json().data!
+      .purchases[0]!;
+
+    assert.equal(row.service_name, "Visa Pack");
+    assert.equal(row.service_id, SERVICE_ID);
+  });
+
+  it("still names a deactivated service", async () => {
+    db.service_purchases = [
+      purchase({ service_id: RETIRED_SERVICE_ID }),
+    ];
+
+    const row = (await get(CLIENT_PROFILE)).json().data!
+      .purchases[0]!;
+
+    assert.equal(
+      row.service_name,
+      "Retired Relocation Pack",
+      "withdrawing a catalogue entry must not take away the name of something already bought",
+    );
+  });
+
+  it("resolves names for many purchases in ONE services read", async () => {
+    db.service_purchases = Array.from(
+      { length: 12 },
+      (_unused, index) =>
+        purchase({
+          id: `99999999-9999-4999-8999-${String(
+            index + 1,
+          ).padStart(12, "0")}`,
+          service_id:
+            index % 2 === 0
+              ? SERVICE_ID
+              : RETIRED_SERVICE_ID,
+          purchased_at: `2026-08-${String(
+            index + 1,
+          ).padStart(2, "0")}T10:00:00.000Z`,
+        }),
+    );
+
+    const purchases = (
+      await get(CLIENT_PROFILE)
+    ).json().data!.purchases;
+
+    assert.equal(purchases.length, 12);
+
+    for (const row of purchases) {
+      assert.ok(
+        row.service_name === "Visa Pack" ||
+          row.service_name === "Retired Relocation Pack",
+        `unresolved name: ${String(row.service_name)}`,
+      );
+    }
+
+    const serviceReads = queryLog.filter(
+      (entry) => entry.table === "services",
+    );
+
+    assert.equal(
+      serviceReads.length,
+      1,
+      "twelve purchases must not become twelve service reads",
+    );
+
+    assert.deepEqual(
+      [...(lastServicesQuery!.inValues ?? [])].sort(),
+      [RETIRED_SERVICE_ID, SERVICE_ID].sort(),
+      "the batch must be de-duplicated; a recurring service repeats its id on every renewal row",
+    );
+  });
+
+  it("makes no services read at all when there are no purchases", async () => {
+    const response = await get(CLIENT_PROFILE);
+
+    assert.deepEqual(
+      response.json().data!.purchases,
+      [],
+    );
+
+    assert.equal(
+      queryLog.filter(
+        (entry) => entry.table === "services",
+      ).length,
+      0,
+      "there are no names to resolve, so nothing should be asked for",
+    );
+  });
+
+  it("selects only id and name from services", async () => {
+    db.service_purchases = [purchase()];
+
+    await get(CLIENT_PROFILE);
+
+    const serviceRead = queryLog.find(
+      (entry) => entry.table === "services",
+    )!;
+
+    assert.equal(
+      serviceRead.columns.replace(/\s/g, ""),
+      "id,name",
+      "no description, price, commission, Stripe identifier or post-purchase instructions may be read here",
+    );
+  });
+
+  it("leaks nothing else about the service", async () => {
+    db.services = [
+      {
+        id: SERVICE_ID,
+        name: "Visa Pack",
+        is_active: true,
+        description: "SECRET_SERVICE_DESCRIPTION",
+        consultant_commission_bps: 4_500,
+        post_purchase_instructions_html:
+          "<p>SECRET_INSTRUCTIONS</p>",
+        stripe_price_id: "price_secret_leak_marker",
+      },
+    ];
+
+    db.service_purchases = [purchase()];
+
+    const response = await get(CLIENT_PROFILE);
+
+    for (const secret of [
+      "SECRET_SERVICE_DESCRIPTION",
+      "SECRET_INSTRUCTIONS",
+      "price_secret_leak_marker",
+      "commission",
+      "4500",
+    ]) {
+      assert.ok(
+        !response.raw.includes(secret),
+        `${secret} leaked through the service name lookup`,
+      );
+    }
+
+    assert.ok(response.raw.includes("Visa Pack"));
+  });
+
+  it("excludes another client's purchase and its service name", async () => {
+    db.service_purchases = [
+      purchase(),
+      purchase({
+        id: "99999999-9999-4999-8999-000000000002",
+        client_profile_id: OTHER_CLIENT_PROFILE,
+        service_id: RETIRED_SERVICE_ID,
+      }),
+    ];
+
+    const response = await get(CLIENT_PROFILE);
+    const purchases = response.json().data!.purchases;
+
+    assert.equal(purchases.length, 1);
+    assert.equal(purchases[0]!.service_name, "Visa Pack");
+    assert.ok(
+      !response.raw.includes("Retired Relocation Pack"),
+      "another client's service must not be named either",
     );
   });
 });
