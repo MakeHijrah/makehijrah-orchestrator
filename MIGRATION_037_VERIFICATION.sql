@@ -244,7 +244,7 @@ begin
   values (v_cpr, 'Africa/Cairo') returning id into v_con;
 
   insert into public.countries (name, iso_code)
-  values ('ZZ V37 Country', 'QA') returning id into v_country;
+  values ('ZZ V37 Country', 'XZ') returning id into v_country;
 
   insert into public.consultations
     (client_profile_id, consultant_id, country_id, status,
