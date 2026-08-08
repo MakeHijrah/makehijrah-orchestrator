@@ -292,6 +292,7 @@ declare
   v_con uuid;
   v_oth uuid;
   v_consultation uuid;
+  v_consultation_2 uuid;
   v_other_consultation uuid;
   v_svc uuid;
   v_svc_null uuid;
@@ -324,10 +325,47 @@ begin
   insert into public.consultants (profile_id, timezone, is_active)
   values (v_opr, 'Africa/Cairo', true) returning id into v_oth;
 
-  insert into public.consultations (client_profile_id, consultant_id)
-  values (v_clp, v_con) returning id into v_consultation;
-  insert into public.consultations (client_profile_id, consultant_id)
-  values (v_olp, v_oth) returning id into v_other_consultation;
+  insert into public.consultations (
+    client_profile_id,
+    consultant_id,
+    scheduled_start_at,
+    scheduled_end_at,
+    price_cents)
+  values (
+    v_clp,
+    v_con,
+    now() + interval '1 day',
+    now() + interval '1 day 1 hour',
+    15000)
+  returning id into v_consultation;
+
+  insert into public.consultations (
+    client_profile_id,
+    consultant_id,
+    scheduled_start_at,
+    scheduled_end_at,
+    price_cents)
+  values (
+    v_clp,
+    v_con,
+    now() + interval '1 day 2 hours',
+    now() + interval '1 day 3 hours',
+    15000)
+  returning id into v_consultation_2;
+
+  insert into public.consultations (
+    client_profile_id,
+    consultant_id,
+    scheduled_start_at,
+    scheduled_end_at,
+    price_cents)
+  values (
+    v_olp,
+    v_oth,
+    now() + interval '2 days',
+    now() + interval '2 days 1 hour',
+    15000)
+  returning id into v_other_consultation;
 
   /* 4500 bps on an odd gross, to exercise the rounding rule. */
   insert into public.services (
@@ -362,13 +400,23 @@ begin
           3000, true)
   returning id into v_svc_sub;
 
-  /* Every service recommended to our client, and sent. */
+  /* Every service recommended to our client, and sent.
+     The schema enforces a maximum of 3 recommendations per consultation,
+     so split the five service fixtures across two consultations for the
+     same client and consultant. */
   insert into public.service_recommendations (
     consultation_id, service_id, recommended_by_consultant_id,
     status, sent_by_admin_id, sent_at)
   select v_consultation, s, v_con, 'sent', v_admin, now()
     from unnest(array[
-      v_svc, v_svc_null, v_svc_zero, v_svc_eur, v_svc_sub]) as s;
+      v_svc, v_svc_null, v_svc_zero]) as s;
+
+  insert into public.service_recommendations (
+    consultation_id, service_id, recommended_by_consultant_id,
+    status, sent_by_admin_id, sent_at)
+  select v_consultation_2, s, v_con, 'sent', v_admin, now()
+    from unnest(array[
+      v_svc_eur, v_svc_sub]) as s;
 
   /* The other consultant recommended the SAME service to the
      other client. Attribution must not cross between them. */
@@ -911,11 +959,11 @@ begin
     insert into public.service_purchases (
       service_id, client_profile_id, gross_amount_minor, currency,
       billing_type, recurring_interval, billing_period_sequence,
-      status, stripe_subscription_id, stripe_invoice_id)
+      status, stripe_mode, stripe_subscription_id, stripe_invoice_id)
     values (
       current_setting('app.v40_svc_sub')::uuid,
       current_setting('app.v40_clp')::uuid, 20000, 'usd',
-      'recurring', 'month', 2, 'paid', 'sub_v40', 'in_v40_dupe');
+      'recurring', 'month', 2, 'paid', 'test', 'sub_v40', 'in_v40_dupe');
     raise exception
       'VERIFICATION FAILED 17: a second purchase claimed period 2 of the same subscription';
   exception when unique_violation then
@@ -1107,9 +1155,40 @@ declare
   r record;
 begin
   /* Pay out the renewal earning, then refund that period. */
+  /* First fulfil this subscription period so its earning is genuinely
+     available. The payout allocation trigger correctly refuses pending
+     ledger entries, so availability must precede allocation. */
+  perform public.fulfill_service_purchase(
+    current_setting('app.v40_sub_purchase')::uuid,
+    current_setting('app.v40_admin')::uuid);
+
+  if (
+    select available_at is null
+      from public.consultant_ledger_entries
+     where source_id = current_setting('app.v40_sub_purchase')::uuid
+       and entry_type = 'earning'
+     limit 1
+  ) then
+    raise exception
+      'VERIFICATION FAILED 22: subscription earning was not available before payout allocation';
+  end if;
+
+  /* Build the payout through the legal lifecycle:
+     available earning -> requested payout -> allocation -> approved -> paid. */
   insert into public.payouts (
-    consultant_id, status, currency, requested_amount_minor)
-  values (current_setting('app.v40_con')::uuid, 'paid', 'usd', 6000)
+    consultant_id,
+    status,
+    currency,
+    requested_amount_minor,
+    destination_note,
+    requested_at)
+  values (
+    current_setting('app.v40_con')::uuid,
+    'requested',
+    'usd',
+    6000,
+    'Wise | v40-consultant@verification.invalid',
+    now() - interval '3 minutes')
   returning id into v_payout;
 
   insert into public.payout_allocations (payout_id, ledger_entry_id)
@@ -1118,10 +1197,20 @@ begin
    where e.source_id = current_setting('app.v40_sub_purchase')::uuid
      and e.entry_type = 'earning';
 
-  /* Release it first so it is a genuinely paid-out earning. */
-  perform public.fulfill_service_purchase(
-    current_setting('app.v40_sub_purchase')::uuid,
-    current_setting('app.v40_admin')::uuid);
+  update public.payouts
+     set status = 'approved',
+         approved_at = now() - interval '2 minutes',
+         decided_by_admin_profile_id =
+           current_setting('app.v40_admin')::uuid,
+         admin_note = 'migration 040 verification fixture'
+   where id = v_payout;
+
+  update public.payouts
+     set status = 'paid',
+         paid_amount_minor = 6000,
+         external_reference = 'V40-PAID-REF-001',
+         paid_at = now() - interval '1 minute'
+   where id = v_payout;
 
   select * into r
     from public.reverse_service_purchase_earning(

@@ -597,6 +597,7 @@ consultation_intake (own/assigned)               → consultant pre-call view
 consultation_notes (own consultant)              → notes UI (writes via RLS too)
 service_recommendations                          → per-role filtered views (consultant inserts 'proposed' via RLS)
 services, giveaways (active)                     → catalogs
+admin_services (admin only)                      → admin service catalog
 service_requests (own / admin)                   → dashboards
 messages (participant)                           → consultation room, 30s polling
 profiles (own)                                   → account settings

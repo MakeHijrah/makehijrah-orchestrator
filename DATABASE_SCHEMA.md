@@ -380,7 +380,26 @@ create unique index services_stripe_payment_link_id_key
 
 **Writes:** `authenticated` has `SELECT` only on this table. Every insert, update and delete is performed by the orchestrator under the service role. See `RLS_POLICY_PLAN.md` §2 and `API_CONTRACT.md` §3.
 
-Service purchases made through a Stripe Payment Link are **not** recorded in this database in the current scope — no row in `payments`, no automatic `service_requests` row. Stripe is the temporary source of truth for service purchases and subscriptions.
+~~Service purchases made through a Stripe Payment Link are **not** recorded in this database in the current scope.~~ **Superseded by Amendment 009 (migration 040):** service purchases are now recorded in `service_purchases` and earn consultant commission. `payments` is still not written for them, and `service_requests` remains admin-created. See §20.
+
+### `admin_services` (view, migration 041)
+
+The administrator projection of the catalog — every column of `services` that the admin endpoints return, **plus `consultant_commission_bps`**.
+
+It exists because of a shape problem, not a policy one. `consultant_commission_bps` is withheld from every authenticated caller by a **column** privilege (migration 034 part E), and Supabase has exactly one logged-in database role: an administrator is an `authenticated` user distinguished only by `profiles.role`. RLS can see that distinction through `is_admin()`; a column privilege cannot. There is no `GRANT` that means "this column, but only for admins", so the Admin Services page selecting the rate got `403 Forbidden` — correctly.
+
+```sql
+create view admin_services with (security_barrier = true) as
+select s.id, …, s.consultant_commission_bps
+from services s
+where is_admin();
+```
+
+**Deliberately not `security_invoker`** — that would apply the caller's own column privileges and reproduce the same 403. As an ordinary view it executes as its owner, which is the same mechanism `get_admin_finance_kpis` (migration 038) uses to aggregate a ledger its callers cannot read. `consultant_balances` *is* `security_invoker`, and the difference is intentional: there the ledger's RLS is the access rule and must be evaluated per caller; here the rule is "are you an administrator", stated once in the `WHERE`. `security_barrier` stops a caller-supplied predicate being pushed below that gate.
+
+`SELECT` is granted to `authenticated` and to nobody else — the grant is the door, `is_admin()` is the lock, and a client or consultant reading it gets **zero rows**, not a filtered subset. `anon`, `PUBLIC` and `service_role` hold nothing. Every other privilege is revoked first, which matters: this is a simple view over one table and is therefore **auto-updatable**, so the default `GRANT ALL` would otherwise have made it a write path into `services` that bypassed the admin endpoints entirely.
+
+Inactive services are included, which an admin managing a catalog needs and `services_select_active` exists to hide from clients. **`public.services` itself is completely unchanged** — no grant, no column list, no policy — so every public and client selector reads exactly what it read before.
 
 ---
 
@@ -748,7 +767,7 @@ Returns null for any unknown method or blank address, so one null test answers "
 
 RLS on, exactly one `SELECT` policy each, no write policy anywhere. `anon` holds no privilege at all; `authenticated` holds `SELECT` only. The client's exclusion is structural — no policy on any finance table names `client_profile_id`, so there is no clause to loosen by accident. `service_purchases.client_profile_id` is attribution data, not an access key.
 
-**`services.consultant_commission_bps` is hidden by column privilege**, because `services_select_active` is readable by every authenticated user and RLS filters rows, not columns. Migration 034 replaces the table-level `SELECT` grant with an explicit column list that omits it. A future migration adding a client-visible column to `services` **must grant it explicitly** — the list fails closed.
+**`services.consultant_commission_bps` is hidden by column privilege**, because `services_select_active` is readable by every authenticated user and RLS filters rows, not columns. Migration 034 replaces the table-level `SELECT` grant with an explicit column list that omits it. A future migration adding a client-visible column to `services` **must grant it explicitly** — the list fails closed. An administrator reads the rate through `public.admin_services` (migration 041) — see §10.
 
 ---
 
