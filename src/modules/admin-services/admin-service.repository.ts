@@ -42,6 +42,15 @@ export const SERVICE_COLUMNS =
      * goes through RLS and the column grant, which still omits it.
      */
     "consultant_commission_bps",
+    /*
+     * Migration 042. Private delivery content, on the same footing
+     * as the commission: hidden from every authenticated caller by
+     * the base table's column list, readable here because this
+     * projection is the ADMIN one and is read with the service
+     * role. Returned so the WYSIWYG editor can round-trip the
+     * stored, already-sanitized HTML.
+     */
+    "post_purchase_instructions_html",
   ].join(", ");
 
 export type ServiceRow = {
@@ -65,6 +74,9 @@ export type ServiceRow = {
   stripe_price_id: string | null;
   consultant_commission_bps:
     | number
+    | null;
+  post_purchase_instructions_html:
+    | string
     | null;
   stripe_payment_link_id:
     | string
@@ -184,12 +196,14 @@ export const insertService = async ({
   description,
   sortOrder,
   consultantCommissionBps,
+  postPurchaseInstructionsHtml,
 }: {
   serviceId: string;
   name: string;
   description: string | null;
   sortOrder: number | null;
   consultantCommissionBps: number | null;
+  postPurchaseInstructionsHtml: string | null;
 }): Promise<
   RepositoryResult<ServiceRow>
 > => {
@@ -207,6 +221,8 @@ export const insertService = async ({
             }),
         consultant_commission_bps:
           consultantCommissionBps,
+        post_purchase_instructions_html:
+          postPurchaseInstructionsHtml,
         is_active: false,
       })
       .select(SERVICE_COLUMNS)
@@ -245,6 +261,7 @@ export const updateDescriptiveFields =
     description,
     sortOrder,
     consultantCommissionBps,
+    postPurchaseInstructionsHtml,
   }: {
     serviceId: string;
     name?: string;
@@ -252,6 +269,9 @@ export const updateDescriptiveFields =
     sortOrder?: number;
     consultantCommissionBps?:
       | number
+      | null;
+    postPurchaseInstructionsHtml?:
+      | string
       | null;
   }): Promise<
     RepositoryResult<null>
@@ -285,6 +305,20 @@ export const updateDescriptiveFields =
     ) {
       patch.consultant_commission_bps =
         consultantCommissionBps;
+    }
+
+    /*
+     * Same three-state rule: undefined leaves the stored
+     * instructions alone, null clears them. The value arriving
+     * here has already been through the sanitizer — the
+     * repository writes what it is given and validates nothing.
+     */
+    if (
+      postPurchaseInstructionsHtml !==
+      undefined
+    ) {
+      patch.post_purchase_instructions_html =
+        postPurchaseInstructionsHtml;
     }
 
     if (

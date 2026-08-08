@@ -2158,3 +2158,170 @@ describe("admin services: price_display", () => {
     );
   });
 });
+
+/*
+ * Migration 042. Private post-purchase delivery instructions.
+ *
+ * The admin catalog is the only supported way this column is
+ * written, and everything that reaches it goes through the
+ * sanitizer first — so these tests are as much about the boundary
+ * as about the field. src/lib/html-sanitizer.test.ts covers the
+ * allowlist itself; what is asserted here is that the admin path
+ * actually uses it.
+ */
+describe("admin services: post-purchase instructions", () => {
+  beforeEach(installStubs);
+
+  it("stores sanitized instructions on create", async () => {
+    const response = await createPriced(KEY_A, {
+      ...PRICED,
+      post_purchase_instructions_html:
+        '<p>Welcome</p><script>alert(1)</script>' +
+        '<a href="https://example.test" onclick="alert(1)">Book</a>',
+    });
+
+    assert.equal(response.statusCode, 200);
+
+    const stored = String(
+      (response.body.data?.service as Row)
+        .post_purchase_instructions_html,
+    );
+
+    assert.ok(stored.includes("Welcome"));
+    assert.ok(!/script/i.test(stored));
+    assert.ok(!/onclick/i.test(stored));
+    assert.ok(stored.includes('href="https://example.test"'));
+    assert.ok(
+      stored.includes('rel="noopener noreferrer nofollow"'),
+      "link hardening must be applied on the admin write path, not only in the sanitizer unit tests",
+    );
+  });
+
+  it("stores sanitized instructions on patch", async () => {
+    seedPricedActive();
+
+    const response = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: {
+        post_purchase_instructions_html:
+          '<h2>Steps</h2><iframe src="https://evil.test"></iframe><p>One</p>',
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+
+    const stored = String(
+      (response.body.data?.service as Row)
+        .post_purchase_instructions_html,
+    );
+
+    assert.ok(stored.includes("<h2>Steps</h2>"));
+    assert.ok(stored.includes("One"));
+    assert.ok(!/iframe/i.test(stored));
+    assert.ok(!stored.includes("evil.test"));
+  });
+
+  it("clears the instructions when null is sent", async () => {
+    seedPricedActive({
+      post_purchase_instructions_html: "<p>Existing</p>",
+    });
+
+    const response = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: { post_purchase_instructions_html: null },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      (response.body.data?.service as Row)
+        .post_purchase_instructions_html,
+      null,
+    );
+  });
+
+  it("leaves the instructions untouched when the field is absent", async () => {
+    seedPricedActive({
+      post_purchase_instructions_html: "<p>Existing</p>",
+    });
+
+    const response = await request({
+      method: "PATCH",
+      url: `/api/admin/services/${SERVICE_ID}`,
+      body: { name: "Renamed" },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      (response.body.data?.service as Row)
+        .post_purchase_instructions_html,
+      "<p>Existing</p>",
+      "undefined means unchanged; only null clears",
+    );
+  });
+
+  it("stores null when the content sanitizes away to nothing", async () => {
+    const response = await createPriced(KEY_A, {
+      ...PRICED,
+      post_purchase_instructions_html:
+        "<script>alert(1)</script><style>body{}</style>",
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      (response.body.data?.service as Row)
+        .post_purchase_instructions_html,
+      null,
+      "markup with no readable content is the same state as no instructions at all",
+    );
+  });
+
+  it("refuses an excessive raw payload", async () => {
+    const response = await createPriced(KEY_A, {
+      ...PRICED,
+      post_purchase_instructions_html: "x".repeat(50_001),
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(
+      response.body.error?.code,
+      "VALIDATION_ERROR",
+    );
+  });
+
+  it("refuses content that is still too long once sanitized", async () => {
+    /* Survives the raw bound, exceeds the stored bound. */
+    const response = await createPriced(KEY_A, {
+      ...PRICED,
+      post_purchase_instructions_html:
+        `<p>${"x".repeat(30_000)}</p>`,
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(
+      response.body.error?.code,
+      "VALIDATION_ERROR",
+    );
+  });
+
+  it("refuses a non-admin", async () => {
+    for (const token of [
+      "client-token",
+      "consultant-token",
+    ]) {
+      const response = await request({
+        method: "POST",
+        url: "/api/admin/services",
+        idempotencyKey: KEY_A,
+        token,
+        body: {
+          ...PRICED,
+          post_purchase_instructions_html: "<p>x</p>",
+        },
+      });
+
+      assert.equal(response.statusCode, 403);
+    }
+  });
+});

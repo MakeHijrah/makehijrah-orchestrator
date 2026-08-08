@@ -451,6 +451,20 @@ Errors: `INVALID_TRANSITION` (409, service is referenced), `NOT_FOUND`, `FORBIDD
 
 `payment_intent.succeeded` **still** produces `{ "ignored": true, "reason": "non_consultation_event" }` for a service payment. That is deliberate and load-bearing: a one-time service payment emits both it and `checkout.session.completed`, and only the latter creates a purchase. Acting on both would produce two financial records for one payment.
 
+### Post-purchase instructions on a service — Amendment 010, migration 042
+
+`POST`/`PATCH /api/admin/services` also accept:
+
+```json
+{ "post_purchase_instructions_html": "<p>Book your onboarding call <a href=\"https://…\">here</a>.</p>" }
+```
+
+**Private delivery content** — onboarding steps, download URLs, booking URLs, contact routes — shown to a client only after they have paid. Nullable; `undefined` leaves it unchanged, `null` clears it. Raw payloads above ~50,000 characters are refused; the value is **sanitized before storage** and the sanitized result must be ≤ 20,000 characters.
+
+Sanitization uses one strict allowlist: tags `p br strong em b i u ul ol li h2 h3 a`; attributes `href` and `title` on `a` only; schemes `http https mailto`. Every surviving link is rewritten with `rel="noopener noreferrer nofollow" target="_blank"`, overwriting anything the author supplied. `script`, `style`, `iframe`, `object`, `embed`, `form`, event handlers and `javascript:`/`data:`/`vbscript:` URLs are discarded. Content that sanitizes away to nothing is stored as `null`.
+
+The admin projection returns the stored, already-sanitized HTML so a WYSIWYG editor can round-trip it. The column is **never** granted on `public.services` to `anon` or `authenticated`; an admin reads it through `admin_services`, a client through §3d.
+
 ### Commission rate on a service
 
 `POST /api/admin/services` and `PATCH /api/admin/services/:id` additionally accept:
@@ -501,6 +515,52 @@ Errors: `404 NOT_FOUND`, `409 INVALID_TRANSITION` (only a paid purchase may be f
 A subscription-mode `checkout.session.completed` creates **nothing**; its first invoice does. The webhook response gains `service_purchase_action` and `service_purchase_id`, both `null` on every consultation event.
 
 **Amendment 004 §10.3.3 is reaffirmed:** the webhook path still makes RPC calls only and reads no table directly. Every lookup — service by payment link or price, the subscription's prior purchase, the purchase behind a refunded PaymentIntent — happens inside a `SECURITY DEFINER` function.
+
+---
+
+## 3d. Post-purchase service instructions — Amendment 010, migration 042
+
+### `GET /api/consultations/:consultationId/services/:serviceId/instructions` — client
+
+Rate limit: 60 / minute. Optional query: `session_id=<Stripe Checkout Session id>`.
+
+Response `data` — **exactly these three fields**:
+
+```json
+{ "service_id": "…", "service_name": "Visa Pack", "post_purchase_instructions_html": "<p>…</p>" }
+```
+
+No price, no Stripe identifier, no commission, no purchase, no consultant. `post_purchase_instructions_html` is `null` when the admin has written none — a `200`, not a `404`.
+
+**Authorization.** All of:
+
+1. authenticated role `client` — consultants and admins are refused (an admin reads `admin_services`);
+2. `consultations.client_profile_id` is the caller's own profile;
+3. the service is associated with that consultation, through a **sent** recommendation **or** a recorded purchase;
+4. **and payment is proved**, by either
+   - a `service_purchases` row matching service, client **and** consultation in status `paid`, `fulfilled` or `refunded`; or
+   - a Checkout Session named by `session_id`, retrieved **server-side** and verified: it exists, `livemode` matches the environment, `payment_status = 'paid'`, and its `makehijrah_service_id`, `makehijrah_client_profile_id` and `makehijrah_consultation_id` metadata all match the request. Those keys are written only by `POST /api/services/:id/checkout`.
+
+**A sent recommendation alone does NOT reveal instructions.** An admin offering a service is not the client having bought it.
+
+Every refusal is the **same `404 NOT_FOUND`**. Unknown service, unknown consultation, another client's consultation, unrelated service and unpaid all return identically; the difference between those answers is itself information. A malformed `session_id` is ignored rather than rejected, so a junk query string degrades to "no session supplied".
+
+**Webhook independence.** The browser routinely returns from Stripe before `checkout.session.completed` has written the purchase row. The Checkout Session path exists precisely for that window — there is no polling, and the redirect itself is never treated as proof.
+
+### Checkout redirects
+
+`POST /api/services/:id/checkout` (body still `{}`):
+
+| | attributed | unattributed |
+|---|---|---|
+| success | `{APP_URL}/dashboard/consultation/{consultation_id}?purchase=success&service={service_id}&session_id={CHECKOUT_SESSION_ID}` | `{APP_URL}/dashboard?purchase=success&service={service_id}&session_id={CHECKOUT_SESSION_ID}` |
+| cancel | `{APP_URL}/dashboard/consultation/{consultation_id}?purchase=cancelled` | `{APP_URL}/dashboard?purchase=cancelled` |
+
+`{CHECKOUT_SESSION_ID}` is **Stripe's literal placeholder** and is never percent-encoded; Stripe substitutes the real id. `consultation_id` and `service_id` come from server-resolved context only — `success_url`, `cancel_url`, `consultation_id`, `client_profile_id`, `consultant_id` and `service_request_id` have nowhere to be sent in the request body.
+
+Generic dashboard purchases show only a generic success message; **no consultation-free instructions endpoint exists**, pending a separate delivery design.
+
+---
 
 ### What Lovable reads
 

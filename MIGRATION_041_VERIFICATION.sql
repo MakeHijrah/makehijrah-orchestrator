@@ -26,9 +26,9 @@
 --    3  authenticated may select it; anon, PUBLIC and
 --       service_role may not
 --    4  public.services is UNCHANGED: authenticated still cannot
---       select consultant_commission_bps
---    5  every other services column is still granted exactly as
---       migration 034 left it — no public selector was widened
+--       select either private column
+--    5  every NON-private services column is still granted exactly
+--       as migration 034 left it — no public selector was widened
 --    6  an admin reads the view INCLUDING the commission
 --    7  an admin sees inactive services there, which is what an
 --       admin catalog needs
@@ -62,7 +62,7 @@ declare
     'created_at, updated_at, billing_type, recurring_interval, '
     'price_cents, currency, stripe_product_id, stripe_price_id, '
     'stripe_payment_link_id, stripe_payment_link_url, '
-    'consultant_commission_bps';
+    'consultant_commission_bps, post_purchase_instructions_html';
 begin
   if to_regclass('public.admin_services') is null then
     raise exception
@@ -197,16 +197,29 @@ do $$
 declare
   v_missing text;
   v_role text;
+  v_private text;
+  /*
+   * The known-private columns of public.services. Migration 034
+   * part E made the grant list fail closed, and migration 042 is
+   * the first column to depend on that deliberately, so the set
+   * has two members rather than one.
+   */
+  v_private_columns text[] := array[
+    'consultant_commission_bps',
+    'post_purchase_instructions_html'
+  ];
 begin
   foreach v_role in array array['anon', 'authenticated']
   loop
-    if has_column_privilege(
-         v_role, 'public.services',
-         'consultant_commission_bps', 'SELECT') then
-      raise exception
-        'VERIFICATION FAILED 4: % can select services.consultant_commission_bps; migration 034 part E has been undone',
-        v_role;
-    end if;
+    foreach v_private in array v_private_columns
+    loop
+      if has_column_privilege(
+           v_role, 'public.services', v_private, 'SELECT') then
+        raise exception
+          'VERIFICATION FAILED 4: % can select services.%; migration 034 part E has been undone',
+          v_role, v_private;
+      end if;
+    end loop;
 
     if has_table_privilege(v_role, 'public.services', 'SELECT') then
       raise exception
@@ -221,7 +234,7 @@ begin
     from information_schema.columns c
    where c.table_schema = 'public'
      and c.table_name = 'services'
-     and c.column_name <> 'consultant_commission_bps'
+     and c.column_name <> all(v_private_columns)
      and not has_column_privilege(
            'authenticated', 'public.services',
            c.column_name, 'SELECT');
@@ -237,7 +250,7 @@ begin
     from information_schema.columns c
    where c.table_schema = 'public'
      and c.table_name = 'services'
-     and c.column_name <> 'consultant_commission_bps'
+     and c.column_name <> all(v_private_columns)
      and not has_column_privilege(
            'anon', 'public.services', c.column_name, 'SELECT');
 
@@ -248,7 +261,7 @@ begin
   end if;
 
   raise notice
-    'PASS 4 and 5: the commission column is still ungranted to anon and authenticated, and every other services column is still readable exactly as before';
+    'PASS 4 and 5: both private columns are still ungranted to anon and authenticated, and every other services column is still readable exactly as before';
 end $$;
 
 

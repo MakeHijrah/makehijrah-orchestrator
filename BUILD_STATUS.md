@@ -377,6 +377,24 @@ Verification: `MIGRATION_040_VERIFICATION.sql`, 31 checks against PostgreSQL 16,
 
 ---
 
+## 9d. Post-purchase service instructions — Amendment 010, migration 042 **[D]**
+
+A client who bought a recommended service was redirected to the dashboard and told nothing. `services.post_purchase_instructions_html` is now where an admin writes the delivery content, and the client is returned to the consultation it was recommended on.
+
+- Private column on `services`, ungranted to `anon` and `authenticated` — migration 034 part E's column list fails closed, and this is the first column to depend on that deliberately. **[D]**
+- `admin_services` (migration 041) extended to expose it alongside the commission. **[D]**
+- Rich text sanitized against one strict allowlist on admin write **and** again on client read; `sanitize-html` added as a production dependency. **[D]**
+- `GET /api/consultations/:consultationId/services/:serviceId/instructions` returns exactly three fields, to the consultation's own client, and **only after payment is proved**. **[D]**
+- **A sent recommendation alone does not reveal instructions.** Payment is proved by a recorded `service_purchases` row or by a Checkout Session verified server-side. **[D]**
+- The Stripe Session path makes the success page work before `checkout.session.completed` lands — no polling. **[D]**
+- Attributed checkout now returns to `/dashboard/consultation/{id}?purchase=success&service={id}&session_id={CHECKOUT_SESSION_ID}`. **[D]**
+
+Verification: `MIGRATION_042_VERIFICATION.sql`, 13 checks against PostgreSQL 16, plus 57 orchestrator tests. Migrations 038-041 re-verified against the same database. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Not done:** no frontend. The `/dashboard/consultation/{uuid}` route and the WYSIWYG editor are a separate build; static Payment Links still land on `/dashboard` and generic dashboard purchases show only a generic success message.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -483,11 +501,12 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_007_ADMIN_SETTINGS_AND_DYNAMIC_PRICING.md`
 - `PROJECT_LOCK_AMENDMENT_008_CONSULTANT_ONBOARDING_AND_IMMUTABLE_GENDER.md`
 - `PROJECT_LOCK_AMENDMENT_009_SERVICE_PURCHASE_FINANCE.md`
+- `PROJECT_LOCK_AMENDMENT_010_POST_PURCHASE_SERVICE_INSTRUCTIONS.md`
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 040
+- `supabase/migrations/` — migrations 001 through 042
 
 ---
 

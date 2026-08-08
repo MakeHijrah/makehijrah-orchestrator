@@ -382,15 +382,30 @@ create unique index services_stripe_payment_link_id_key
 
 ~~Service purchases made through a Stripe Payment Link are **not** recorded in this database in the current scope.~~ **Superseded by Amendment 009 (migration 040):** service purchases are now recorded in `service_purchases` and earn consultant commission. `payments` is still not written for them, and `service_requests` remains admin-created. See §20.
 
-### `admin_services` (view, migration 041)
+### `post_purchase_instructions_html` (migration 042)
 
-The administrator projection of the catalog — every column of `services` that the admin endpoints return, **plus `consultant_commission_bps`**.
+**Private delivery content.** What a client is shown *after* paying for a service: onboarding steps, download URLs, booking URLs, contact routes. Nullable `text`, bounded at 20,000 characters by `services_post_purchase_instructions_length_check`, and the bound applies to the **sanitized** value because sanitized is the only thing the orchestrator ever writes.
+
+```sql
+alter table services add column post_purchase_instructions_html text;
+-- check: null or length(...) <= 20000
+```
+
+**It is private for free, and that is deliberate.** Migration 034 part E replaced the table-level `SELECT` on `services` with a computed column list and recorded the consequence in its own comment: *"adding a column later leaves it ungranted, which fails closed."* This is the first column to depend on that. Nothing is revoked in migration 042 because nothing was ever granted — `public.services` now has **two** private columns, `consultant_commission_bps` and this one, both reachable by an administrator through `admin_services` and by nobody else.
+
+**Sanitized on write and again on read**, against one allowlist (`src/lib/html-sanitizer.ts`): tags `p br strong em b i u ul ol li h2 h3 a`, attributes `href`/`title` on `a` only, schemes `http https mailto`, and every link rewritten with `rel="noopener noreferrer nofollow" target="_blank"` over whatever the author supplied. Re-sanitizing on read is not redundant — it is the only thing covering a row edited directly in the Supabase SQL editor. Content that sanitizes away to nothing is stored as `null`.
+
+**A client reads it only after paying.** There is no RLS path and no database read model for clients: the orchestrator endpoint (`API_CONTRACT.md` §3d) proves ownership *and* payment, then reads past the column privilege with the service role. A sent recommendation is explicitly **not** proof of payment — see Amendment 010.
+
+### `admin_services` (view, migration 041, extended by 042)
+
+The administrator projection of the catalog — every column of `services` that the admin endpoints return, **plus both private columns**: `consultant_commission_bps` (migration 034) and `post_purchase_instructions_html` (migration 042).
 
 It exists because of a shape problem, not a policy one. `consultant_commission_bps` is withheld from every authenticated caller by a **column** privilege (migration 034 part E), and Supabase has exactly one logged-in database role: an administrator is an `authenticated` user distinguished only by `profiles.role`. RLS can see that distinction through `is_admin()`; a column privilege cannot. There is no `GRANT` that means "this column, but only for admins", so the Admin Services page selecting the rate got `403 Forbidden` — correctly.
 
 ```sql
 create view admin_services with (security_barrier = true) as
-select s.id, …, s.consultant_commission_bps
+select s.id, …, s.consultant_commission_bps, s.post_purchase_instructions_html
 from services s
 where is_admin();
 ```

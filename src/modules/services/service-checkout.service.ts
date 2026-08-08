@@ -213,6 +213,42 @@ export const createServiceCheckoutSession =
         recommendation.consultation_id;
     }
 
+    /*
+     * 4. Where Stripe sends them back.
+     *
+     * {CHECKOUT_SESSION_ID} is Stripe's own placeholder and is
+     * appended as a LITERAL — Stripe substitutes the real session
+     * id when it builds the redirect. It must not be percent-
+     * encoded, so it is concatenated after the encoded values
+     * rather than passed through encodeURIComponent with them.
+     * That session id is what lets the success page prove payment
+     * before the webhook has written anything.
+     *
+     * The consultation id comes from the recommendation resolved
+     * above, never from the request. An unattributed purchase has
+     * no consultation to return to and falls back to the
+     * dashboard; a consultant-recommended one always returns to
+     * the consultation it was recommended on.
+     */
+    const returnBase = recommendation
+      ? `${env.APP_URL}/dashboard/consultation/` +
+        `${encodeURIComponent(
+          recommendation.consultation_id,
+        )}`
+      : `${env.APP_URL}/dashboard`;
+
+    const successUrl =
+      `${returnBase}?purchase=success` +
+      `&service=${encodeURIComponent(service.id)}` +
+      `&session_id={CHECKOUT_SESSION_ID}`;
+
+    /*
+     * No service id on the cancel URL. An abandoned checkout
+     * should not leave a "you bought this" signal in the address
+     * bar; the client simply lands back where they started.
+     */
+    const cancelUrl = `${returnBase}?purchase=cancelled`;
+
     const activeMode = await getActiveStripeMode();
     const stripe = getStripeClient(activeMode);
 
@@ -241,8 +277,8 @@ export const createServiceCheckoutSession =
                   metadata,
                 },
               }),
-          success_url: `${env.APP_URL}/dashboard?purchase=success`,
-          cancel_url: `${env.APP_URL}/dashboard?purchase=cancelled`,
+          success_url: successUrl,
+          cancel_url: cancelUrl,
         });
     } catch (error) {
       console.error(

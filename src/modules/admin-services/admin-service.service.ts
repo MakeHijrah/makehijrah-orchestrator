@@ -19,6 +19,11 @@
  */
 
 import { randomUUID } from "node:crypto";
+
+import {
+  MAX_SANITIZED_HTML_LENGTH,
+  sanitizeRichText,
+} from "../../lib/html-sanitizer.js";
 import type { StripeFailure } from "./admin-service.stripe.js";
 import {
   archiveProduct,
@@ -616,6 +621,34 @@ export const createService = async ({
   idempotencyKey,
   body,
 }: CreateServiceInput): Promise<AdminServiceResult> => {
+  /*
+   * Migration 042. Sanitized ONCE, here, before anything is
+   * written — the repository below is a dumb writer and never
+   * sees raw input.
+   *
+   * The stored bound is checked against the SANITIZED value, not
+   * the request, so markup cannot be used to smuggle a payload
+   * past the limit and so the application rejects exactly what
+   * services_post_purchase_instructions_length_check would.
+   * The larger raw bound has already been applied by the schema.
+   */
+  const sanitizedInstructions = sanitizeRichText(
+    body.post_purchase_instructions_html,
+  );
+
+  if (
+    sanitizedInstructions !== null &&
+    sanitizedInstructions.length >
+      MAX_SANITIZED_HTML_LENGTH
+  ) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message:
+        "The post-purchase instructions are too long.",
+    };
+  }
+
   const key =
     buildCreateIdempotencyKey({
       adminProfileId,
@@ -804,6 +837,8 @@ export const createService = async ({
         consultantCommissionBps:
           body.consultant_commission_bps ??
           null,
+        postPurchaseInstructionsHtml:
+          sanitizedInstructions,
       });
 
     if (!inserted.ok) {
@@ -967,6 +1002,34 @@ export const updateService = async ({
   rawBody,
   body,
 }: UpdateServiceInput): Promise<AdminServiceResult> => {
+  /*
+   * Migration 042. Sanitized ONCE, here, before anything is
+   * written — the repository below is a dumb writer and never
+   * sees raw input.
+   *
+   * The stored bound is checked against the SANITIZED value, not
+   * the request, so markup cannot be used to smuggle a payload
+   * past the limit and so the application rejects exactly what
+   * services_post_purchase_instructions_length_check would.
+   * The larger raw bound has already been applied by the schema.
+   */
+  const sanitizedInstructions = sanitizeRichText(
+    body.post_purchase_instructions_html,
+  );
+
+  if (
+    sanitizedInstructions !== null &&
+    sanitizedInstructions.length >
+      MAX_SANITIZED_HTML_LENGTH
+  ) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message:
+        "The post-purchase instructions are too long.",
+    };
+  }
+
   return withServiceLock<AdminServiceResult>(
     {
       serviceId,
@@ -1038,6 +1101,13 @@ export const updateService = async ({
                 : {
                     consultantCommissionBps:
                       body.consultant_commission_bps,
+                  }),
+              ...(body.post_purchase_instructions_html ===
+              undefined
+                ? {}
+                : {
+                    postPurchaseInstructionsHtml:
+                      sanitizedInstructions,
                   }),
             },
           );

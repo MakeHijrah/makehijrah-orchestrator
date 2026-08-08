@@ -10,6 +10,8 @@
 
 import { z } from "zod";
 
+import { MAX_RAW_HTML_LENGTH } from "../../lib/html-sanitizer.js";
+
 export const SERVICE_BILLING_TYPES = [
   "one_time",
   "recurring",
@@ -255,6 +257,27 @@ const commissionBpsSchema = z
   .max(10_000)
   .nullish();
 
+/*
+ * Private post-purchase delivery instructions (migration 042).
+ *
+ * The bound here is the RAW, pre-sanitization one. It is
+ * deliberately larger than the 20,000-character database
+ * constraint because sanitizing shrinks input — a legitimate
+ * document that ends up well under the stored limit can easily
+ * arrive above it once a WYSIWYG editor has added its markup.
+ * This bound exists to stop an enormous payload reaching the
+ * HTML parser at all, not to police content length; the stored
+ * length is enforced after sanitization, against the value the
+ * database will actually see.
+ *
+ * `nullish` so the field carries three distinct meanings:
+ * absent = leave unchanged, null = clear, string = replace.
+ */
+const postPurchaseInstructionsSchema = z
+  .string()
+  .max(MAX_RAW_HTML_LENGTH)
+  .nullish();
+
 const pricingFieldSchemas = {
   billing_type: z
     .enum(SERVICE_BILLING_TYPES)
@@ -279,6 +302,8 @@ export const createServiceBodySchema = z
     sort_order: sortOrderSchema,
     consultant_commission_bps:
       commissionBpsSchema,
+    post_purchase_instructions_html:
+      postPurchaseInstructionsSchema,
     ...pricingFieldSchemas,
   })
   .strict()
@@ -291,6 +316,8 @@ export const patchServiceBodySchema = z
     sort_order: sortOrderSchema,
     consultant_commission_bps:
       commissionBpsSchema,
+    post_purchase_instructions_html:
+      postPurchaseInstructionsSchema,
     ...pricingFieldSchemas,
   })
   .strict()
