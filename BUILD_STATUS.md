@@ -391,7 +391,9 @@ A client who bought a recommended service was redirected to the dashboard and to
 
 Verification: `MIGRATION_042_VERIFICATION.sql`, 13 checks against PostgreSQL 16, plus 57 orchestrator tests. Migrations 038-041 re-verified against the same database. **[D]** source, **[ ]** not yet applied to staging or live.
 
-**Not done:** no frontend. The `/dashboard/consultation/{uuid}` route and the WYSIWYG editor are a separate build; static Payment Links still land on `/dashboard` and generic dashboard purchases show only a generic success message.
+`GET /api/me/service-purchases` returns a client's own purchases through a narrow orchestrator projection (ten client-safe fields, newest first). **`service_purchases` RLS is unchanged and clients remain excluded from it at the database layer** — the frontend must never query that table directly. **[D]**
+
+**Not done:** no frontend. The `/dashboard/consultation/{uuid}` route, the WYSIWYG editor, the Purchases dashboard section, the recommendation filtering and the instructions modal are all a separate build in the frontend repo, which is not present in this workspace. Static Payment Links still land on `/dashboard` and generic dashboard purchases show only a generic success message.
 
 ---
 

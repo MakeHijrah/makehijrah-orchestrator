@@ -30,6 +30,7 @@ import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerAdminFinanceRoutes } from "./modules/finance/admin-finance.route.js";
 import { registerAdminServicePurchaseRoutes } from "./modules/finance/admin-service-purchase.route.js";
+import { registerClientServicePurchasesRoute } from "./modules/finance/client-service-purchases.route.js";
 import { registerServiceCheckoutRoute } from "./modules/services/service-checkout.route.js";
 import { registerServiceInstructionsRoute } from "./modules/consultations/service-instructions.route.js";
 import { registerConsultantPayoutRoute } from "./modules/finance/consultant-payout.route.js";
@@ -253,6 +254,9 @@ await registerServiceCheckoutRoute(
   app,
 );
 await registerServiceInstructionsRoute(
+  app,
+);
+await registerClientServicePurchasesRoute(
   app,
 );
 await registerStripeWebhookRoute(

@@ -547,6 +547,30 @@ Every refusal is the **same `404 NOT_FOUND`**. Unknown service, unknown consulta
 
 **Webhook independence.** The browser routinely returns from Stripe before `checkout.session.completed` has written the purchase row. The Checkout Session path exists precisely for that window — there is no polling, and the redirect itself is never treated as proof.
 
+### `GET /api/me/service-purchases` — client
+
+Rate limit: 60 / minute. No path parameter, no query, no body — `me` is the entire parameter surface, so a client cannot ask for anybody else's purchases and there is no field a later edit could start trusting. The caller's `client_profile_id` is resolved from the bearer token.
+
+Response `data.purchases[]`, newest first, **exactly these ten fields**:
+
+```json
+{
+  "id": "…", "service_id": "…", "consultation_id": "… | null",
+  "status": "paid | fulfilled | refunded | cancelled",
+  "gross_amount_minor": 9999, "currency": "usd",
+  "purchased_at": "2026-08-01T10:00:00.000Z",
+  "billing_type": "one_time | recurring",
+  "recurring_interval": "month | year | null",
+  "billing_period_sequence": 1
+}
+```
+
+**Never returned:** `attributed_consultant_id`, `refunded_amount_minor`, any `stripe_*` identifier, `stripe_mode`, `service_request_id`, `client_profile_id`, or any ledger, commission, platform-revenue or payout data. The projection is an explicit column list, so a column added to `service_purchases` later is invisible here until somebody deliberately adds it.
+
+**`public.service_purchases` RLS is unchanged and clients remain excluded from it at the database layer.** Migration 034's policy names the attributed consultant and an admin and nobody else, and the client's exclusion is structural — no policy on any finance table mentions `client_profile_id`. This endpoint reads with the service role; **the frontend must never query `service_purchases` from Supabase directly.**
+
+Client only. A consultant and an admin already read that table through RLS and are refused here (`403`). Capped at 200 rows, newest first — roughly sixteen years of monthly renewals.
+
 ### Checkout redirects
 
 `POST /api/services/:id/checkout` (body still `{}`):
