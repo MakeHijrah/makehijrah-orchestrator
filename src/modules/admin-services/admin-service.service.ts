@@ -801,6 +801,9 @@ export const createService = async ({
           body.description ?? null,
         sortOrder:
           body.sort_order ?? null,
+        consultantCommissionBps:
+          body.consultant_commission_bps ??
+          null,
       });
 
     if (!inserted.ok) {
@@ -1028,6 +1031,13 @@ export const updateService = async ({
                 : {
                     sortOrder:
                       body.sort_order,
+                  }),
+              ...(body.consultant_commission_bps ===
+              undefined
+                ? {}
+                : {
+                    consultantCommissionBps:
+                      body.consultant_commission_bps,
                   }),
             },
           );

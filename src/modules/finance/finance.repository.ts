@@ -36,7 +36,16 @@ export type FinanceMarker =
   | "FINANCE_PAYOUT_NOT_APPROVED"
   | "FINANCE_DECISION_INVALID"
   | "FINANCE_PAID_AMOUNT_INVALID"
-  | "FINANCE_REFERENCE_REQUIRED";
+  | "FINANCE_REFERENCE_REQUIRED"
+  /* Migration 040: service purchase finance. */
+  | "FINANCE_PURCHASE_AMOUNT_INVALID"
+  | "FINANCE_STRIPE_MODE_INVALID"
+  | "FINANCE_STRIPE_REFERENCE_REQUIRED"
+  | "FINANCE_SERVICE_NOT_FOUND"
+  | "FINANCE_PURCHASE_CONFLICT"
+  | "FINANCE_PURCHASE_NOT_FOUND"
+  | "FINANCE_PURCHASE_NOT_FULFILLABLE"
+  | "FINANCE_REFUND_EXCEEDS_PURCHASE";
 
 const FINANCE_MARKERS: FinanceMarker[] = [
   "FINANCE_CONSULTATION_NOT_FOUND",
@@ -63,6 +72,14 @@ const FINANCE_MARKERS: FinanceMarker[] = [
   "FINANCE_DECISION_INVALID",
   "FINANCE_PAID_AMOUNT_INVALID",
   "FINANCE_REFERENCE_REQUIRED",
+  "FINANCE_PURCHASE_AMOUNT_INVALID",
+  "FINANCE_STRIPE_MODE_INVALID",
+  "FINANCE_STRIPE_REFERENCE_REQUIRED",
+  "FINANCE_SERVICE_NOT_FOUND",
+  "FINANCE_PURCHASE_CONFLICT",
+  "FINANCE_PURCHASE_NOT_FOUND",
+  "FINANCE_PURCHASE_NOT_FULFILLABLE",
+  "FINANCE_REFUND_EXCEEDS_PURCHASE",
 ];
 
 export const readFinanceMarker = (
@@ -94,7 +111,7 @@ export type FinanceRpcResult<T> =
  * the empty-result handling and the marker extraction cannot
  * drift between the seven of them.
  */
-const callFinanceRpc = async <T>(
+export const callFinanceRpc = async <T>(
   name: string,
   args: Record<string, unknown>,
 ): Promise<FinanceRpcResult<T>> => {

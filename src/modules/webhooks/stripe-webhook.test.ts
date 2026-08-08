@@ -81,6 +81,28 @@ let rpcRow = {
 
 let refundPaymentIntentMetadata: Record<string, string> = {};
 
+/*
+ * Migration 040. The webhook now asks the database, on every
+ * charge.refunded, whether the PaymentIntent belongs to a service
+ * purchase — through an RPC, because Amendment 004 section 10.3.3
+ * forbids this path from reading a table, which is exactly what
+ * the from() stub below enforces.
+ *
+ * The default answer is "no", so every consultation refund test
+ * below behaves precisely as it did before. The service purchase
+ * tests set it to a real reversal row.
+ */
+let serviceReversalRow: Record<string, unknown> = {
+  purchase_id: null,
+  reversed: false,
+  reason: "not_a_service_purchase",
+  entry_id: null,
+  reversal_entry_id: null,
+  refunded_amount_minor: null,
+  status: null,
+  consultant_amount_minor: null,
+};
+
 const installStubs = (): void => {
   rpcCalls.length = 0;
   retrievedPaymentIntents.length = 0;
@@ -90,6 +112,16 @@ const installStubs = (): void => {
     params: Record<string, unknown>,
   ) => {
     rpcCalls.push({ name, params });
+
+    if (
+      name ===
+      "reverse_service_purchase_for_payment_intent"
+    ) {
+      return {
+        data: [serviceReversalRow],
+        error: null,
+      };
+    }
 
     return { data: [rpcRow], error: null };
   }) as unknown as typeof supabaseAdmin.rpc;
@@ -233,8 +265,21 @@ const post = async (
 };
 
 const assertNoConsultationSideEffects = (): void => {
+  /*
+   * The service purchase lookup is not a consultation side
+   * effect: it writes nothing, transitions nothing, and returns
+   * "not a service purchase" for every consultation event. It is
+   * excluded so this assertion keeps meaning what it meant —
+   * no consultation was touched.
+   */
+  const consultationCalls = rpcCalls.filter(
+    (call) =>
+      call.name !==
+      "reverse_service_purchase_for_payment_intent",
+  );
+
   assert.equal(
-    rpcCalls.length,
+    consultationCalls.length,
     0,
     "No consultation RPC may be called for an ignored event.",
   );
@@ -255,7 +300,10 @@ const paymentRpcCalls = (): RpcCall[] =>
 const ledgerRpcNames = (): string[] =>
   rpcCalls
     .filter(
-      (call) => call.name !== "process_stripe_webhook_event",
+      (call) =>
+        call.name !== "process_stripe_webhook_event" &&
+        call.name !==
+          "reverse_service_purchase_for_payment_intent",
     )
     .map((call) => call.name);
 

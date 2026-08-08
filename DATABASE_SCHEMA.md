@@ -629,7 +629,45 @@ One payout request. The only table here whose status moves: `requested → appro
 
 `trg_payout_allocation_guard` refuses an allocation whose entry is still pending, belongs to another consultant, or is in another currency, and refuses to release the allocations of a **paid** payout. Rejecting or cancelling a payout deletes its allocations, returning the earnings to available; the payout row survives with its status and reason.
 
-### 20. `service_purchases`
+### 20. `service_purchases` (wired to the ledger by migration 040)
+
+**Migration 040 adds two columns and makes this table live.** It existed unused from migration 034 until then — the table, the ledger, and the commission column were all in place, and nothing wrote to any of them.
+
+```sql
+alter table service_purchases
+  add column stripe_subscription_id text,      -- null for a one-time sale
+  add column refunded_amount_minor integer not null default 0;
+
+-- 0 <= refunded_amount_minor <= gross_amount_minor
+create unique index uq_service_purchases_subscription_period
+  on service_purchases (stripe_subscription_id, billing_period_sequence)
+  where stripe_subscription_id is not null;
+create index idx_service_purchases_subscription
+  on service_purchases (stripe_subscription_id) where stripe_subscription_id is not null;
+```
+
+`stripe_subscription_id` is what makes a renewal findable: a renewal invoice names its subscription and nothing else this system recognises, so the **first** purchase of a subscription is the record of what it is for and every later invoice inherits its service and client from it — a database fact, not metadata that must survive a year of billing cycles.
+
+`refunded_amount_minor` accumulates across partial refunds. **A partial refund is a number, not a status:** status moves to `refunded` only when the refund reaches the gross, so no `partially_refunded` value is needed and the migration-034 status vocabulary is untouched.
+
+**Four RPCs, `SECURITY DEFINER`, pinned search_path, `service_role` only:**
+
+| RPC | Does |
+|---|---|
+| `record_service_purchase(...)` | Payment → purchase + **pending** earning, in one transaction |
+| `fulfill_service_purchase(purchase, admin)` | Delivery → `fulfilled_at` + earning becomes available. Idempotent |
+| `reverse_service_purchase_earning(purchase, reason, gross?)` | Refund → negative ledger entry via `reverse_ledger_entry` |
+| `reverse_service_purchase_for_payment_intent(pi, reason, gross?)` | The webhook's refund entry point, so it never reads a table |
+
+**`record_service_purchase` accepts no consultant and no commission rate.** Attribution is re-derived on every call from `service_recommendations` joined to `consultations` — a consultant id in Stripe metadata cannot influence who is credited, because there is no parameter through which it could be passed. A client *candidate* may be supplied; it is validated against `profiles` and an unresolvable one produces an **unattributed** purchase rather than an error. Unattributed revenue is recorded and visible; it is never discarded.
+
+Service resolution tries, in order of trust: explicit service id → inheritance from the subscription's first purchase → `services.stripe_payment_link_id` → `services.stripe_price_id`. Every step is a database lookup; none reads Stripe Payment Link metadata.
+
+**Commission:** `round(gross::numeric * consultant_commission_bps / 10000)::integer`, platform takes the remainder by subtraction so `consultant + platform = gross` holds exactly. A **null or zero rate creates no ledger entry at all** — not a zero-value one, which `ledger_sign_check` would reject and which records no financial fact.
+
+**Renewal sequencing** takes `pg_advisory_xact_lock(hashtextextended(subscription_id, 0))` before allocating `billing_period_sequence`, so two invoices arriving at once allocate 1 and 2 rather than colliding. `uq_service_purchases_subscription_period` backs it up if the lock were ever bypassed.
+
+**Availability:** payment creates the earning with `available_at = null`. Only `fulfill_service_purchase` advances it — the single mutation `trg_ledger_append_only` permits. `service_requests.status = 'completed'` deliberately releases nothing.
 
 The financial record of a service being paid for. **Deliberately not `service_requests`**, which remains the operational fulfillment record — a purchase *may* reference one, and for a recurring service several purchases reference the same one, which is exactly why they cannot be the same row. Each renewal is its own purchase, keyed by `billing_period_sequence` and its own Stripe invoice. Redelivery is blocked by unique partial indexes on `stripe_payment_intent_id`, `stripe_invoice_id` and `stripe_checkout_session_id`.
 

@@ -5,6 +5,7 @@ import {
   reverseConsultationEarning,
   syncConsultationEarning,
 } from "../finance/finance.service.js";
+import { processServicePurchaseEvent } from "./service-purchase-webhook.js";
 
 type ConsultationStatus =
   | "pending_acceptance"
@@ -46,7 +47,15 @@ type NormalizedStripeEvent = {
  */
 export type StripeWebhookIgnoredReason =
   | "non_consultation_event"
-  | "unsupported_event_type";
+  | "unsupported_event_type"
+  /*
+   * Migration 040. The event WAS a service purchase event and was
+   * handled by the service purchase path; it is reported as
+   * ignored by the consultation path because no consultation was
+   * transitioned and no payments row was written. The action
+   * taken is in the response body.
+   */
+  | "service_purchase_event";
 
 export type ProcessStripeWebhookResult =
   | {
@@ -59,6 +68,13 @@ export type ProcessStripeWebhookResult =
       alreadyProcessed: boolean;
       paymentId: string | null;
       consultationStatus: string | null;
+      /*
+       * Migration 040. Present only when the service purchase
+       * path handled the event; null on every consultation event,
+       * so nothing existing changes shape.
+       */
+      servicePurchaseAction?: string | null;
+      servicePurchaseId?: string | null;
     }
   | {
       ok: false;
@@ -443,6 +459,42 @@ export const processStripeWebhookEvent =
     event: Stripe.Event,
     verifiedMode?: "test" | "live",
   ): Promise<ProcessStripeWebhookResult> => {
+    /*
+     * Migration 040: the service purchase path, FIRST and
+     * separate.
+     *
+     * It returns null for anything that is not a service purchase
+     * event, so every consultation event falls straight through
+     * to the code below unchanged — same normaliser, same RPC,
+     * same payments row, same transitions.
+     *
+     * charge.refunded is the one event both paths can care about.
+     * The service handler claims it only when the charge resolves
+     * to a service purchase; a consultation refund returns null
+     * from it and is handled below exactly as before.
+     */
+    const serviceOutcome =
+      await processServicePurchaseEvent(
+        event,
+        verifiedMode,
+      );
+
+    if (serviceOutcome) {
+      return {
+        ok: true,
+        ignored: true,
+        reason: "service_purchase_event",
+        processed: false,
+        alreadyProcessed: false,
+        paymentId: null,
+        consultationStatus: null,
+        servicePurchaseAction:
+          serviceOutcome.action,
+        servicePurchaseId:
+          serviceOutcome.purchaseId,
+      };
+    }
+
     const normalizationResult =
       await normalizeStripeEvent(
         stripe,

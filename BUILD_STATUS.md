@@ -359,6 +359,24 @@ Consultant notes are complete and manually verified. Direct Presence is complete
 
 ---
 
+## 9c. Service purchase finance — Amendment 009, migration 040 **[D]**
+
+Client service payments are now reconciled into the database. Previously they existed only in Stripe, so a consultant could recommend a service, a client could buy it, and the consultant earned nothing — `services.consultant_commission_bps` had existed since migration 034 with no code that could set it and none that could read it.
+
+- `service_purchases` becomes the financial transaction record. `service_requests` is unchanged and remains the operational workflow record. **[D]**
+- Payment creates a **pending** consultant earning at the per-service rate on the gross; only `POST /api/admin/service-purchases/:id/fulfill` releases it. **[D]**
+- One-time purchases come from `checkout.session.completed`; recurring purchases — first period *and* every renewal — from `invoice.paid`. `payment_intent.succeeded` deliberately creates nothing, which is what prevents a duplicate record. **[D]**
+- Consultant attribution is re-derived inside the RPC from `service_recommendations`; the RPC accepts no consultant or commission parameter, so metadata cannot influence who is credited. **[D]**
+- Refunds create negative ledger entries through the existing `reverse_ledger_entry`; partial refunds accumulate in `refunded_amount_minor` and are proportional. **[D]**
+- `POST /api/services/:id/checkout` (client) creates a Session with server-resolved trusted context. Static Payment Links continue to work, recorded unattributed when no client resolves. **[D]**
+- `POST`/`PATCH /api/admin/services` accept `consultant_commission_bps`. **[D]**
+
+Verification: `MIGRATION_040_VERIFICATION.sql`, 31 checks against PostgreSQL 16, plus 34 orchestrator tests. Migrations 038 and 039 re-verified against the same database. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Not done:** no Stripe Connect, no automated payouts, no backfill of purchases taken before migration 040 — those exist only in Stripe and reconciling them is a separate exercise.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -463,11 +481,13 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_005_ADMIN_CONSULTANT_DIRECT_MESSAGING.md`
 - `PROJECT_LOCK_AMENDMENT_006_DIRECT_MESSAGE_PRESENCE_AND_EMAIL.md`
 - `PROJECT_LOCK_AMENDMENT_007_ADMIN_SETTINGS_AND_DYNAMIC_PRICING.md`
+- `PROJECT_LOCK_AMENDMENT_008_CONSULTANT_ONBOARDING_AND_IMMUTABLE_GENDER.md`
+- `PROJECT_LOCK_AMENDMENT_009_SERVICE_PURCHASE_FINANCE.md`
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 025
+- `supabase/migrations/` — migrations 001 through 040
 
 ---
 

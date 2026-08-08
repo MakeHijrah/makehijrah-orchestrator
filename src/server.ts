@@ -29,6 +29,8 @@ import {
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerAdminFinanceRoutes } from "./modules/finance/admin-finance.route.js";
+import { registerAdminServicePurchaseRoutes } from "./modules/finance/admin-service-purchase.route.js";
+import { registerServiceCheckoutRoute } from "./modules/services/service-checkout.route.js";
 import { registerConsultantPayoutRoute } from "./modules/finance/consultant-payout.route.js";
 import { registerInviteRoutes } from "./modules/invites/invite.route.js";
 import { registerMessageNotificationRoute } from "./modules/messages/message-notification.route.js";
@@ -241,6 +243,12 @@ await registerConsultantPayoutRoute(
   app,
 );
 await registerAdminFinanceRoutes(
+  app,
+);
+await registerAdminServicePurchaseRoutes(
+  app,
+);
+await registerServiceCheckoutRoute(
   app,
 );
 await registerStripeWebhookRoute(

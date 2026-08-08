@@ -443,11 +443,68 @@ Requires explicit administrator confirmation in the UI before the call is made.
 Response `data`: `{ "deleted": true }`.
 Errors: `INVALID_TRANSITION` (409, service is referenced), `NOT_FOUND`, `FORBIDDEN`.
 
-### Purchases are not recorded here
+### ~~Purchases are not recorded here~~ — **Superseded by PROJECT_LOCK Amendment 009 (migration 040)**
 
-A service Payment Link purchase **creates no row in any MakeHijrah table**. It does not write to `payments`, and it does not create a `service_requests` row. **Stripe is the temporary source of truth** for service purchases and subscriptions in this scope, including subscription management and refunds. Reconciliation into the database is out of scope and requires its own amendment.
+~~A service Payment Link purchase creates no row in any MakeHijrah table… Stripe is the temporary source of truth… Reconciliation into the database is out of scope and requires its own amendment.~~
 
-Correctly signed Stripe events that carry no `consultation_id` — which is what service Payment Link purchases produce — are acknowledged by `POST /api/webhooks/stripe` with **HTTP 200** and ignored: `{ "ignored": true, "reason": "non_consultation_event" }`. No consultation transitions, no `payments` row is written, and no consultation RPC is called. See §1.
+**Service purchases are now reconciled into the database.** See §3c. Stripe remains the payment processor and the authority on whether money moved; it is no longer the record of what was sold, to whom, on whose recommendation, or what a consultant is owed. `payments` is still **not** written for service purchases — that table remains the consultation payment log — and `service_requests` remains the operational workflow record, created by an admin as before.
+
+`payment_intent.succeeded` **still** produces `{ "ignored": true, "reason": "non_consultation_event" }` for a service payment. That is deliberate and load-bearing: a one-time service payment emits both it and `checkout.session.completed`, and only the latter creates a purchase. Acting on both would produce two financial records for one payment.
+
+### Commission rate on a service
+
+`POST /api/admin/services` and `PATCH /api/admin/services/:id` additionally accept:
+
+```json
+{ "consultant_commission_bps": 4500 }
+```
+
+Integer basis points of the **gross** amount charged, `0`–`10000`, nullable. `null` means no rate has been agreed; `0` means an agreed zero. Both produce no consultant earning, but only one of them is a decision. It is **not** a Stripe identifier and **not** server-owned — it is the one commercial term about a service that only an administrator can set, and before migration 040 there was no way to set it at all. It is returned in the admin service projection and remains hidden from clients by the column privilege migration 034 established.
+
+---
+
+## 3c. Service purchases and consultant commission — Amendment 009, migration 040
+
+### `POST /api/services/:id/checkout` — client
+
+Rate limit: 20 / minute. Body: **`{}`**. There is deliberately no body schema beyond the empty object — `consultant_id`, `attributed_consultant_id`, `commission_bps`, `service_request_id` and `consultation_id` are not merely rejected, there is no field in which any of them could be sent.
+
+The purchasing client comes from the bearer token. The server resolves the applicable `service_request`, the latest **sent** `service_recommendation` for this service and client, its `consultation_id` and its `recommended_by_consultant_id`, and stamps that trusted context into Stripe metadata — on `subscription_data.metadata` too for a recurring service, so a renewal invoice a year later can still resolve its context.
+
+Creates `mode: "payment"` for a one-time service and `mode: "subscription"` for a recurring one. Ordinary Stripe behaviour, never manual capture.
+
+Response `data`: `{ "checkout_url", "session_id", "mode", "attributed" }`. `attributed` says whether a consultant will be credited; it names no consultant.
+
+Errors: `404 NOT_FOUND` (unknown or inactive service), `409 INVALID_TRANSITION` (service not yet priced in Stripe), `502 STRIPE_ERROR`, `401`/`403`. Consultants and admins are refused — buying a service is the client's own act.
+
+**Existing static Payment Links keep working.** A purchase through one is resolved against `services.stripe_payment_link_id` — a database lookup, never Payment Link metadata — and is recorded **unattributed** when no client resolves. Unattributed revenue is recorded and visible, never discarded.
+
+### `POST /api/admin/service-purchases/:id/fulfill` — admin
+
+The financial fulfilment act, and the only thing that turns a service earning from pending into available. Body `{}`.
+
+Response `data`: `{ "purchase_id", "status", "fulfilled_at", "released", "reason", "entry_id", "available_at" }`. `reason` is `released` | `already_fulfilled` | `already_available` | `no_entry`, so a double-clicked button reads as `already_fulfilled` rather than as a silent success.
+
+**`service_purchases.fulfilled_at` is authoritative, not `service_requests.status = 'completed'`.** The two are separate on purpose: the request is the operational record an admin drives directly through RLS, and a status an ordinary browser write can move must never be the thing that releases money. Each renewal of a recurring service is fulfilled individually.
+
+Errors: `404 NOT_FOUND`, `409 INVALID_TRANSITION` (only a paid purchase may be fulfilled), `403 FORBIDDEN`.
+
+### Stripe events
+
+| Event | Authoritative for | Guard |
+|---|---|---|
+| `checkout.session.completed` | one-time purchase + pending earning | `mode = payment` **and** `payment_status = paid` |
+| `invoice.paid` | recurring purchase + pending earning, first period **and** every renewal | `billing_reason` ∈ `subscription_create`, `subscription_cycle` |
+| `invoice.payment_failed` | nothing — logged and ignored | — |
+| `charge.refunded` | reversal, if the charge belongs to a service purchase; otherwise the consultation path handles it unchanged | — |
+
+A subscription-mode `checkout.session.completed` creates **nothing**; its first invoice does. The webhook response gains `service_purchase_action` and `service_purchase_id`, both `null` on every consultation event.
+
+**Amendment 004 §10.3.3 is reaffirmed:** the webhook path still makes RPC calls only and reads no table directly. Every lookup — service by payment link or price, the subscription's prior purchase, the purchase behind a refunded PaymentIntent — happens inside a `SECURITY DEFINER` function.
+
+### What Lovable reads
+
+`service_purchases` is readable under the existing migration 034 policy: the **attributed consultant** sees their own, an **admin** sees all, a **client** sees none. Admin finance can therefore render service, client, consultant, gross, commission (from `consultant_ledger_entries`), currency, status, `fulfilled_at`, Stripe reference, `billing_period_sequence`, `refunded_amount_minor` and unattributed purchases with no new read endpoint.
 
 ---
 

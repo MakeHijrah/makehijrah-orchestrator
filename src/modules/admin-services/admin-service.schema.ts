@@ -229,6 +229,32 @@ const sortOrderSchema = z
   .min(0)
   .optional();
 
+/*
+ * The consultant's share of this service's gross, in basis points
+ * (migration 034, wired to the ledger by migration 040).
+ *
+ * Nullable with no default, and null is meaningful: it says no
+ * rate has been agreed, which is not the same claim as 0%. Both
+ * produce no consultant earning, but only one of them is a
+ * decision.
+ *
+ * Bounded 0..10000 to match services_commission_bps_check, so the
+ * application rejects exactly what the database would. Integer
+ * basis points rather than a percentage float: money derived from
+ * a binary float is money that is eventually wrong.
+ *
+ * Deliberately NOT in SERVER_OWNED_KEYS. It is not a Stripe
+ * identifier and not a derived value — it is the one commercial
+ * term about a service that only an administrator can decide, and
+ * before this there was no way to set it at all.
+ */
+const commissionBpsSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(10_000)
+  .nullish();
+
 const pricingFieldSchemas = {
   billing_type: z
     .enum(SERVICE_BILLING_TYPES)
@@ -251,6 +277,8 @@ export const createServiceBodySchema = z
     name: nameSchema,
     description: descriptionSchema,
     sort_order: sortOrderSchema,
+    consultant_commission_bps:
+      commissionBpsSchema,
     ...pricingFieldSchemas,
   })
   .strict()
@@ -261,6 +289,8 @@ export const patchServiceBodySchema = z
     name: nameSchema.optional(),
     description: descriptionSchema,
     sort_order: sortOrderSchema,
+    consultant_commission_bps:
+      commissionBpsSchema,
     ...pricingFieldSchemas,
   })
   .strict()

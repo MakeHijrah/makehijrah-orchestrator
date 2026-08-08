@@ -298,6 +298,17 @@ export const registerStripeWebhookRoute =
           already_processed:
             processingResult
               .alreadyProcessed,
+          /*
+           * Migration 040. Null on every consultation event, so
+           * the existing response shape is unchanged for every
+           * caller that already reads it.
+           */
+          service_purchase_action:
+            processingResult
+              .servicePurchaseAction ?? null,
+          service_purchase_id:
+            processingResult
+              .servicePurchaseId ?? null,
         });
       },
     );

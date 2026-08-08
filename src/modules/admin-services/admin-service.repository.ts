@@ -34,6 +34,14 @@ export const SERVICE_COLUMNS =
     "stripe_price_id",
     "stripe_payment_link_id",
     "stripe_payment_link_url",
+    /*
+     * Migration 034 added this column and hid it from clients by
+     * column privilege. This projection is the ADMIN one, read
+     * with the service role, so including it lets an admin see
+     * the rate they set. The client-facing read of `services`
+     * goes through RLS and the column grant, which still omits it.
+     */
+    "consultant_commission_bps",
   ].join(", ");
 
 export type ServiceRow = {
@@ -55,6 +63,9 @@ export type ServiceRow = {
   currency: ServiceCurrency | null;
   stripe_product_id: string | null;
   stripe_price_id: string | null;
+  consultant_commission_bps:
+    | number
+    | null;
   stripe_payment_link_id:
     | string
     | null;
@@ -172,11 +183,13 @@ export const insertService = async ({
   name,
   description,
   sortOrder,
+  consultantCommissionBps,
 }: {
   serviceId: string;
   name: string;
   description: string | null;
   sortOrder: number | null;
+  consultantCommissionBps: number | null;
 }): Promise<
   RepositoryResult<ServiceRow>
 > => {
@@ -192,6 +205,8 @@ export const insertService = async ({
           : {
               sort_order: sortOrder,
             }),
+        consultant_commission_bps:
+          consultantCommissionBps,
         is_active: false,
       })
       .select(SERVICE_COLUMNS)
@@ -229,11 +244,15 @@ export const updateDescriptiveFields =
     name,
     description,
     sortOrder,
+    consultantCommissionBps,
   }: {
     serviceId: string;
     name?: string;
     description?: string | null;
     sortOrder?: number;
+    consultantCommissionBps?:
+      | number
+      | null;
   }): Promise<
     RepositoryResult<null>
   > => {
@@ -252,6 +271,20 @@ export const updateDescriptiveFields =
 
     if (sortOrder !== undefined) {
       patch.sort_order = sortOrder;
+    }
+
+    /*
+     * undefined means "not in the request"; null means "clear the
+     * agreed rate". The two must stay distinguishable, so the
+     * check is against undefined rather than a falsy test — 0 is
+     * a legitimate rate and must not be swallowed.
+     */
+    if (
+      consultantCommissionBps !==
+      undefined
+    ) {
+      patch.consultant_commission_bps =
+        consultantCommissionBps;
     }
 
     if (
