@@ -495,6 +495,25 @@ Verification: `MIGRATION_047_VERIFICATION.sql`, **20 checks against PostgreSQL 1
 
 ---
 
+## 9j. Same-slot draft intake refresh — migration 048 **[D]**
+
+A correctness gap opened by migration 047's same-slot short circuit, closed before the frontend build depends on it.
+
+- **The bug.** A visitor reaches Payment, goes back to **Details**, corrects a typo'd email or name, re-picks the **same** time, and submits. Migration 047 returned the held draft unchanged — right about the slot, wrong about the form. Every edit was silently discarded and the consultant received the version the visitor had already rejected. **[D]**
+- **Why the email matters most.** `consultation_intake.email` is not a dead snapshot: the decline, authorization timeout, admin cancellation, recommendation and message notifications are all sent to it. A discarded correction there means mail to an address the visitor knows is wrong. **[D]**
+- **`refresh_draft_consultation_intake(...)`** — `SECURITY DEFINER`, pinned search_path, service_role only, matched on `id AND status = 'draft'`. Rewrites `full_name`, `email`, `phone_whatsapp`, `answers_jsonb`, `client_timezone`, `country_id` and `client_profile_id`, with migration 005's `nullif(trim(...), '')` on the WhatsApp number. Idempotent. **[D]**
+- **`client_profile_id` is refreshed too, and that is deliberate.** It is *derived* from the intake email under Amendment 002, so refreshing the address while leaving the profile behind would produce exactly the divergence this fixes. It moves only while the row is a draft, before any payment, and only to the profile the visitor's own submitted email resolves to — precisely what a fresh draft would have done. The orchestrator passes null when the address is unchanged, so an ordinary refresh costs no account lookup. **[D]**
+- **Nothing else can move.** The consultant, the schedule, the status, the price, the currency, the booking source, every Stripe identifier and every payment timestamp are not parameters of the function, so no caller can ask for them. **[D]**
+- **Eligibility is re-validated first.** The consultant gender/destination check was hoisted above the supersede resolution so it runs against the **submitted** country and preference — a visitor who changes their destination on the way back cannot end up holding a consultant who does not serve it. **[D]**
+- **Failure leaves the hold intact.** A refresh failure returns `500 INTERNAL_ERROR` (write failed) or `409 DRAFT_UNAVAILABLE` (draft expired or cancelled in between). The draft is not cancelled, no replacement is created, and the checkout capability is **not** consumed — deliberately not dressed up as a slot error, which would send the visitor to fix the wrong thing. **[D]**
+- **Different-slot supersede is unchanged**, as is migration 046's compensation and migration 047's expiry. **[D]**
+
+Verification: `MIGRATION_048_VERIFICATION.sql`, **26 checks against PostgreSQL 16**, invoking the RPC. Part 3 snapshots the whole consultation row as `jsonb` before the refresh and compares it key by key afterwards, excusing only the three mutable columns — so a payment or finance column added to `consultations` later is covered the day it exists, without anybody remembering to write a check for it. Migrations 038–047 re-verified. Orchestrator: **647 tests pass**, including one that asserts the exact argument key set reaching the RPC, so a later spread of the request body would fail rather than quietly widen the surface. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Frontend contract, unchanged from §9i** and now safe to build against: retain `consultation_id` + `checkout_token` across backward navigation and send them as `supersedes_*`. Editing details and re-picking the same slot now persists those edits instead of discarding them.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -610,7 +629,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 047
+- `supabase/migrations/` — migrations 001 through 048
 
 ---
 

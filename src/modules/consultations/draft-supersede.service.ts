@@ -46,6 +46,14 @@ export type HeldDraft = {
   currency: string;
   createdAt: string;
   holdExpiresAt: string;
+  /*
+   * The address currently on the draft's intake. Read so a
+   * same-slot refresh can tell whether the visitor changed it -
+   * and therefore whether the client profile derived from it needs
+   * resolving again. Null only if the intake row is missing, which
+   * should not happen.
+   */
+  intakeEmail: string | null;
 };
 
 export type ResolveSupersededResult =
@@ -78,6 +86,10 @@ type HeldDraftRow = {
   price_cents: number;
   currency: string;
   created_at: string;
+};
+
+type HeldIntakeRow = {
+  email: string;
 };
 
 /*
@@ -173,6 +185,25 @@ export const resolveSupersededDraft =
       };
     }
 
+    /*
+     * Read separately rather than joined: PostgREST embedding
+     * would widen the projection, and this is one indexed lookup
+     * on a unique column. A missing intake row is reported as null
+     * rather than failing the claim - the refresh repairs it.
+     */
+    const { data: intakeData } =
+      await supabaseAdmin
+        .from("consultation_intake")
+        .select("email")
+        .eq(
+          "consultation_id",
+          claim.consultationId,
+        )
+        .maybeSingle();
+
+    const intake =
+      intakeData as HeldIntakeRow | null;
+
     return {
       ok: true,
       draft: {
@@ -185,6 +216,7 @@ export const resolveSupersededDraft =
         currency: row.currency,
         createdAt: row.created_at,
         holdExpiresAt,
+        intakeEmail: intake?.email ?? null,
       },
     };
   };

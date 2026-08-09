@@ -60,6 +60,9 @@ const {
 const { expireStaleDraftConsultations } = await import(
   "./draft-expiry.service.js"
 );
+const { hasEmailChanged, refreshDraftIntake } = await import(
+  "./draft-refresh.service.js"
+);
 
 const CONSULTANT_ID = "44444444-4444-4444-8444-444444444444";
 const OTHER_CONSULTANT_ID = "4b4b4b4b-4b4b-4b4b-8b4b-4b4b4b4b4b4b";
@@ -76,10 +79,19 @@ const TOKEN_ADVANCED = "token-for-advanced";
 const SLOT_A = "2033-01-10T09:00:00.000Z";
 const SLOT_B = "2033-01-10T11:00:00.000Z";
 
+const CLIENT_PROFILE = "11111111-1111-4111-8111-111111111111";
+const OTHER_CLIENT_PROFILE =
+  "1b1b1b1b-1b1b-4b1b-8b1b-1b1b1b1b1b1b";
+const COUNTRY_ID = "99999999-9999-4999-8999-999999999999";
+
 type Row = Record<string, unknown>;
 
-const db: { consultations: Row[] } = {
+const db: {
+  consultations: Row[];
+  consultation_intake: Row[];
+} = {
   consultations: [],
+  consultation_intake: [],
 };
 
 /*
@@ -101,6 +113,7 @@ let rpcCalls: Array<{
 }> = [];
 
 let expireRpcFails = false;
+let refreshRpcFails = false;
 
 const minutesAgo = (minutes: number): string =>
   new Date(
@@ -110,6 +123,7 @@ const minutesAgo = (minutes: number): string =>
 const installStubs = (): void => {
   rpcCalls = [];
   expireRpcFails = false;
+  refreshRpcFails = false;
 
   capabilities = new Map([
     [capabilityKey(TOKEN_A), DRAFT_A],
@@ -120,11 +134,17 @@ const installStubs = (): void => {
   db.consultations = [
     {
       id: DRAFT_A,
+      client_profile_id: CLIENT_PROFILE,
       consultant_id: CONSULTANT_ID,
+      country_id: null,
+      client_timezone: "Europe/Istanbul",
       scheduled_start_at: SLOT_A,
+      scheduled_end_at: "2033-01-10T10:00:00.000Z",
       status: "draft",
       price_cents: 9_700,
       currency: "usd",
+      booking_source: "standard",
+      stripe_payment_intent_id: null,
       created_at: minutesAgo(2),
       cancelled_at: null,
     },
@@ -149,6 +169,21 @@ const installStubs = (): void => {
       cancelled_at: null,
     },
   ];
+
+  db.consultation_intake = db.consultations.map(
+    (row) => ({
+      consultation_id: row.id,
+      full_name: "Original Name",
+      email: "original@example.invalid",
+      phone_whatsapp: null,
+      answers_jsonb: {
+        consultation_summary: "Original summary.",
+        client_gender: "male",
+        preferred_consultant_gender:
+          "no_preference",
+      },
+    }),
+  );
 
   redis.get = (async (key: string) => {
     const consultationId = capabilities.get(key);
@@ -186,9 +221,12 @@ const installStubs = (): void => {
       },
       async maybeSingle() {
         const rows = (
-          table === "consultations"
-            ? db.consultations
-            : []
+          (
+            db as unknown as Record<
+              string,
+              Row[] | undefined
+            >
+          )[table] ?? []
         ).filter((row) =>
           this._filters.every((matches) =>
             matches(row),
@@ -267,6 +305,96 @@ const installStubs = (): void => {
             consultation_id: row.id,
             cancelled: true,
             reason: "cancelled",
+          },
+        ],
+        error: null,
+      };
+    }
+
+    if (
+      name === "refresh_draft_consultation_intake"
+    ) {
+      if (refreshRpcFails) {
+        return {
+          data: null,
+          error: {
+            code: "57014",
+            message: "statement timeout",
+            details: null,
+            hint: null,
+          },
+        };
+      }
+
+      const row = db.consultations.find(
+        (entry) =>
+          entry.id === args.p_consultation_id,
+      );
+
+      if (!row) {
+        return {
+          data: [
+            {
+              consultation_id:
+                args.p_consultation_id,
+              refreshed: false,
+              reason: "not_found",
+            },
+          ],
+          error: null,
+        };
+      }
+
+      /* Migration 048's guard: id AND status = 'draft'. */
+      if (row.status !== "draft") {
+        return {
+          data: [
+            {
+              consultation_id: row.id,
+              refreshed: false,
+              reason: "not_draft",
+            },
+          ],
+          error: null,
+        };
+      }
+
+      row.client_timezone =
+        args.p_client_timezone;
+      row.country_id = args.p_country_id;
+      row.client_profile_id =
+        (args.p_client_profile_id as
+          | string
+          | null) ?? row.client_profile_id;
+
+      const intake =
+        db.consultation_intake.find(
+          (entry) =>
+            entry.consultation_id === row.id,
+        )!;
+
+      intake.full_name = args.p_full_name;
+      intake.email = args.p_email;
+
+      /* nullif(trim(...), '') - the same normalisation. */
+      const whatsapp = (
+        (args.p_phone_whatsapp as
+          | string
+          | null) ?? ""
+      ).trim();
+
+      intake.phone_whatsapp =
+        whatsapp === "" ? null : whatsapp;
+
+      intake.answers_jsonb =
+        args.p_answers_jsonb ?? {};
+
+      return {
+        data: [
+          {
+            consultation_id: row.id,
+            refreshed: true,
+            reason: "refreshed",
           },
         ],
         error: null,
@@ -751,5 +879,344 @@ describe("Draft expiry", () => {
 
     /* The worker is on a timer; the next tick retries. */
     assert.equal(statusOf(DRAFT_A), "draft");
+  });
+});
+
+/*
+ * Same-slot intake refresh. Migration 048.
+ *
+ * The visitor reached Payment, went back to Details, corrected
+ * something, and re-picked the time they already hold. The slot is
+ * right; the details are not. Before migration 048 the draft came
+ * back untouched and every edit was silently discarded — including
+ * a corrected email, which is where the decline, timeout, admin
+ * cancellation, recommendation and message notifications are all
+ * actually sent.
+ */
+describe("Same-slot intake refresh", () => {
+  const submitted = {
+    intake: {
+      full_name: "Aisha Rahman",
+      email: "aisha@example.invalid",
+      phone_whatsapp: "+905551112233",
+      answers: {
+        consultation_summary:
+          "Moving with two children.",
+        client_gender: "female",
+        preferred_consultant_gender: "female",
+      },
+    },
+    client_timezone: "Europe/London",
+    country_id: COUNTRY_ID,
+  } as unknown as Parameters<
+    typeof refreshDraftIntake
+  >[0]["draft"];
+
+  it("rewrites every visitor-editable field", async () => {
+    const result = await refreshDraftIntake({
+      consultationId: DRAFT_A,
+      draft: submitted,
+      clientProfileId: OTHER_CLIENT_PROFILE,
+    });
+
+    assert.equal(result.ok, true);
+
+    const intake = db.consultation_intake.find(
+      (row) => row.consultation_id === DRAFT_A,
+    )!;
+
+    assert.equal(
+      intake.full_name,
+      "Aisha Rahman",
+    );
+    assert.equal(
+      intake.email,
+      "aisha@example.invalid",
+    );
+    assert.equal(
+      intake.phone_whatsapp,
+      "+905551112233",
+    );
+    assert.equal(
+      (
+        intake.answers_jsonb as Record<
+          string,
+          unknown
+        >
+      ).consultation_summary,
+      "Moving with two children.",
+    );
+    assert.equal(
+      (
+        intake.answers_jsonb as Record<
+          string,
+          unknown
+        >
+      ).client_gender,
+      "female",
+    );
+
+    const consultation = db.consultations.find(
+      (row) => row.id === DRAFT_A,
+    )!;
+
+    assert.equal(
+      consultation.client_timezone,
+      "Europe/London",
+    );
+    assert.equal(
+      consultation.country_id,
+      COUNTRY_ID,
+    );
+
+    /*
+     * The client profile followed the corrected address. Leaving
+     * it behind would mean notifications to the new one and
+     * dashboard access under the old.
+     */
+    assert.equal(
+      consultation.client_profile_id,
+      OTHER_CLIENT_PROFILE,
+    );
+  });
+
+  it("creates no second consultation and mints no second capability", async () => {
+    const before = db.consultations.length;
+    const tokensBefore = capabilities.size;
+
+    await refreshDraftIntake({
+      consultationId: DRAFT_A,
+      draft: submitted,
+      clientProfileId: null,
+    });
+
+    assert.equal(
+      db.consultations.length,
+      before,
+    );
+    assert.equal(
+      capabilities.size,
+      tokensBefore,
+    );
+
+    /* And A's own token is still live. */
+    assert.equal(
+      capabilities.get(capabilityKey(TOKEN_A)),
+      DRAFT_A,
+    );
+  });
+
+  it("cannot move the booking, the price or the source", async () => {
+    const before = {
+      ...db.consultations.find(
+        (row) => row.id === DRAFT_A,
+      )!,
+    };
+
+    await refreshDraftIntake({
+      consultationId: DRAFT_A,
+      draft: submitted,
+      clientProfileId: OTHER_CLIENT_PROFILE,
+    });
+
+    const after = db.consultations.find(
+      (row) => row.id === DRAFT_A,
+    )!;
+
+    /*
+     * Only three columns may move. Everything else is compared as
+     * a whole, so a field nobody thought to name is still covered.
+     */
+    const mutable = new Set([
+      "client_timezone",
+      "country_id",
+      "client_profile_id",
+    ]);
+
+    for (const key of Object.keys(before)) {
+      if (mutable.has(key)) {
+        continue;
+      }
+
+      assert.deepEqual(
+        after[key],
+        before[key],
+        `${key} moved during an intake refresh`,
+      );
+    }
+
+    assert.equal(after.id, DRAFT_A);
+    assert.equal(
+      after.consultant_id,
+      CONSULTANT_ID,
+    );
+    assert.equal(
+      after.scheduled_start_at,
+      SLOT_A,
+    );
+    assert.equal(after.price_cents, 9_700);
+    assert.equal(after.currency, "usd");
+    assert.equal(after.status, "draft");
+  });
+
+  it("refuses a consultation past draft, leaving its intake alone", async () => {
+    const result = await refreshDraftIntake({
+      consultationId: ADVANCED,
+      draft: submitted,
+      clientProfileId: null,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.ok === false && result.reason,
+      "not_draft",
+    );
+
+    const intake = db.consultation_intake.find(
+      (row) => row.consultation_id === ADVANCED,
+    )!;
+
+    assert.equal(
+      intake.full_name,
+      "Original Name",
+    );
+
+    assert.equal(
+      statusOf(ADVANCED),
+      "confirmed",
+    );
+  });
+
+  it("reports a failure without touching the draft or its token", async () => {
+    refreshRpcFails = true;
+
+    const result = await refreshDraftIntake({
+      consultationId: DRAFT_A,
+      draft: submitted,
+      clientProfileId: null,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.ok === false && result.reason,
+      "refresh_failed",
+    );
+
+    /*
+     * The whole point of the failure rule: the visitor keeps the
+     * booking they had. Not cancelled, not replaced, and the
+     * capability still spends.
+     */
+    assert.equal(statusOf(DRAFT_A), "draft");
+    assert.equal(
+      capabilities.get(capabilityKey(TOKEN_A)),
+      DRAFT_A,
+    );
+
+    const intake = db.consultation_intake.find(
+      (row) => row.consultation_id === DRAFT_A,
+    )!;
+
+    assert.equal(
+      intake.full_name,
+      "Original Name",
+    );
+  });
+
+  it("knows when the email actually changed", () => {
+    /*
+     * Compared the way resolveBookingClient normalises it, so a
+     * difference in case or spacing is not a change and costs no
+     * account lookup.
+     */
+    assert.equal(
+      hasEmailChanged({
+        heldEmail: "Aisha@Example.Invalid",
+        submittedEmail: "  aisha@example.invalid ",
+      }),
+      false,
+    );
+
+    assert.equal(
+      hasEmailChanged({
+        heldEmail: "aisha@gmial.invalid",
+        submittedEmail: "aisha@example.invalid",
+      }),
+      true,
+    );
+
+    /* A missing intake row is treated as changed, not as equal. */
+    assert.equal(
+      hasEmailChanged({
+        heldEmail: null,
+        submittedEmail: "aisha@example.invalid",
+      }),
+      true,
+    );
+  });
+
+  it("passes only the allowed argument surface to the RPC", async () => {
+    /*
+     * The refresh cannot carry a price, a booking source, a
+     * commission or a schedule because it never receives one: the
+     * draft schema strips unknown keys, and this call names each
+     * argument individually rather than spreading a request body.
+     * Asserting the exact key set is what keeps that true when
+     * somebody later reaches for a spread.
+     */
+    await refreshDraftIntake({
+      consultationId: DRAFT_A,
+      draft: submitted,
+      clientProfileId: null,
+    });
+
+    const call = rpcCalls.find(
+      (entry) =>
+        entry.name ===
+        "refresh_draft_consultation_intake",
+    )!;
+
+    assert.deepEqual(
+      Object.keys(call.args).sort(),
+      [
+        "p_answers_jsonb",
+        "p_client_profile_id",
+        "p_client_timezone",
+        "p_consultation_id",
+        "p_country_id",
+        "p_email",
+        "p_full_name",
+        "p_phone_whatsapp",
+      ],
+    );
+
+    for (const forbidden of [
+      "p_price_cents",
+      "p_currency",
+      "p_booking_source",
+      "p_consultant_id",
+      "p_scheduled_start_at",
+      "p_status",
+    ]) {
+      assert.equal(
+        forbidden in call.args,
+        false,
+        `${forbidden} reached the refresh RPC`,
+      );
+    }
+  });
+
+  it("carries the held intake email through resolution", async () => {
+    const resolved = await resolveSupersededDraft({
+      consultationId: DRAFT_A,
+      checkoutToken: TOKEN_A,
+    });
+
+    assert.equal(resolved.ok, true);
+    assert.equal(
+      resolved.ok &&
+        resolved.draft.intakeEmail,
+      "original@example.invalid",
+    );
   });
 });

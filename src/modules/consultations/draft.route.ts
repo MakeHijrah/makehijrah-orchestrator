@@ -11,6 +11,11 @@ import {
 import { validateDraftSlot } from "./draft-availability.js";
 import { prepareDraftConsultation } from "./draft-preparation.service.js";
 import {
+  hasEmailChanged,
+  refreshDraftIntake,
+  toRefreshedDraftResponse,
+} from "./draft-refresh.service.js";
+import {
   isSameSlot,
   resolveSupersededDraft,
   type HeldDraft,
@@ -149,6 +154,71 @@ export const registerDraftConsultationRoute = async (
       }
 
       /*
+       * Consultant eligibility, including destination capability,
+       * is settled here - before the superseded draft is even
+       * looked up, before slot validation, before the booking
+       * client is resolved, before the draft row exists and before
+       * any checkout capability is issued. A rejected request
+       * therefore produces no external side effect.
+       *
+       * It runs against the SUBMITTED country and gender
+       * preference, which is what makes a same-slot refresh safe:
+       * a visitor may change their destination or their preference
+       * on the way back through the form, and the consultant they
+       * are holding must still be eligible for the booking they
+       * end up with. Checking after the refresh would mean writing
+       * an ineligible pairing and then discovering it.
+       */
+      const genderValidation =
+        await validateDraftConsultantGender({
+          consultantId,
+          countryId:
+            parsed.data.country_id,
+          preferredConsultantGender:
+            parsed.data.intake.answers
+              .preferred_consultant_gender,
+        });
+
+      if (!genderValidation.ok) {
+        if (
+          genderValidation.code ===
+          "NOT_FOUND"
+        ) {
+          return sendError(
+            reply,
+            404,
+            "NOT_FOUND",
+            genderValidation.message,
+          );
+        }
+
+        if (
+          genderValidation.code ===
+          "VALIDATION_ERROR"
+        ) {
+          return sendError(
+            reply,
+            400,
+            "VALIDATION_ERROR",
+            genderValidation.message,
+            genderValidation.reason
+              ? {
+                  reason:
+                    genderValidation.reason,
+                }
+              : undefined,
+          );
+        }
+
+        return sendError(
+          reply,
+          500,
+          "INTERNAL_ERROR",
+          "The selected consultant could not be verified.",
+        );
+      }
+
+      /*
        * THE DRAFT THIS REQUEST REPLACES, resolved before anything
        * is validated against the calendar.
        *
@@ -228,84 +298,162 @@ export const registerDraftConsultationRoute = async (
             startAt: parsed.data.start_at,
           })
         ) {
+          /*
+           * THE VISITOR CAME BACK, AND MAY HAVE CHANGED THEIR
+           * DETAILS ON THE WAY.
+           *
+           * The slot is the one they already hold, so no second
+           * consultation is created and nothing is released. But
+           * they did not necessarily go back only to the Time
+           * step: they may have corrected a typo in their email,
+           * fixed their name, cleared a WhatsApp number or
+           * rewritten what they want to discuss. Returning the
+           * draft untouched would discard all of it silently, and
+           * the consultant would receive the version the visitor
+           * had already decided was wrong.
+           *
+           * consultation_intake.email in particular is not a dead
+           * snapshot - it is where every consultation notification
+           * is actually sent.
+           */
+          let refreshedClientProfileId:
+            | string
+            | null = null;
+
+          /*
+           * The client profile is DERIVED from the intake email,
+           * so a changed address needs it resolved again -
+           * otherwise notifications go to the corrected address
+           * while dashboard access stays under the old one. An
+           * unchanged address costs no account lookup.
+           */
+          if (
+            hasEmailChanged({
+              heldEmail: heldDraft.intakeEmail,
+              submittedEmail:
+                parsed.data.intake.email,
+            })
+          ) {
+            const clientResult =
+              await resolveBookingClient({
+                email:
+                  parsed.data.intake.email,
+                fullName:
+                  parsed.data.intake.full_name,
+                phoneWhatsapp:
+                  parsed.data.intake
+                    .phone_whatsapp,
+              });
+
+            if (!clientResult.ok) {
+              request.log.error(
+                {
+                  code: clientResult.code,
+                  consultationId:
+                    heldDraft.consultationId,
+                },
+                "Booking client resolution failed during a same-slot refresh",
+              );
+
+              /*
+               * The existing draft and its hold are untouched.
+               * Nothing was created, nothing released, and the
+               * token is still valid.
+               */
+              return sendError(
+                reply,
+                500,
+                "INTERNAL_ERROR",
+                "The booking account could not be prepared.",
+              );
+            }
+
+            refreshedClientProfileId =
+              clientResult.profileId;
+          }
+
+          const refresh =
+            await refreshDraftIntake({
+              consultationId:
+                heldDraft.consultationId,
+              draft: parsed.data,
+              clientProfileId:
+                refreshedClientProfileId,
+            });
+
+          if (!refresh.ok) {
+            request.log.error(
+              {
+                consultationId:
+                  heldDraft.consultationId,
+                reason: refresh.reason,
+              },
+              "Draft intake refresh failed on a same-slot reselection",
+            );
+
+            /*
+             * Reported as what it is. The draft is NOT cancelled,
+             * no replacement is created, and the checkout
+             * capability is NOT consumed - so the visitor's
+             * existing hold remains valid and payable.
+             *
+             * Deliberately not dressed up as a slot error: the
+             * slot was never the problem, and telling somebody
+             * their time is taken when their edit failed to save
+             * would send them to fix the wrong thing.
+             */
+            if (
+              refresh.reason ===
+              "refresh_failed"
+            ) {
+              return sendError(
+                reply,
+                500,
+                "INTERNAL_ERROR",
+                "Your booking details could not be saved.",
+              );
+            }
+
+            /*
+             * The draft moved on between the lookup and the write
+             * - expired by the worker, or cancelled. A retry will
+             * create a fresh one.
+             */
+            return sendError(
+              reply,
+              409,
+              "DRAFT_UNAVAILABLE",
+              "This booking is no longer being held. Please choose a time again.",
+            );
+          }
+
           request.log.info(
             {
               consultationId:
                 heldDraft.consultationId,
               consultantId,
+              clientProfileRefreshed:
+                refreshedClientProfileId !==
+                null,
             },
-            "Draft reselected at the same slot; returning the existing hold",
+            "Draft reselected at the same slot; intake refreshed and the existing hold returned",
           );
 
-          return sendSuccess(reply, {
-            consultation_id:
-              heldDraft.consultationId,
-            status: "draft",
-            hold_expires_at:
-              heldDraft.holdExpiresAt,
-            price_cents:
-              heldDraft.priceCents,
-            currency: heldDraft.currency,
-            checkout_token:
-              claim.checkoutToken,
-          });
-        }
-      }
-
-      /*
-       * Consultant eligibility, including destination capability,
-       * is settled here - before slot validation, before the
-       * booking client is resolved, before the draft row exists
-       * and before any checkout capability is issued. A rejected
-       * request therefore produces no external side effect.
-       */
-      const genderValidation =
-        await validateDraftConsultantGender({
-          consultantId,
-          countryId:
-            parsed.data.country_id,
-          preferredConsultantGender:
-            parsed.data.intake.answers
-              .preferred_consultant_gender,
-        });
-
-      if (!genderValidation.ok) {
-        if (
-          genderValidation.code ===
-          "NOT_FOUND"
-        ) {
-          return sendError(
+          /*
+           * Identity is entirely unchanged: same consultation,
+           * same hold, same price and currency, and the same token
+           * the request arrived with. No second capability is
+           * minted.
+           */
+          return sendSuccess(
             reply,
-            404,
-            "NOT_FOUND",
-            genderValidation.message,
+            toRefreshedDraftResponse({
+              draft: heldDraft,
+              checkoutToken:
+                claim.checkoutToken,
+            }),
           );
         }
-
-        if (
-          genderValidation.code ===
-          "VALIDATION_ERROR"
-        ) {
-          return sendError(
-            reply,
-            400,
-            "VALIDATION_ERROR",
-            genderValidation.message,
-            genderValidation.reason
-              ? {
-                  reason:
-                    genderValidation.reason,
-                }
-              : undefined,
-          );
-        }
-
-        return sendError(
-          reply,
-          500,
-          "INTERNAL_ERROR",
-          "The selected consultant could not be verified.",
-        );
       }
 
       const slotValidation =
