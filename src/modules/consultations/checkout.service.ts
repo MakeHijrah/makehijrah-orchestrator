@@ -5,8 +5,7 @@ import {
   getStripeClient,
 } from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
-
-const DRAFT_HOLD_MINUTES = 30;
+import { calculateHoldExpiration } from "./draft-hold.js";
 
 type CheckoutConsultationRow = {
   id: string;
@@ -45,28 +44,6 @@ export type CreateStripeCheckoutResult =
         | "INTERNAL_ERROR";
       message: string;
     };
-
-const calculateHoldExpiration = (
-  createdAt: string,
-): string | null => {
-  const createdAtMilliseconds =
-    Date.parse(createdAt);
-
-  if (
-    !Number.isFinite(
-      createdAtMilliseconds,
-    )
-  ) {
-    return null;
-  }
-
-  return new Date(
-    createdAtMilliseconds +
-      DRAFT_HOLD_MINUTES *
-        60 *
-        1000,
-  ).toISOString();
-};
 
 const loadCheckoutRecord = async (
   consultationId: string,

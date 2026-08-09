@@ -10,6 +10,11 @@ import {
 } from "./draft-gender-validation.js";
 import { validateDraftSlot } from "./draft-availability.js";
 import { prepareDraftConsultation } from "./draft-preparation.service.js";
+import {
+  isSameSlot,
+  resolveSupersededDraft,
+  type HeldDraft,
+} from "./draft-supersede.service.js";
 import { createDraftConsultationSchema } from "./draft.schema.js";
 import {
   getSettings,
@@ -141,6 +146,110 @@ export const registerDraftConsultationRoute = async (
           settings.consultation_price_cents;
 
         bookingSource = "standard";
+      }
+
+      /*
+       * THE DRAFT THIS REQUEST REPLACES, resolved before anything
+       * is validated against the calendar.
+       *
+       * That ordering is forced, not chosen. Availability treats a
+       * draft as busy - getReservedConsultationIntervals counts
+       * 'draft' among its reserved statuses - so a visitor who goes
+       * back and picks THE SAME time again would be refused their
+       * own booking by slot validation before any short-circuit
+       * downstream could recognise it. Resolving the claim first is
+       * what lets that case be answered correctly.
+       *
+       * Resolving only READS. Nothing is released here: A stays
+       * untouched until B is fully prepared, further down.
+       *
+       * A claim that cannot be honoured - bad token, unknown id, a
+       * consultation that has advanced, a hold that has expired -
+       * is not an error. The request simply proceeds as an ordinary
+       * booking, and if A really is still holding the requested
+       * slot then slot validation will say so in the usual way.
+       * Reporting the difference would tell a caller which
+       * consultation ids exist.
+       */
+      let heldDraft: HeldDraft | null = null;
+
+      if (
+        parsed.data.supersedes_consultation_id &&
+        parsed.data.supersedes_checkout_token
+      ) {
+        const claim = {
+          consultationId:
+            parsed.data
+              .supersedes_consultation_id,
+          checkoutToken:
+            parsed.data
+              .supersedes_checkout_token,
+        };
+
+        const resolved =
+          await resolveSupersededDraft(
+            claim,
+          );
+
+        if (resolved.ok) {
+          heldDraft = resolved.draft;
+        } else {
+          request.log.warn(
+            {
+              consultationId:
+                claim.consultationId,
+              reason: resolved.reason,
+            },
+            "Superseded draft claim could not be honoured; continuing as an ordinary booking",
+          );
+        }
+
+        /*
+         * SAME-SLOT RESELECTION. The visitor went back and chose
+         * the time they already hold.
+         *
+         * Creating a second draft would collide with the first on
+         * unique_reserved_consultant_slot, and the visitor would be
+         * refused by their own booking. So the existing draft IS
+         * the answer: no second row, no cancellation, no new
+         * capability. The token they sent is still valid and is
+         * handed straight back.
+         *
+         * Everything this depends on has already been established
+         * by resolveSupersededDraft: the token is bound to this
+         * consultation, the consultation is still a draft, and its
+         * hold has not expired. Only the slot match is left.
+         */
+        if (
+          heldDraft &&
+          isSameSlot({
+            draft: heldDraft,
+            consultantId,
+            startAt: parsed.data.start_at,
+          })
+        ) {
+          request.log.info(
+            {
+              consultationId:
+                heldDraft.consultationId,
+              consultantId,
+            },
+            "Draft reselected at the same slot; returning the existing hold",
+          );
+
+          return sendSuccess(reply, {
+            consultation_id:
+              heldDraft.consultationId,
+            status: "draft",
+            hold_expires_at:
+              heldDraft.holdExpiresAt,
+            price_cents:
+              heldDraft.priceCents,
+            currency: heldDraft.currency,
+            checkout_token:
+              claim.checkoutToken,
+          });
+        }
       }
 
       /*
@@ -318,6 +427,21 @@ export const registerDraftConsultationRoute = async (
           currency:
             settings.consultation_currency,
           draft: parsed.data,
+          /*
+           * Released by prepareDraftConsultation, and only after
+           * the replacement is fully usable. Passing the claim
+           * rather than releasing it here is what keeps the
+           * ordering a property of one function.
+           */
+          supersedes: heldDraft
+            ? {
+                consultationId:
+                  heldDraft.consultationId,
+                checkoutToken:
+                  parsed.data
+                    .supersedes_checkout_token!,
+              }
+            : null,
         });
 
       if (!preparation.ok) {
@@ -385,6 +509,36 @@ export const registerDraftConsultationRoute = async (
           "INTERNAL_ERROR",
           preparation.message,
         );
+      }
+
+      if (preparation.supersede.attempted) {
+        if (preparation.supersede.released) {
+          request.log.info(
+            {
+              supersededConsultationId:
+                preparation.supersede
+                  .consultationId,
+              replacementConsultationId:
+                preparation.draft
+                  .consultationId,
+            },
+            "Superseded draft released and its slot freed",
+          );
+        } else {
+          request.log.error(
+            {
+              supersededConsultationId:
+                preparation.supersede
+                  .consultationId,
+              replacementConsultationId:
+                preparation.draft
+                  .consultationId,
+              reason:
+                preparation.supersede.reason,
+            },
+            "Superseded draft could not be released; it will hold its slot until the expiry worker reclaims it",
+          );
+        }
       }
 
       return sendSuccess(reply, {

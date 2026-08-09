@@ -849,7 +849,7 @@ consultant_payout_settings (own / admin)         → payout method section, admi
 
 | Job | Schedule | Action |
 |---|---|---|
-| `expire-drafts` | every 15 min | `draft` older than 30 min → `cancelled` — **NOT IMPLEMENTED.** No such worker exists. Until it does, nothing reclaims an abandoned draft and its slot stays reserved indefinitely. Migration 046 added `abandon_draft_consultation`, which the draft endpoint calls when a booking fails *after* its row was inserted; that covers the failure path, not abandonment. |
+| `expire-drafts` | **every 60 s** | `draft` with `created_at + 30 min <= now()` → `cancelled`, oldest first, in batches, via `expire_stale_draft_consultations` (migration 047). One set-based statement with `FOR UPDATE SKIP LOCKED`, so replicas divide the work; `status = 'draft'` is the only status it can read and `cancelled` the only one it can write. Runs without any browser request. |
 | `authorization-timeout` | every 15 min | `pending_acceptance` + `payment_authorized_at < now()-48h` → cancel Stripe auth → `admin_attention` (reason `timeout`) → email admin + client |
 | `consultant-reminder` | every 15 min | `pending_acceptance` at 24h mark → reminder email to consultant (once, tracked via jsonb flag or sent-window logic) |
 | `session-reminder` | every 15 min | `confirmed` starting within 24h / 1h → reminder emails (client + consultant) |
@@ -895,8 +895,37 @@ Endpoint additions since v1.0, each authorised by an approved amendment:
 
 No other endpoint has been added. No existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1, the price/duration/Stripe-mode sourcing described in §1 and §3b, and the admin activation completeness guard described in §3, which now returns `CONSULTANT_PROFILE_INCOMPLETE` in place of `ACTIVATION_BLOCKED` (Amendment 008).
 
+### The draft hold, and how a slot is released
+
+**A draft consultation IS the slot hold.** `unique_reserved_consultant_slot` covers `draft`, `payment_authorized`, `pending_acceptance`, `confirmed` and `captured`, so while a row sits in `draft` nobody else can book that time. **The hold lasts 30 minutes** from `created_at` — `create_draft_consultation` returns it as `hold_expires_at`, and checkout refuses a draft past it.
+
+A held slot is released in exactly three ways, and **no abandoned draft reserves a slot permanently**:
+
+1. **Superseded** — the visitor picks a different time. The replacement request carries `supersedes_consultation_id` and `supersedes_checkout_token`, and the previous draft is cancelled **only after the replacement is fully prepared**. If the replacement fails at any point, the previous draft is untouched: the visitor never gives up a booking for one they did not get.
+2. **Compensated** — the row was created and then could not be prepared for payment (migration 046). Released immediately, and the response is still the original error.
+3. **Expired** — nobody came back. Cancelled within 30–31 minutes by the `expire-drafts` worker above.
+
+**There is no unload or `sendBeacon` release, and no public release endpoint.** A draft is not cancelled merely because the visitor navigated backward — it stays protected until a replacement actually succeeds, or until it expires.
+
 **`POST /api/consultations/draft` (Amendment 011).** The body now accepts **`consultant_slug` instead of `consultant_id`**, and exactly one of the two is required. A request carrying **both** is refused with `400`, not resolved by precedence: trusting a browser-supplied consultant id alongside a slug would let a request quote one consultant's page and book another's calendar at that consultant's price.
 
 When a slug is supplied the server resolves the consultant from the published page, verifies the page is live, sets `price_cents` to the **effective direct price** (the same figure the public page displayed) and `booking_source` to `direct_booking`. The endpoint accepts **no** price, currency, `booking_source`, commission, split, premium or earnings value — those fields do not exist in its schema and are stripped at the boundary, so nothing downstream has to remember to ignore them. Checkout continues to trust `consultations.price_cents`. The generic flow with `consultant_id` is unchanged in every respect.
+
+**Superseding a held draft.** Two further optional fields, **both present or both absent** (a lone identifier is a `400`):
+
+```json
+{
+  "supersedes_consultation_id": "uuid",
+  "supersedes_checkout_token": "string"
+}
+```
+
+**The identifier alone authorises nothing.** The token is the existing checkout capability — 32 random bytes, stored only as a sha256 digest, bound to exactly one consultation, expiring with that consultation's hold — so a caller cannot release a draft it was not given, cannot release another visitor's draft, and cannot release a booking that has advanced past `draft` (`abandon_draft_consultation` matches `status = 'draft'` in the database). A claim that cannot be honoured is **not an error**: the request proceeds as an ordinary booking, and reporting the difference would tell a caller which consultation ids exist.
+
+Ordering, and it is the point: the replacement is created and its capability minted **first**; the superseded draft is cancelled and its token consumed **only then**. A release failure is logged and does not affect the response — the replacement succeeded, and the old draft expires within 30 minutes regardless.
+
+**Same-slot reselection.** If the visitor goes back and picks the time they already hold, the server returns **the existing draft and the token that was sent**, creating no second row and cancelling nothing. Without this, the visitor would be refused by their own booking: availability counts a `draft` as busy, so slot validation would report `SLOT_TAKEN` against their own hold. The existing draft is returned only when its token is bound to it, it is still `draft`, its hold has not expired, and the consultant and start time match; otherwise the request proceeds as an ordinary booking rather than reviving anything.
+
+Rate limiting is unchanged at **5 / minute per IP**.
 
 **Amendment 007 endpoints are live** and documented in §3b. Amendment 005/006 added `POST /api/messages/:id/notification`, documented in §2a.

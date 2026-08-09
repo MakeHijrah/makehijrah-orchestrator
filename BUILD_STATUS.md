@@ -476,6 +476,25 @@ Verification: `MIGRATION_046_VERIFICATION.sql`, **24 checks against PostgreSQL 1
 
 ---
 
+## 9i. Draft slot lifecycle — migration 047 **[D]**
+
+Two ways an unpaid draft could hold a consultant's slot forever, both closed.
+
+- **A draft IS the slot hold.** `unique_reserved_consultant_slot` covers `draft`, so while the row exists nobody else can book that time. The hold is 30 minutes, defined once in SQL beside `hold_expires_at`. **[D]**
+- **Superseded drafts.** A visitor who reached the payment step, went back and picked a different time left the first slot reserved — nothing told the server. `POST /api/consultations/draft` now accepts `supersedes_consultation_id` + `supersedes_checkout_token`, and releases the previous draft **only after the replacement is fully prepared**. If the replacement fails at any point the previous draft is untouched: the visitor never gives up a booking for one they did not get. **[D]**
+- **The token is the authorisation, not the id.** The existing checkout capability — 32 random bytes, stored only as a sha256 digest, bound to one consultation, expiring with its hold — already is a bearer capability for exactly that draft. No new token, no new table, no new trust. A guessed id, a token bound to a different consultation, and a booking past `draft` are each refused, the last by the database. **[D]**
+- **Same-slot reselection returns the existing draft.** Availability counts a `draft` as busy, so a visitor re-picking the time they already hold would otherwise be refused by their own booking. The claim is resolved before slot validation for exactly this reason. No second row, no cancellation, and the token they sent is handed back. **[D]**
+- **`expire_stale_draft_consultations(p_limit)`** — one set-based statement, oldest first, `FOR UPDATE SKIP LOCKED`, `status = 'draft'` the only status it can read and `cancelled` the only one it can write. Idempotent; a cancelled row no longer matches. Serves `idx_consultations_stale_drafts`, which migration 001 created for this job and which nothing used until now. **[D]**
+- **The `expire-drafts` worker exists at last**, on a **60-second** interval — worst-case slot release 30m00s–31m00s. Simpler than the authorization-timeout worker: no per-row due-set and no per-row lock, because one set-based UPDATE needs neither. The Redis cycle lock is an optimisation that fails open; the database is the correctness boundary. **[D]**
+- **`DRAFT_HOLD_MINUTES` consolidated** into `draft-hold.ts`. It was private to `checkout.service.ts` and about to be copied a second time; there is now one copy in TypeScript and the authoritative one in SQL. **[D]**
+- **No new anti-abuse controls**, deliberately. The public draft rate limit stays at 5/minute per IP — a test now reads it off the registered route so a change is caught. No CAPTCHA, no per-client draft cap, no unload/`sendBeacon` release, no public release endpoint, no booking-holds table. **[D]**
+
+Verification: `MIGRATION_047_VERIFICATION.sql`, **20 checks against PostgreSQL 16**, invoking the RPC — the thirty-minute boundary asserted from both sides, and one consultation per status (`payment_authorized`, `pending_acceptance`, `confirmed`, `captured`, `completed`) aged well past the cutoff to prove age alone cannot cancel a real booking. Migrations 038–046 re-verified. Orchestrator: **639 tests pass**. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Frontend contract, not built here.** The frontend must retain the active `consultation_id` and `checkout_token` across backward navigation — storage that survives it, not React state alone — and send both as `supersedes_*` when submitting a replacement draft. It must **not** release the old slot merely because the visitor navigated backward, and must not use unload or `sendBeacon`. A frontend that does none of this still gets 30-minute expiry.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -507,6 +526,7 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 - Server-controlled consultation price and currency; price snapshot immutability.
 - The effective direct booking price rule, and the reserved slug list, which must gain an entry whenever a top-level frontend route is added (Amendment 011).
 - `create_draft_consultation`'s five-column return contract, and `unique_reserved_consultant_slot` as the sole authority on slot conflicts (migration 046).
+- The thirty-minute draft hold, defined in SQL beside `hold_expires_at`, and the rule that a superseded draft is released only *after* its replacement is fully prepared (migration 047).
 - Stripe manual-capture workflow.
 - `consultations.stripe_mode` as the selector for existing payments.
 - Stripe credentials in Railway environment variables only.
@@ -590,7 +610,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 046
+- `supabase/migrations/` — migrations 001 through 047
 
 ---
 

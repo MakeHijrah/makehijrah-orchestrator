@@ -148,6 +148,34 @@ export const createDraftConsultationSchema =
         .max(120)
         .optional(),
 
+      /*
+       * THE DRAFT THIS REQUEST REPLACES, and the capability that
+       * proves the caller holds it.
+       *
+       * A draft IS the slot hold, so a visitor who goes back and
+       * picks a different time leaves the first slot reserved
+       * unless the server is told. These two fields tell it.
+       *
+       * The ID ALONE AUTHORISES NOTHING. The token is a bearer
+       * capability already scoped to exactly one consultation -
+       * thirty-two random bytes, stored only as a sha256 digest,
+       * bound to that consultation and expiring with its hold - so
+       * naming somebody else's consultation gets a caller nowhere.
+       * Both fields or neither; a lone id is a validation error
+       * rather than a silently ignored field.
+       */
+      supersedes_consultation_id: z
+        .string()
+        .uuid()
+        .optional(),
+
+      supersedes_checkout_token: z
+        .string()
+        .trim()
+        .min(1)
+        .max(200)
+        .optional(),
+
       country_id: z
         .string()
         .uuid()
@@ -226,6 +254,35 @@ export const createDraftConsultationSchema =
           path: ["consultant_slug"],
           message:
             "Name a consultant by link or by identifier, not both.",
+        });
+      }
+
+      /*
+       * The supersedes pair travels together. An id without its
+       * token could never authorise anything, so accepting one
+       * would only invite a caller to believe it might.
+       */
+      const hasSupersedesId = Boolean(
+        value.supersedes_consultation_id,
+      );
+
+      const hasSupersedesToken = Boolean(
+        value.supersedes_checkout_token,
+      );
+
+      if (
+        hasSupersedesId !==
+        hasSupersedesToken
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [
+            hasSupersedesId
+              ? "supersedes_checkout_token"
+              : "supersedes_consultation_id",
+          ],
+          message:
+            "A superseded booking needs both its identifier and its checkout token.",
         });
       }
     });

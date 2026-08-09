@@ -263,6 +263,12 @@ This column is the **only** thing that distinguishes a direct booking. There is 
 
 **`stripe_mode` (Amendment 007, migration 025).** Records the Stripe mode under which this consultation's PaymentIntent was created. It is the authoritative selector for every later capture, cancellation or refund, so a change to the global `app_settings.stripe_mode` never redirects an existing payment to the wrong Stripe account. Null when no PaymentIntent exists. Existing rows carrying a PaymentIntent were backfilled to `'test'`.
 
+**The draft hold (migrations 046 and 047).** A `draft` row **is** the slot hold — it appears in the index below, so while it exists nobody else can book that time. The hold is **30 minutes** from `created_at`, defined once in SQL: `create_draft_consultation` returns it as `hold_expires_at`, and `expire_stale_draft_consultations` cancels drafts past the same cutoff. The two live beside each other deliberately — a worker that disagreed with `hold_expires_at` would either cancel live bookings or leave dead ones standing.
+
+Three things release a held slot, and **an abandoned draft never reserves one permanently**: it is superseded when the visitor picks another time (only after the replacement succeeds), compensated when the booking could not be prepared for payment (`abandon_draft_consultation`, migration 046), or expired by the `expire-drafts` worker within 30–31 minutes (migration 047). All three set `status = 'cancelled'`, which is **outside** the index's status list, so the slot frees the moment the transaction commits. Nothing deletes the row: the record of a booking somebody started and did not finish is worth keeping.
+
+`idx_consultations_stale_drafts on consultations (status, created_at) where status = 'draft'` was created for the expiry sweep in migration 001 and went unused until migration 047.
+
 **The race-condition index (day one, non-negotiable):**
 
 ```sql

@@ -4,30 +4,38 @@ import {
   createDraftConsultationRecord,
   type CreatedDraftConsultation,
 } from "./draft.repository.js";
+import {
+  releaseSupersededDraft,
+  type SupersedeClaim,
+} from "./draft-supersede.service.js";
 import type { CreateDraftConsultationInput } from "./draft.schema.js";
 
 /*
- * Creating a bookable draft, and releasing the slot when that
- * fails.
+ * Creating a bookable draft, releasing the slot when that fails,
+ * and releasing the PREVIOUS draft when it succeeds.
  *
- * These two steps live together because they are one operation
- * that cannot be one transaction. The consultation row is in
+ * The first two live together because they are one operation that
+ * cannot be one transaction. The consultation row is in
  * PostgreSQL; the checkout capability is a key in Redis. Nothing
  * can make them atomic, so there is a window in which the row
  * exists and the booking cannot proceed — and a row in 'draft'
  * reserves its slot through unique_reserved_consultant_slot.
  *
- * NOTHING ELSE RECLAIMS THAT SLOT. The expire-drafts job named in
- * API_CONTRACT section 5 has never been implemented, so an
- * abandoned draft holds its slot until an admin intervenes.
- * Between migrations 045 and 046 that is exactly what happened:
- * the draft RPC stopped returning hold_expires_at, every booking
- * failed at the capability step, and each retry consumed another
- * slot until the consultant had none left.
+ * Between migrations 045 and 046 that window swallowed every
+ * booking: the draft RPC stopped returning hold_expires_at, the
+ * capability step failed for all of them, and each retry consumed
+ * another slot until the consultant had none left. So the
+ * compensation is not an afterthought bolted onto the failure
+ * branch; it is half of what this function is for.
  *
- * So the compensation is not an afterthought bolted onto the
- * failure branch; it is half of what this function is for, which
- * is why it is here rather than inline in the route.
+ * The third — releasing a superseded draft — is here for the same
+ * reason and not a different one. Its correctness is entirely a
+ * matter of ORDERING relative to the other two, and an ordering
+ * rule split across two files is a rule nobody can check.
+ *
+ * Migration 047's expiry worker is the backstop under all of it: a
+ * draft that survives every path here is cancelled within thirty
+ * minutes rather than holding its slot indefinitely.
  */
 
 export type PrepareDraftInput = {
@@ -38,6 +46,26 @@ export type PrepareDraftInput = {
   currency: string;
   bookingSource: "standard" | "direct_booking";
   draft: CreateDraftConsultationInput;
+  /*
+   * The draft this one replaces, already resolved and verified by
+   * the caller. Released ONLY once the replacement is fully
+   * prepared - see the note on the success path below.
+   */
+  supersedes?: SupersedeClaim | null;
+};
+
+export type SupersedeOutcome = {
+  attempted: boolean;
+  released: boolean;
+  consultationId: string | null;
+  reason: string | null;
+};
+
+const NO_SUPERSEDE: SupersedeOutcome = {
+  attempted: false,
+  released: false,
+  consultationId: null,
+  reason: null,
 };
 
 export type DraftCleanupOutcome = {
@@ -52,6 +80,13 @@ export type PrepareDraftResult =
       ok: true;
       draft: CreatedDraftConsultation;
       checkoutToken: string;
+      /*
+       * What happened to the draft this one replaced. Reported for
+       * logging; it never affects the result, because the
+       * replacement succeeded and that is what the visitor is
+       * told.
+       */
+      supersede: SupersedeOutcome;
     }
   | {
       ok: false;
@@ -189,10 +224,47 @@ export const prepareDraftConsultation =
      * Success. No cleanup runs on this path at all — the draft is
      * a live booking with a valid checkout token, and the client
      * is on their way to Stripe.
+     *
+     * ONLY NOW is the superseded draft released, and the ordering
+     * is the entire point. Releasing it earlier — before the
+     * insert, or in parallel with it — would mean a request that
+     * then failed left the visitor with no booking at all, having
+     * given up a slot somebody else may take in the interval.
+     * Holding both for a moment costs nothing; losing the only one
+     * costs the booking.
+     *
+     * Every failure path above returns before reaching this line,
+     * so a replacement that did not happen cannot release
+     * anything. That is why this lives here rather than in the
+     * route: the ordering is a property of this function and is
+     * checked as one.
+     *
+     * A release failure does not change the result. The old draft
+     * keeps its slot until the expiry worker reclaims it within
+     * thirty minutes, which is the backstop that lets this path
+     * fail safely.
      */
+    let supersede = NO_SUPERSEDE;
+
+    if (input.supersedes) {
+      const release =
+        await releaseSupersededDraft(
+          input.supersedes,
+        );
+
+      supersede = {
+        attempted: true,
+        released: release.released,
+        consultationId:
+          input.supersedes.consultationId,
+        reason: release.reason,
+      };
+    }
+
     return {
       ok: true,
       draft: creationResult.draft,
       checkoutToken: capabilityResult.token,
+      supersede,
     };
   };

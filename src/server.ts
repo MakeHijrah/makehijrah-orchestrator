@@ -26,6 +26,10 @@ import {
   startDeclineNotificationWorker,
   stopDeclineNotificationWorker,
 } from "./modules/consultations/decline-notification.worker.js";
+import {
+  startDraftExpiryWorker,
+  stopDraftExpiryWorker,
+} from "./modules/consultations/draft-expiry.worker.js";
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDirectBookingRoutes } from "./modules/direct-booking/direct-booking.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
@@ -282,6 +286,7 @@ const start =
       startDeclineNotificationWorker();
       startAuthorizationTimeoutNotificationWorker();
       startAuthorizationTimeoutWorker();
+      startDraftExpiryWorker();
       startOAuthHealthWorker();
       startOAuthHealthAlertWorker();
     } catch (error) {
@@ -294,6 +299,7 @@ const shutdown =
   async (): Promise<void> => {
     await stopOAuthHealthAlertWorker();
     await stopOAuthHealthWorker();
+    await stopDraftExpiryWorker();
     await stopAuthorizationTimeoutWorker();
     await stopAuthorizationTimeoutNotificationWorker();
     await stopDeclineNotificationWorker();

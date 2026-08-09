@@ -61,11 +61,18 @@ const { createDraftConsultationSchema } = await import(
 const { prepareDraftConsultation } = await import(
   "./draft-preparation.service.js"
 );
+const { createHash } = await import("node:crypto");
+const { default: Fastify } = await import("fastify");
+const { registerDraftConsultationRoute } = await import(
+  "./draft.route.js"
+);
 
 const CONSULTANT_ID = "44444444-4444-4444-8444-444444444444";
 const CLIENT_PROFILE = "22222222-2222-4222-8222-222222222222";
 const COUNTRY_ID = "99999999-9999-4999-8999-999999999999";
 const CONSULTATION_ID = "66666666-6666-4666-8666-666666666666";
+const SUPERSEDED_ID = "77777777-7777-4777-8777-777777777777";
+const SUPERSEDED_TOKEN = "token-for-the-superseded-draft";
 
 type RpcCall = {
   name: string;
@@ -93,12 +100,18 @@ let cleanupMode: "works" | "fails" = "works";
 /* Whether the Redis capability write works this run. */
 let redisMode: "works" | "fails" = "works";
 
+/* Whether releasing the superseded draft works this run. */
+let releaseMode: "works" | "fails" = "works";
+
+let capabilities = new Map<string, string>();
+
 const installStubs = (): void => {
   rpcCalls = [];
   redisSets = [];
   draftRpcMode = "restored";
   cleanupMode = "works";
   redisMode = "works";
+  releaseMode = "works";
 
   supabaseAdmin.rpc = (async (
     name: string,
@@ -202,6 +215,39 @@ const installStubs = (): void => {
 
     return "OK";
   }) as unknown as typeof redis.set;
+
+  /*
+   * The capability store for the draft being superseded, keyed the
+   * way the real one is: sha256 of the token, naming exactly one
+   * consultation.
+   */
+  capabilities = new Map([
+    [
+      `booking-checkout:${createHash("sha256")
+        .update(SUPERSEDED_TOKEN)
+        .digest("hex")}`,
+      SUPERSEDED_ID,
+    ],
+  ]);
+
+  redis.get = (async (key: string) => {
+    const consultationId =
+      capabilities.get(key);
+
+    return consultationId
+      ? JSON.stringify({
+          consultation_id: consultationId,
+        })
+      : null;
+  }) as unknown as typeof redis.get;
+
+  redis.del = (async (key: string) => {
+    if (releaseMode === "fails") {
+      return 0;
+    }
+
+    return capabilities.delete(key) ? 1 : 0;
+  }) as unknown as typeof redis.del;
 };
 
 const parsedDraft = (
@@ -239,6 +285,10 @@ const prepare = (
     priceCents: number;
     bookingSource: "standard" | "direct_booking";
     extra: Record<string, unknown>;
+    supersedes: {
+      consultationId: string;
+      checkoutToken: string;
+    } | null;
   }> = {},
 ) =>
   prepareDraftConsultation({
@@ -254,7 +304,20 @@ const prepare = (
         consultant_id: CONSULTANT_ID,
       },
     ),
+    supersedes:
+      overrides.supersedes ?? null,
   });
+
+const supersedeClaim = {
+  consultationId: SUPERSEDED_ID,
+  checkoutToken: SUPERSEDED_TOKEN,
+};
+
+const abandonCalls = (): RpcCall[] =>
+  rpcCalls.filter(
+    (call) =>
+      call.name === "abandon_draft_consultation",
+  );
 
 const cleanupCalls = (): RpcCall[] =>
   rpcCalls.filter(
@@ -509,5 +572,198 @@ describe("Booking source is unaffected", () => {
       call.args.p_consultant_id,
       CONSULTANT_ID,
     );
+  });
+});
+
+
+describe("Superseding, and its ordering", () => {
+  it("releases the previous draft only after the new one is usable", async () => {
+    const result = await prepare({
+      supersedes: supersedeClaim,
+    });
+
+    assert.equal(result.ok, true);
+
+    if (!result.ok) {
+      return;
+    }
+
+    assert.equal(
+      result.supersede.attempted,
+      true,
+    );
+    assert.equal(
+      result.supersede.released,
+      true,
+    );
+    assert.equal(
+      result.supersede.consultationId,
+      SUPERSEDED_ID,
+    );
+
+    /* The old draft's capability is consumed, not left live. */
+    assert.equal(capabilities.size, 0);
+
+    /*
+     * And the ordering, read off the call log: the replacement was
+     * inserted, its capability written, and only then was the old
+     * draft cancelled.
+     */
+    assert.equal(
+      rpcCalls[0]!.name,
+      "create_draft_consultation",
+    );
+    assert.equal(redisSets.length, 1);
+    assert.deepEqual(
+      abandonCalls().map(
+        (call) => call.args.p_consultation_id,
+      ),
+      [SUPERSEDED_ID],
+    );
+  });
+
+  it("leaves the previous draft intact when the new one cannot be created", async () => {
+    draftRpcMode = "duplicate";
+
+    const result = await prepare({
+      supersedes: supersedeClaim,
+    });
+
+    assert.equal(result.ok, false);
+
+    /*
+     * The visitor still holds their original booking. Releasing it
+     * first and then failing would have left them with nothing,
+     * and with a slot somebody else can now take.
+     */
+    assert.deepEqual(abandonCalls(), []);
+    assert.equal(capabilities.size, 1);
+  });
+
+  it("leaves the previous draft intact when the new one has no capability", async () => {
+    redisMode = "fails";
+
+    const result = await prepare({
+      supersedes: supersedeClaim,
+    });
+
+    assert.equal(result.ok, false);
+
+    /*
+     * One abandon call, and it is for the REPLACEMENT — migration
+     * 046's compensation releasing the row it just created. The
+     * superseded draft is untouched.
+     */
+    assert.deepEqual(
+      abandonCalls().map(
+        (call) => call.args.p_consultation_id,
+      ),
+      [CONSULTATION_ID],
+    );
+
+    assert.equal(capabilities.size, 1);
+  });
+
+  it("leaves the previous draft intact when the new row is unusable", async () => {
+    draftRpcMode = "broken";
+
+    const result = await prepare({
+      supersedes: supersedeClaim,
+    });
+
+    assert.equal(result.ok, false);
+
+    assert.deepEqual(
+      abandonCalls().map(
+        (call) => call.args.p_consultation_id,
+      ),
+      [CONSULTATION_ID],
+    );
+
+    assert.equal(capabilities.size, 1);
+  });
+
+  it("still returns the new booking when releasing the old one fails", async () => {
+    releaseMode = "fails";
+
+    const result = await prepare({
+      supersedes: supersedeClaim,
+    });
+
+    /*
+     * The replacement succeeded, so the visitor is told it
+     * succeeded. The old draft keeps its slot until the expiry
+     * worker reclaims it within thirty minutes — that backstop is
+     * what lets this path fail safely instead of failing loudly.
+     */
+    assert.equal(result.ok, true);
+
+    if (!result.ok) {
+      return;
+    }
+
+    assert.equal(
+      result.draft.consultationId,
+      CONSULTATION_ID,
+    );
+    assert.ok(result.checkoutToken);
+    assert.equal(
+      result.supersede.attempted,
+      true,
+    );
+    assert.equal(
+      result.supersede.released,
+      false,
+    );
+  });
+
+  it("releases nothing when no previous draft was claimed", async () => {
+    const result = await prepare();
+
+    assert.equal(result.ok, true);
+    assert.equal(
+      result.ok && result.supersede.attempted,
+      false,
+    );
+    assert.deepEqual(abandonCalls(), []);
+  });
+});
+
+describe("Public draft rate limit", () => {
+  it("is still five per minute", async () => {
+    /*
+     * Read off the REGISTERED route rather than the source, so a
+     * change to the config is caught here. This build deliberately
+     * added no anti-abuse controls: the protections are that
+     * superseded holds are released immediately and abandoned ones
+     * expire at thirty minutes.
+     */
+    const app = Fastify();
+
+    let draftRouteConfig: unknown = null;
+
+    app.addHook("onRoute", (route) => {
+      if (
+        route.url ===
+          "/api/consultations/draft" &&
+        route.method === "POST"
+      ) {
+        draftRouteConfig = (
+          route.config as
+            | { rateLimit?: unknown }
+            | undefined
+        )?.rateLimit;
+      }
+    });
+
+    await registerDraftConsultationRoute(app);
+    await app.ready();
+
+    assert.deepEqual(draftRouteConfig, {
+      max: 5,
+      timeWindow: "1 minute",
+    });
+
+    await app.close();
   });
 });
