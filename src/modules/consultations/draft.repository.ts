@@ -55,6 +55,13 @@ export type CreateDraftRepositoryResult =
       ok: false;
       code: "SLOT_TAKEN" | "INTERNAL_ERROR";
       message: string;
+      /*
+       * Set only when the consultation row WAS created and then
+       * could not be used. The caller must compensate for it -
+       * otherwise the row sits in 'draft' holding a slot nobody
+       * can book. Absent when nothing was inserted.
+       */
+      orphanedConsultationId?: string;
     };
 
 type DraftRpcRow = {
@@ -64,6 +71,37 @@ type DraftRpcRow = {
   consultation_price_cents: number;
   consultation_currency: string;
 };
+
+/*
+ * The five columns create_draft_consultation returns, named here
+ * so a change to that contract is caught HERE rather than four
+ * calls later.
+ *
+ * This check exists because it already failed once. Migration 045
+ * replaced the RPC and returned two columns instead of five; the
+ * missing hold_expires_at read as undefined, Date.parse gave NaN,
+ * and the checkout capability's TTL calculation refused it - so
+ * every booking answered 500 after its consultation row had
+ * already been inserted, and the diagnosis was three files away
+ * from the cause. A contract this load-bearing should not be
+ * consumed on trust.
+ */
+const REQUIRED_DRAFT_COLUMNS = [
+  "consultation_id",
+  "consultation_status",
+  "hold_expires_at",
+  "consultation_price_cents",
+  "consultation_currency",
+] as const;
+
+const missingDraftColumns = (
+  row: Record<string, unknown>,
+): string[] =>
+  REQUIRED_DRAFT_COLUMNS.filter(
+    (column) =>
+      row[column] === undefined ||
+      row[column] === null,
+  );
 
 export const createDraftConsultationRecord = async ({
   clientProfileId,
@@ -146,6 +184,44 @@ export const createDraftConsultationRecord = async ({
     };
   }
 
+  const missing = missingDraftColumns(
+    row as unknown as Record<
+      string,
+      unknown
+    >,
+  );
+
+  if (missing.length > 0) {
+    console.error(
+      "Draft consultation RPC returned an unexpected shape",
+      {
+        missing,
+        consultationId:
+          row.consultation_id ?? null,
+        consultantId,
+        clientProfileId,
+      },
+    );
+
+    return {
+      ok: false,
+      code: "INTERNAL_ERROR",
+      message:
+        "The consultation could not be created.",
+      /*
+       * The row exists even though it is unusable, so the caller
+       * must still release the slot it is holding.
+       */
+      ...(typeof row.consultation_id ===
+      "string"
+        ? {
+            orphanedConsultationId:
+              row.consultation_id,
+          }
+        : {}),
+    };
+  }
+
   return {
     ok: true,
     draft: {
@@ -158,3 +234,106 @@ export const createDraftConsultationRecord = async ({
     },
   };
 };
+
+/*
+ * Release the slot a failed booking is holding.
+ *
+ * The consultation row and the Redis checkout capability cannot
+ * share a transaction, so there is a window in which the row
+ * exists and the booking cannot proceed. This is the compensation
+ * for that window.
+ *
+ * The RPC matches on id AND status = 'draft', so it cannot cancel
+ * a booking whose payment preparation actually succeeded, and a
+ * repeat call changes nothing. Nothing here decides that: the
+ * predicate is in the database.
+ *
+ * Never throws. It runs on a path that is already failing, and a
+ * cleanup problem must not replace the error the caller is about
+ * to report.
+ */
+export type AbandonDraftResult = {
+  cancelled: boolean;
+  reason:
+    | "cancelled"
+    | "not_draft"
+    | "not_found"
+    | "cleanup_failed";
+};
+
+type AbandonDraftRpcRow = {
+  consultation_id: string;
+  cancelled: boolean;
+  reason: "cancelled" | "not_draft" | "not_found";
+};
+
+export const abandonDraftConsultation =
+  async (
+    consultationId: string,
+  ): Promise<AbandonDraftResult> => {
+    try {
+      const { data, error } =
+        await supabaseAdmin.rpc(
+          "abandon_draft_consultation",
+          {
+            p_consultation_id:
+              consultationId,
+          },
+        );
+
+      if (error) {
+        console.error(
+          "Draft consultation cleanup failed",
+          {
+            consultationId,
+            code: error.code,
+            message: error.message,
+            details: error.details,
+            hint: error.hint,
+          },
+        );
+
+        return {
+          cancelled: false,
+          reason: "cleanup_failed",
+        };
+      }
+
+      const row = (
+        data as AbandonDraftRpcRow[] | null
+      )?.[0];
+
+      if (!row) {
+        console.error(
+          "Draft consultation cleanup returned no row",
+          { consultationId },
+        );
+
+        return {
+          cancelled: false,
+          reason: "cleanup_failed",
+        };
+      }
+
+      return {
+        cancelled: row.cancelled,
+        reason: row.reason,
+      };
+    } catch (error) {
+      console.error(
+        "Draft consultation cleanup threw",
+        {
+          consultationId,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Unknown error",
+        },
+      );
+
+      return {
+        cancelled: false,
+        reason: "cleanup_failed",
+      };
+    }
+  };

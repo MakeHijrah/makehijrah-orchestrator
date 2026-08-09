@@ -4,12 +4,12 @@ import {
   sendSuccess,
 } from "../../lib/api-response.js";
 import { resolveBookingClient } from "./booking-client.service.js";
-import { createCheckoutCapability } from "./checkout-capability.service.js";
+
 import {
   validateDraftConsultantGender,
 } from "./draft-gender-validation.js";
 import { validateDraftSlot } from "./draft-availability.js";
-import { createDraftConsultationRecord } from "./draft.repository.js";
+import { prepareDraftConsultation } from "./draft-preparation.service.js";
 import { createDraftConsultationSchema } from "./draft.schema.js";
 import {
   getSettings,
@@ -296,8 +296,18 @@ export const registerDraftConsultationRoute = async (
         );
       }
 
-      const creationResult =
-        await createDraftConsultationRecord({
+      /*
+       * Create the row and mint its checkout capability, together.
+       *
+       * The two cannot share a transaction - one is PostgreSQL and
+       * one is Redis - so a failure between them would leave a
+       * draft holding a slot that nothing in the system reclaims.
+       * prepareDraftConsultation owns that compensation, which is
+       * why both steps are behind one call rather than sequenced
+       * here. See draft-preparation.service.
+       */
+      const preparation =
+        await prepareDraftConsultation({
           clientProfileId:
             clientResult.profileId,
           scheduledEndAt:
@@ -310,16 +320,62 @@ export const registerDraftConsultationRoute = async (
           draft: parsed.data,
         });
 
-      if (!creationResult.ok) {
+      if (!preparation.ok) {
         if (
-          creationResult.code ===
-          "SLOT_TAKEN"
+          preparation.code === "SLOT_TAKEN"
         ) {
           return sendError(
             reply,
             409,
             "SLOT_TAKEN",
-            creationResult.message,
+            preparation.message,
+          );
+        }
+
+        request.log.error(
+          {
+            consultantId,
+            cause: preparation.cause,
+            consultationId:
+              preparation.cleanup
+                .consultationId,
+          },
+          "Draft consultation could not be prepared for payment",
+        );
+
+        /*
+         * The cleanup is reported SEPARATELY and never changes the
+         * answer. A cleanup that itself failed is an operational
+         * problem - that slot is now stuck - but the client still
+         * needs to hear about the failure that actually stopped
+         * their booking.
+         */
+        if (
+          preparation.cleanup.attempted &&
+          !preparation.cleanup.released
+        ) {
+          request.log.error(
+            {
+              consultationId:
+                preparation.cleanup
+                  .consultationId,
+              reason:
+                preparation.cleanup.reason,
+              cause: preparation.cause,
+            },
+            "Failed draft consultation could not be released and is still holding its slot",
+          );
+        } else if (
+          preparation.cleanup.released
+        ) {
+          request.log.warn(
+            {
+              consultationId:
+                preparation.cleanup
+                  .consultationId,
+              cause: preparation.cause,
+            },
+            "Failed draft consultation released",
           );
         }
 
@@ -327,54 +383,22 @@ export const registerDraftConsultationRoute = async (
           reply,
           500,
           "INTERNAL_ERROR",
-          creationResult.message,
-        );
-      }
-
-      const capabilityResult =
-        await createCheckoutCapability({
-          consultationId:
-            creationResult.draft
-              .consultationId,
-          holdExpiresAt:
-            creationResult.draft
-              .holdExpiresAt,
-        });
-
-      if (!capabilityResult.ok) {
-        request.log.error(
-          {
-            consultationId:
-              creationResult.draft
-                .consultationId,
-            code: capabilityResult.code,
-          },
-          "Checkout capability creation failed",
-        );
-
-        return sendError(
-          reply,
-          500,
-          "INTERNAL_ERROR",
-          "The booking could not be prepared for payment.",
+          preparation.message,
         );
       }
 
       return sendSuccess(reply, {
         consultation_id:
-          creationResult.draft
-            .consultationId,
-        status:
-          creationResult.draft.status,
+          preparation.draft.consultationId,
+        status: preparation.draft.status,
         hold_expires_at:
-          creationResult.draft
-            .holdExpiresAt,
+          preparation.draft.holdExpiresAt,
         price_cents:
-          creationResult.draft.priceCents,
+          preparation.draft.priceCents,
         currency:
-          creationResult.draft.currency,
+          preparation.draft.currency,
         checkout_token:
-          capabilityResult.token,
+          preparation.checkoutToken,
       });
     },
   );

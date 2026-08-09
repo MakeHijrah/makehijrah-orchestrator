@@ -454,6 +454,28 @@ Verification: `MIGRATION_045_VERIFICATION.sql`, **27 checks against PostgreSQL 1
 
 ---
 
+## 9h. Generic booking draft regression — migration 046 **[D]**
+
+A production outage caused by migration 045, found and fixed. Every booking — generic and direct alike — answered `500 INTERNAL_ERROR` after inserting its consultation, and each failed attempt left a draft holding the slot.
+
+- **Root cause.** Migration 045 dropped `create_draft_consultation` to add a `booking_source` argument and rewrote the body, returning `(consultation_id, created_at)` where migration 005 returned five columns. The orchestrator reads `hold_expires_at` off that row and turns it into the Redis checkout capability's TTL; the missing column read as `undefined`, `Date.parse` gave `NaN`, the TTL was refused, and `createCheckoutCapability` failed **before touching Redis**. Redis, Stripe, environment and configuration were not involved. **[D]**
+- **Three further regressions in the same function**, all fixed: migration 045's added overlap guard raised `SLOT_TAKEN` as **P0001** where the repository maps only **23505**, so a genuine double booking became a 500 with an orphaned draft; that guard was also broader than the index it duplicated, permanently blocking any slot left in `admin_attention`, `completed` or `refunded`; and the three migration 005 validations (`end > start`, `price > 0`, lowercase currency, all `22023`) plus `nullif(trim(p_phone_whatsapp), '')` had been dropped. **[D]**
+- **Migration 046 restores migration 005's body verbatim**, with only `p_booking_source` and the `booking_source` insert added, and the migration 036 hardened `search_path` and ACL posture. The overlap guard is removed entirely — `unique_reserved_consultant_slot` is again the sole authority on slot conflicts, and is not modified. **[D]**
+- **`abandon_draft_consultation(uuid)`**, new. Cancels a consultation matching `id AND status = 'draft'`, so it cannot touch a booking whose payment preparation succeeded and is idempotent by construction. `cancelled` sits outside the index's status list, so the slot frees immediately. **[D]**
+- **`prepareDraftConsultation`** now owns the insert and the capability together, because they cannot share a transaction — one is PostgreSQL, one is Redis. On any post-insert failure it releases the slot. The cleanup's outcome is logged separately and **never changes the response**; a cleanup that itself fails is reported as a stuck slot, and the client still hears the error that actually stopped their booking. No cleanup runs on success, and none runs on a 23505 — that row belongs to somebody else. **[D]**
+- **The `expire-drafts` job in `API_CONTRACT.md` §5 has never been implemented.** That is why an orphaned draft held its slot indefinitely rather than for thirty minutes. Still not implemented; the compensation above covers the failure path, not abandonment. **[ ]**
+- **Migration 045's finance guards are untouched.** `FINANCE_NOT_STANDARD_BOOKING` on `record_consultation_earning` and the three direct booking RPCs are unrelated to this regression and remain exactly as built. **[D]**
+
+Verification: `MIGRATION_046_VERIFICATION.sql`, **24 checks against PostgreSQL 16**, which **invokes** the RPC and asserts `pg_get_function_result` column by column. Migrations 038–045 re-verified; clean-room replay of 001–046 and a second run of 046 for idempotency. Orchestrator: **616 tests pass**, including a stub that reproduces migration 045's broken two-column row and asserts it is refused at the repository boundary with the slot released. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Operational, not in the migration:** drafts stranded by this bug must be cancelled by an operator. Scope is the established thirty-minute hold, not any deployment window — the review and update statements are in `MIGRATION_046_VERIFICATION.sql` part 7. This workspace has no production credentials and the cleanup has **not** been run.
+
+### Standing regression rule
+
+**Any migration that replaces an RPC the orchestrator calls must have a verification that INVOKES it and asserts its runtime result contract, column by column.** Migration 045's verification checked that the function existed at the right signature and that its ACL was correct, and passed, because both were true. The orchestrator tests passed too — they stub the RPC, and the stub returned the shape the code expected rather than the shape the database produced. Neither layer ever called the function. A signature says nothing about what comes back.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -484,6 +506,7 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 - Client provisioning through the booking backend; consultant provisioning through invitations.
 - Server-controlled consultation price and currency; price snapshot immutability.
 - The effective direct booking price rule, and the reserved slug list, which must gain an entry whenever a top-level frontend route is added (Amendment 011).
+- `create_draft_consultation`'s five-column return contract, and `unique_reserved_consultant_slot` as the sole authority on slot conflicts (migration 046).
 - Stripe manual-capture workflow.
 - `consultations.stripe_mode` as the selector for existing payments.
 - Stripe credentials in Railway environment variables only.
@@ -567,7 +590,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 045
+- `supabase/migrations/` — migrations 001 through 046
 
 ---
 

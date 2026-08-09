@@ -849,7 +849,7 @@ consultant_payout_settings (own / admin)         → payout method section, admi
 
 | Job | Schedule | Action |
 |---|---|---|
-| `expire-drafts` | every 15 min | `draft` older than 30 min → `cancelled` |
+| `expire-drafts` | every 15 min | `draft` older than 30 min → `cancelled` — **NOT IMPLEMENTED.** No such worker exists. Until it does, nothing reclaims an abandoned draft and its slot stays reserved indefinitely. Migration 046 added `abandon_draft_consultation`, which the draft endpoint calls when a booking fails *after* its row was inserted; that covers the failure path, not abandonment. |
 | `authorization-timeout` | every 15 min | `pending_acceptance` + `payment_authorized_at < now()-48h` → cancel Stripe auth → `admin_attention` (reason `timeout`) → email admin + client |
 | `consultant-reminder` | every 15 min | `pending_acceptance` at 24h mark → reminder email to consultant (once, tracked via jsonb flag or sent-window logic) |
 | `session-reminder` | every 15 min | `confirmed` starting within 24h / 1h → reminder emails (client + consultant) |
