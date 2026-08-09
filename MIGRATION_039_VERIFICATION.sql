@@ -849,9 +849,15 @@ begin
   insert into auth.users (id, email)
   values (v_third_profile, 'v39-third@verification.invalid');
 
+  /* public.handle_new_user() already created this row from the
+     auth.users insert above, so this is an upsert rather than an
+     insert - the trigger is real and fires in staging. */
   insert into public.profiles (id, role, full_name, email)
   values (v_third_profile, 'consultant', 'V39 Third',
-          'v39-third@verification.invalid');
+          'v39-third@verification.invalid')
+  on conflict (id) do update
+    set role = excluded.role,
+        full_name = excluded.full_name;
 
   insert into public.consultants (profile_id, timezone, is_active)
   values (v_third_profile, 'Africa/Cairo', true)

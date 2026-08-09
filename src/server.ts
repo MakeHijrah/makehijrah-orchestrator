@@ -27,6 +27,7 @@ import {
   stopDeclineNotificationWorker,
 } from "./modules/consultations/decline-notification.worker.js";
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
+import { registerDirectBookingRoutes } from "./modules/direct-booking/direct-booking.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
 import { registerAdminFinanceRoutes } from "./modules/finance/admin-finance.route.js";
 import { registerAdminServicePurchaseRoutes } from "./modules/finance/admin-service-purchase.route.js";
@@ -199,6 +200,10 @@ app.get(
 await registerAvailabilityRoute(
   app,
 );
+await registerDirectBookingRoutes(
+  app,
+);
+
 await registerDraftConsultationRoute(
   app,
 );

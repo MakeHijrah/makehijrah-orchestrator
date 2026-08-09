@@ -75,9 +75,29 @@ create table consultants (
   minimum_booking_notice_hours integer not null default 24,
   available_for_general boolean not null default false,     -- "general information" path
   is_active boolean not null default false,                 -- admin activates after onboarding complete
+  consultant_slug text,                                     -- root booking URL (Amendment 011, migration 045)
+  direct_booking_enabled boolean not null default false,    -- Amendment 011, migration 045
+  direct_booking_price_cents integer,                       -- CONFIGURED price; see the effective price rule
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint consultants_slug_format_check
+    check (consultant_slug is null
+           or consultant_slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+  constraint consultants_slug_length_check
+    check (consultant_slug is null
+           or length(consultant_slug) between 3 and 60),
+  constraint consultants_direct_price_range_check
+    check (direct_booking_price_cents is null
+           or direct_booking_price_cents between 100 and 1000000),
+  constraint consultants_direct_booking_ready_check
+    check (direct_booking_enabled = false
+           or (consultant_slug is not null
+               and direct_booking_price_cents is not null))
 );
+
+create unique index uq_consultants_slug
+  on consultants (consultant_slug)
+  where consultant_slug is not null;
 ```
 
 `working_hours_jsonb` shape (per Dave):
@@ -110,6 +130,14 @@ Named-to-numeric conversion happens inside `save_consultant_profile`; numeric-to
 **`display_name` (Amendment 008, migration 030 — authored, not applied).** The **denormalised public projection** of `profiles.full_name`, which remains authoritative. It exists for the same reason as `photo_url` and follows the identical rule: the public booking flow renders `{consultant name} - {headline}`, `headline` already lives on `consultants`, and the name did not — so rendering it would have required widening `profiles` SELECT and exposing `email`, `phone_whatsapp` and every other private column to reach one public field. Both fields are written together, from one argument, in one transaction, by the service-role RPC `save_consultant_profile` — a non-null `p_full_name` sets both, a null preserves both — so they cannot diverge through the supported write path. Nothing else writes `display_name`. Public, client and admin cross-user consultant surfaces may read it **without reading `profiles`**, through the pre-existing `consultants_select_active_public` policy; migration 030 adds, drops and rewrites no policy. The column is nullable with no default: a consultant whose authoritative `full_name` is null projects null, never `''`. Migration 030 backfills it once from `profiles.full_name`, skipping rows whose authoritative name is null.
 
 Only these two public-safe fields are projected. No other `profiles` column — `email`, `phone_whatsapp`, role or profile metadata — is copied onto `consultants`.
+
+**Direct booking (Amendment 011, migration 045).** Three columns let a consultant publish a personal booking page at a **root URL** and set their own price.
+
+- **`consultant_slug`** is the URL. The database owns **format** (lowercase, URL-safe, 3–60 characters, no leading, trailing or doubled hyphen) and **uniqueness** (`uq_consultants_slug`, partial so many consultants may hold `null`). The database deliberately does **not** own the **reserved** set — `admin`, `dashboard`, `api`, `favicon.ico` and the rest of the frontend's routing table. That list is a fact about routing, not about the schema; it changes when a page is added, and encoding it here would guarantee the two drift apart. It lives in the orchestrator (`direct-booking.slug.ts`), and **there is no `reserved_slugs` table**. The stored value is always the normalized one, so the column is always exactly what appears in the URL.
+- **`direct_booking_enabled`** defaults to `false`: a consultant opts in. `consultants_direct_booking_ready_check` makes publishing without a URL to publish at, or a price to charge, impossible rather than merely refused.
+- **`direct_booking_price_cents`** is the **configured** price and is **not necessarily the price charged**. The charged price is `max(direct_booking_price_cents, app_settings.consultation_price_cents)` — see Amendment 011 §4. The "at least the platform price" rule is enforced by the orchestrator **at save time** and deliberately is *not* a constraint: the platform default may later rise above a stored price, and a constraint would then invalidate an untouched row and block every unrelated update to it.
+
+`consultants_select_active_public` is a **row** policy, so `anon` can read these three columns directly. That is why the public booking page is a **server-built projection** rather than a table read: it publishes `effective_direct_booking_price_cents` and never the stored figure, so a frontend cannot display a stale price while checkout charges a higher one. No policy was added, dropped or widened by migration 045.
 
 ---
 
@@ -206,6 +234,7 @@ create table consultations (
   client_timezone text,                       -- IANA
   price_cents integer not null,
   currency text not null default 'usd',
+  booking_source text not null default 'standard',  -- Amendment 011, migration 045
   stripe_payment_intent_id text unique,
   stripe_mode text,                           -- Amendment 007, migration 025; null when no PaymentIntent
   payment_authorized_at timestamptz,
@@ -222,9 +251,15 @@ create table consultations (
   constraint consultation_end_after_start check (scheduled_end_at > scheduled_start_at),
   constraint consultation_currency_lowercase check (currency = lower(currency)),
   constraint consultations_stripe_mode_check
-    check (stripe_mode is null or stripe_mode in ('test', 'live'))
+    check (stripe_mode is null or stripe_mode in ('test', 'live')),
+  constraint consultations_booking_source_check
+    check (booking_source in ('standard', 'direct_booking'))
 );
 ```
+
+**`booking_source` (Amendment 011, migration 045).** Where the booking came from, and therefore where its price came from and which commission rule applies to its money. `'standard'` is the generic flow; `'direct_booking'` is a consultant's own page. Existing rows were backfilled to `'standard'`, and the default means an ordinary booking never has to say so.
+
+This column is the **only** thing that distinguishes a direct booking. There is no `direct_consultations` table and no parallel payment record: same statuses, same draft hold, same double-booking exclusion, same checkout, capture, completion, refund and timeout. See Amendment 011 §2.
 
 **`stripe_mode` (Amendment 007, migration 025).** Records the Stripe mode under which this consultation's PaymentIntent was created. It is the authoritative selector for every later capture, cancellation or refund, so a change to the global `app_settings.stripe_mode` never redirects an existing payment to the wrong Stripe account. Null when no PaymentIntent exists. Existing rows carrying a PaymentIntent were backfilled to `'test'`.
 

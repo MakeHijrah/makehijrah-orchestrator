@@ -131,8 +131,13 @@ begin
   insert into public.consultants (profile_id, timezone, is_active)
   values (v_cpr, 'Africa/Cairo', true) returning id into v_con;
 
-  insert into public.consultations (client_profile_id, consultant_id)
-  values (v_clp, v_con) returning id into v_consultation;
+  insert into public.consultations (
+    client_profile_id, consultant_id, status,
+    scheduled_start_at, scheduled_end_at, price_cents, currency)
+  values (v_clp, v_con, 'completed',
+    now() + interval '1 day', now() + interval '1 day 1 hour',
+    15000, 'usd')
+  returning id into v_consultation;
 
   /* 5000 bps keeps the arithmetic legible: half of every refund. */
   insert into public.services (
@@ -508,13 +513,31 @@ begin
   end if;
 
   /* Check 11 — pay it out, then refund the rest. */
+  /*
+   * Built the way a real payout is built, because the real
+   * triggers enforce that order: trg_payout_allocation_guard
+   * refuses to attach an earning to an already-paid payout, and
+   * payouts_paid_shape_check requires the full evidence that
+   * payment happened. So the request is opened, the earning is
+   * allocated to it, and only then is it marked paid.
+   */
   insert into public.payouts (
     consultant_id, status, currency, requested_amount_minor)
-  values (current_setting('app.v43_con')::uuid, 'paid', 'usd', 3000)
+  values (current_setting('app.v43_con')::uuid, 'requested', 'usd',
+    3000)
   returning id into v_payout;
 
   insert into public.payout_allocations (payout_id, ledger_entry_id)
   values (v_payout, v_entry);
+
+  update public.payouts
+     set status = 'paid',
+         paid_amount_minor = 3000,
+         paid_at = now(),
+         approved_at = now(),
+         decided_by_admin_profile_id
+           = current_setting('app.v43_clp')::uuid
+   where id = v_payout;
 
   perform public.reverse_service_purchase_earning(
     v_purchase, 'refund the rest', 10000);

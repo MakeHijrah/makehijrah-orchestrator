@@ -15,6 +15,7 @@ import {
   getSettings,
   SettingsUnavailableError,
 } from "../settings/settings.provider.js";
+import { getPublicConsultantBySlug } from "../direct-booking/direct-booking.service.js";
 
 export const registerDraftConsultationRoute = async (
   app: FastifyInstance,
@@ -78,6 +79,71 @@ export const registerDraftConsultationRoute = async (
       }
 
       /*
+       * WHICH CONSULTANT, AT WHAT PRICE, FROM WHICH SOURCE.
+       *
+       * All three are decided HERE, on the server, before anything
+       * else happens. Everything downstream — eligibility, the
+       * slot, the draft row, checkout — uses these values and
+       * never re-reads the request body for them.
+       *
+       * For a direct booking the slug is the ONLY consultant
+       * identifier consulted. The schema has already refused a
+       * request carrying both a slug and an id, so there is no
+       * browser-supplied id here to prefer or to compare against;
+       * the consultant is whoever the published page belongs to.
+       *
+       * The price is the EFFECTIVE direct price, from the same
+       * function the public page displays. That is what makes the
+       * quoted price and the charged price the same number by
+       * construction rather than by two call sites agreeing.
+       */
+      let consultantId: string;
+      let priceCents: number;
+      let bookingSource:
+        | "standard"
+        | "direct_booking";
+
+      if (parsed.data.consultant_slug) {
+        const page =
+          await getPublicConsultantBySlug(
+            parsed.data.consultant_slug,
+          );
+
+        if (!page.ok) {
+          /*
+           * An unpublished, deactivated or unknown page is a 404,
+           * exactly as the page itself is. A booking cannot be
+           * started against a page a visitor could not have seen.
+           */
+          return sendError(
+            reply,
+            page.code === "NOT_FOUND"
+              ? 404
+              : 500,
+            page.code,
+            page.message,
+          );
+        }
+
+        consultantId =
+          page.consultant.consultant_id;
+
+        priceCents =
+          page.consultant
+            .effective_direct_booking_price_cents;
+
+        bookingSource = "direct_booking";
+      } else {
+        consultantId =
+          parsed.data.consultant_id!;
+
+        priceCents =
+          settings.consultation_price_cents;
+
+        bookingSource = "standard";
+      }
+
+      /*
        * Consultant eligibility, including destination capability,
        * is settled here - before slot validation, before the
        * booking client is resolved, before the draft row exists
@@ -86,8 +152,7 @@ export const registerDraftConsultationRoute = async (
        */
       const genderValidation =
         await validateDraftConsultantGender({
-          consultantId:
-            parsed.data.consultant_id,
+          consultantId,
           countryId:
             parsed.data.country_id,
           preferredConsultantGender:
@@ -136,8 +201,7 @@ export const registerDraftConsultationRoute = async (
 
       const slotValidation =
         await validateDraftSlot({
-          consultantId:
-            parsed.data.consultant_id,
+          consultantId,
           startAt: parsed.data.start_at,
           durationMinutes:
             settings.consultation_duration_minutes,
@@ -218,8 +282,7 @@ export const registerDraftConsultationRoute = async (
         request.log.error(
           {
             code: clientResult.code,
-            consultantId:
-              parsed.data.consultant_id,
+            consultantId,
             startAt: parsed.data.start_at,
           },
           "Public booking client resolution failed",
@@ -239,8 +302,9 @@ export const registerDraftConsultationRoute = async (
             clientResult.profileId,
           scheduledEndAt:
             slotValidation.endAt,
-          priceCents:
-            settings.consultation_price_cents,
+          consultantId,
+          priceCents,
+          bookingSource,
           currency:
             settings.consultation_currency,
           draft: parsed.data,

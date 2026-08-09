@@ -222,6 +222,100 @@ Behaviour: a fixed delay elapses before delivery; if the recipient reads the mes
 
 ---
 
+## 2c. Direct consultant booking — public, consultant and admin
+
+Added by PROJECT_LOCK Amendment 011, backed by migration 045. A consultant publishes a personal booking page at a **root URL** and sets their own price. A booking taken through it is an **ordinary consultation** — same table, same statuses, same checkout, same double-booking protection — distinguished only by `consultations.booking_source`.
+
+### `GET /api/public/consultants/:slug`
+
+**No authentication.** This is the page a consultant shares. Rate limit: 60 / minute.
+
+The slug is **normalized before lookup** (trim, lowercase, NFKD, drop combining marks, non-alphanumeric runs to single hyphens, collapse, trim), so `/Aisha%20Rahman` and `/aisha-rahman` resolve to the same page. A **reserved** name — `admin`, `dashboard`, `api`, `favicon.ico` and the rest of the frontend's routing table — is refused before the database is consulted.
+
+Response `data.consultant` contains exactly:
+
+```json
+{
+  "consultant_id": "uuid",
+  "consultant_slug": "string",
+  "display_name": "string | null",
+  "headline": "string | null",
+  "bio": "string | null",
+  "photo_url": "string | null",
+  "timezone": "string | null",
+  "gender": "male | female | null",
+  "available_for_general": "boolean",
+  "minimum_booking_notice_hours": "integer | null",
+  "country_ids": "uuid[]",
+  "effective_direct_booking_price_cents": "integer",
+  "currency": "string"
+}
+```
+
+**`effective_direct_booking_price_cents` is the price the client will actually be charged**, computed server-side as `max(consultants.direct_booking_price_cents, app_settings.consultation_price_cents)`. The **configured** price is deliberately not published: a page that showed the stored figure while checkout charged the effective one would quote a client one number and take another. **The frontend must render this field and must not reproduce the price rule.**
+
+Nothing else is exposed. No commission rule, no payout setting, no email, no `profiles.full_name`, no ledger, no internal finance.
+
+An unknown slug, a deactivated consultant and a consultant who has switched their page off all return the **same `404 NOT_FOUND`**, with the same message. A different answer for each would turn this endpoint into a directory of who has a page and who has been deactivated.
+
+### `GET /api/consultant/direct-booking`
+
+Consultant role. Returns the caller's own settings:
+
+```json
+{
+  "consultant_id": "uuid",
+  "consultant_slug": "string | null",
+  "direct_booking_enabled": "boolean",
+  "direct_booking_price_cents": "integer | null",
+  "effective_direct_booking_price_cents": "integer | null",
+  "minimum_direct_booking_price_cents": "integer",
+  "currency": "string",
+  "booking_url": "string | null"
+}
+```
+
+`booking_url` is the canonical link to share. `effective_direct_booking_price_cents` is null until a price is configured — reporting the platform default before the consultant has chosen anything would read as a price they had set.
+
+### `PATCH /api/consultant/direct-booking`
+
+Consultant role. Rate limit: 20 / minute. **Strict body** — exactly these three keys, all optional:
+
+```json
+{
+  "consultant_slug": "string | null",
+  "direct_booking_enabled": "boolean",
+  "direct_booking_price_cents": "integer | null"
+}
+```
+
+Any other key is a `400 VALIDATION_ERROR`, **not** a silently ignored field. In particular a commission, a split, an earnings figure, a `consultant_id` or a `profile_id` is refused outright: **no editable commission percentage exists anywhere in this API.**
+
+**Own settings only, structurally.** The consultant row is resolved from the profile id on the verified access token. The API accepts no consultant identifier at all, so there is nothing to tamper with.
+
+| Failure | Status | `error.details.reason` |
+|---|---|---|
+| Reserved booking link | 400 | `SLUG_RESERVED` |
+| Link too short / too long / empty after normalization | 400 | `SLUG_TOO_SHORT`, `SLUG_TOO_LONG`, `SLUG_EMPTY` |
+| Link already held by another consultant | **409** | `SLUG_TAKEN` |
+| Price below the platform's current consultation price | 400 | `PRICE_BELOW_PLATFORM_MINIMUM` |
+| Enabling with no link / no price | 400 | `SLUG_REQUIRED`, `PRICE_REQUIRED` |
+| Enabling while `is_active = false` | 409 | `CONSULTANT_NOT_ACTIVE` |
+
+The **stored** slug is the normalized one, never the raw input.
+
+### `GET /api/admin/consultants/:id/direct-booking`
+
+Admin role. Same shape as the consultant read: enabled flag, slug, configured price, effective price. Part of the existing consultant management surface, not a new admin area.
+
+### `POST /api/admin/consultants/:id/direct-booking/disable`
+
+Admin role. Sets `direct_booking_enabled = false`. The page 404s immediately.
+
+Deliberately the **only** admin write. An admin does not rename a consultant's link and does not set their price — an admin who could set the price could change what a consultant earns. The slug and price are left intact, so re-enabling restores the same URL rather than freeing it for someone else to claim.
+
+---
+
 ## 2b. Consultant profile — consultant role
 
 Added by PROJECT_LOCK Amendment 008, backed by `save_consultant_profile` (migration 027).
@@ -787,7 +881,7 @@ Templates are plain HTML in the orchestrator repo. No template service in MVP.
 4. ~~**Price:** staging placeholder `DEFAULT_CONSULTATION_PRICE_CENTS=15000` ($150 USD).~~ **Superseded by PROJECT_LOCK Amendment 007 (migration 025).** The price is now `app_settings.consultation_price_cents`, admin-managed and seeded at the same `15000`. The environment variable is retained only as the migration seed and a bootstrap fallback.
 5. **Reminders:** 24h consultant acceptance reminder; 24h + 1h session reminders. Approved as proposed.
 
-**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006, 007 and 008.** Any new endpoint requires Dave's written approval and a version bump of this document.
+**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006, 007, 008, 010 and 011.** Any new endpoint requires Dave's written approval and a version bump of this document.
 
 Endpoint additions since v1.0, each authorised by an approved amendment:
 
@@ -797,7 +891,12 @@ Endpoint additions since v1.0, each authorised by an approved amendment:
 | §2a | `POST /api/messages/:id/notification` | 005, 006 |
 | §3b | four application settings endpoints | 007 |
 | §2b | `PUT /api/consultant/profile` | 008 |
+| §2c | `GET /api/public/consultants/:slug`, `GET`/`PATCH /api/consultant/direct-booking`, `GET`/`POST /api/admin/consultants/:id/direct-booking[/disable]` | 011 |
 
 No other endpoint has been added. No existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1, the price/duration/Stripe-mode sourcing described in §1 and §3b, and the admin activation completeness guard described in §3, which now returns `CONSULTANT_PROFILE_INCOMPLETE` in place of `ACTIVATION_BLOCKED` (Amendment 008).
+
+**`POST /api/consultations/draft` (Amendment 011).** The body now accepts **`consultant_slug` instead of `consultant_id`**, and exactly one of the two is required. A request carrying **both** is refused with `400`, not resolved by precedence: trusting a browser-supplied consultant id alongside a slug would let a request quote one consultant's page and book another's calendar at that consultant's price.
+
+When a slug is supplied the server resolves the consultant from the published page, verifies the page is live, sets `price_cents` to the **effective direct price** (the same figure the public page displayed) and `booking_source` to `direct_booking`. The endpoint accepts **no** price, currency, `booking_source`, commission, split, premium or earnings value — those fields do not exist in its schema and are stripped at the boundary, so nothing downstream has to remember to ignore them. Checkout continues to trust `consultations.price_cents`. The generic flow with `consultant_id` is unchanged in every respect.
 
 **Amendment 007 endpoints are live** and documented in §3b. Amendment 005/006 added `POST /api/messages/:id/notification`, documented in §2a.

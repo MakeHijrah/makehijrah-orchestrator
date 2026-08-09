@@ -5,16 +5,36 @@ type CreateDraftRepositoryInput = {
   clientProfileId: string;
   scheduledEndAt: string;
   /*
-   * Snapshot values resolved from app_settings by the caller.
+   * The consultant the SERVER resolved.
+   *
+   * Passed explicitly rather than read from draft.consultant_id,
+   * because for a direct booking the request carries no id at all
+   * — the consultant is whoever the slug's published page belongs
+   * to. Taking it from the body here would reintroduce exactly the
+   * browser-supplied identifier the route refuses to trust.
+   */
+  consultantId: string;
+  /*
+   * Snapshot values resolved by the caller: the platform price
+   * from app_settings for a standard booking, or the EFFECTIVE
+   * direct price for a direct booking.
    *
    * Passed in rather than read here so a single request resolves
    * settings once, and so the price written to the consultation is
-   * demonstrably the one the route loaded. Never supplied by the
-   * client: the draft request body carries no price or currency
-   * field and none is accepted.
+   * demonstrably the one the route loaded and the one the page
+   * displayed. Never supplied by the client: the draft request
+   * body carries no price or currency field and none is accepted.
    */
   priceCents: number;
   currency: string;
+  /*
+   * Also the server's, and for the same reason. booking_source
+   * decides which commission rules apply to the money, so a
+   * request that could set it could choose its own split.
+   */
+  bookingSource:
+    | "standard"
+    | "direct_booking";
   draft: CreateDraftConsultationInput;
 };
 
@@ -48,15 +68,17 @@ type DraftRpcRow = {
 export const createDraftConsultationRecord = async ({
   clientProfileId,
   scheduledEndAt,
+  consultantId,
   priceCents,
   currency,
+  bookingSource,
   draft,
 }: CreateDraftRepositoryInput): Promise<CreateDraftRepositoryResult> => {
   const { data, error } = await supabaseAdmin.rpc(
     "create_draft_consultation",
     {
       p_client_profile_id: clientProfileId,
-      p_consultant_id: draft.consultant_id,
+      p_consultant_id: consultantId,
       p_country_id: draft.country_id,
       p_scheduled_start_at: draft.start_at,
       p_scheduled_end_at: scheduledEndAt,
@@ -68,6 +90,7 @@ export const createDraftConsultationRecord = async ({
       p_phone_whatsapp:
         draft.intake.phone_whatsapp,
       p_answers_jsonb: draft.intake.answers,
+      p_booking_source: bookingSource,
     },
   );
 
@@ -88,7 +111,7 @@ export const createDraftConsultationRecord = async ({
         message: error.message,
         details: error.details,
         hint: error.hint,
-        consultantId: draft.consultant_id,
+        consultantId,
         clientProfileId,
         startAt: draft.start_at,
       },
@@ -109,7 +132,7 @@ export const createDraftConsultationRecord = async ({
     console.error(
       "Draft consultation RPC returned no row",
       {
-        consultantId: draft.consultant_id,
+        consultantId,
         clientProfileId,
         startAt: draft.start_at,
       },

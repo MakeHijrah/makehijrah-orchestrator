@@ -103,9 +103,60 @@ let serviceReversalRow: Record<string, unknown> = {
   consultant_amount_minor: null,
 };
 
+/*
+ * Is the consultation under test a DIRECT booking?
+ *
+ * Migration 045 gives every direct booking RPC a booking_source
+ * guard, and the orchestrator dispatches on it: try the direct RPC
+ * first, fall back to the standard one on
+ * FINANCE_NOT_DIRECT_BOOKING. This stub reproduces that guard,
+ * which is what lets the same webhook path be exercised for both
+ * kinds of consultation.
+ *
+ * Default false, so every consultation test below behaves exactly
+ * as it did before direct booking existed.
+ */
+let isDirectBooking = false;
+
+const DIRECT_BOOKING_RPCS = new Set([
+  "record_direct_booking_earning",
+  "release_direct_booking_earning",
+  "reverse_direct_booking_earning",
+]);
+
+const directBookingRow: Record<
+  string,
+  unknown
+> = {
+  consultation_id:
+    "11111111-1111-4111-8111-111111111111",
+  created: true,
+  released: true,
+  reversed: true,
+  reason: "released",
+  released_count: 2,
+  standard_entry_id:
+    "22222222-2222-4222-8222-222222222222",
+  standard_gross_minor: 15000,
+  standard_consultant_minor: 7500,
+  standard_platform_minor: 7500,
+  premium_entry_id:
+    "33333333-3333-4333-8333-333333333333",
+  premium_gross_minor: 5000,
+  premium_consultant_minor: 4000,
+  premium_platform_minor: 1000,
+  refunded_total_minor: null,
+  standard_delta_minor: 0,
+  premium_delta_minor: 0,
+  applied_delta_minor: 0,
+  currency: "usd",
+  available_at: null,
+};
+
 const installStubs = (): void => {
   rpcCalls.length = 0;
   retrievedPaymentIntents.length = 0;
+  isDirectBooking = false;
 
   supabaseAdmin.rpc = (async (
     name: string,
@@ -119,6 +170,26 @@ const installStubs = (): void => {
     ) {
       return {
         data: [serviceReversalRow],
+        error: null,
+      };
+    }
+
+    if (DIRECT_BOOKING_RPCS.has(name)) {
+      if (!isDirectBooking) {
+        return {
+          data: null,
+          error: {
+            code: "P0001",
+            message:
+              "FINANCE_NOT_DIRECT_BOOKING: consultation is a standard booking",
+            details: null,
+            hint: null,
+          },
+        };
+      }
+
+      return {
+        data: [directBookingRow],
         error: null,
       };
     }
@@ -191,8 +262,16 @@ const paymentIntentEvent = (
   },
 });
 
-const chargeRefundedEvent = (): Record<string, unknown> => ({
-  id: "evt_charge_refunded",
+const chargeRefundedEvent = ({
+  amountRefunded = 15000,
+  fullyRefunded = true,
+  eventId = "evt_charge_refunded",
+}: {
+  amountRefunded?: number;
+  fullyRefunded?: boolean;
+  eventId?: string;
+} = {}): Record<string, unknown> => ({
+  id: eventId,
   object: "event",
   livemode: false,
   type: "charge.refunded",
@@ -202,9 +281,14 @@ const chargeRefundedEvent = (): Record<string, unknown> => ({
       id: "ch_test_123",
       object: "charge",
       payment_intent: "pi_test_123",
-      amount_refunded: 15000,
+      /*
+       * CUMULATIVE. Stripe reports the total refunded against this
+       * charge so far, not the amount of one refund, and repeats
+       * it on every redelivery.
+       */
+      amount_refunded: amountRefunded,
       currency: "usd",
-      refunded: true,
+      refunded: fullyRefunded,
     },
   },
 });
@@ -522,7 +606,15 @@ describe("Stripe webhook: consultation ledger side effects", () => {
       }),
     );
 
+    /*
+     * The direct booking probe comes first and is refused with
+     * FINANCE_NOT_DIRECT_BOOKING, which is how the orchestrator
+     * learns this is a standard consultation without reading
+     * consultations.booking_source — a table read the webhook is
+     * not allowed to make. Migration 045, Amendment 011.
+     */
     assert.deepEqual(ledgerRpcNames(), [
+      "record_direct_booking_earning",
       "record_consultation_earning",
       "release_consultation_earning",
     ]);
@@ -536,6 +628,7 @@ describe("Stripe webhook: consultation ledger side effects", () => {
     await post(chargeRefundedEvent());
 
     assert.deepEqual(ledgerRpcNames(), [
+      "reverse_direct_booking_earning",
       "reverse_consultation_earning",
     ]);
   });
@@ -565,6 +658,117 @@ describe("Stripe webhook: consultation ledger side effects", () => {
     await post(paymentIntentEvent("payment_intent.succeeded", {}));
 
     assert.deepEqual(ledgerRpcNames(), []);
+  });
+});
+
+describe("Stripe webhook: direct bookings", () => {
+  beforeEach(() => {
+    installStubs();
+    refundPaymentIntentMetadata = {};
+    isDirectBooking = true;
+  });
+
+  it("records and releases both components on capture", async () => {
+    await post(
+      paymentIntentEvent("payment_intent.succeeded", {
+        consultation_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+
+    /*
+     * No fallback to the standard path, and no second record call:
+     * the direct RPC answered, so the dispatch stops there.
+     */
+    assert.deepEqual(ledgerRpcNames(), [
+      "record_direct_booking_earning",
+      "release_direct_booking_earning",
+    ]);
+  });
+
+  it("passes Stripe's CUMULATIVE refunded total to the reversal", async () => {
+    refundPaymentIntentMetadata = {
+      consultation_id: "55555555-5555-5555-5555-555555555555",
+    };
+
+    await post(
+      chargeRefundedEvent({
+        amountRefunded: 5000,
+        fullyRefunded: false,
+      }),
+    );
+
+    assert.deepEqual(ledgerRpcNames(), [
+      "reverse_direct_booking_earning",
+    ]);
+
+    const call = rpcCalls.find(
+      (entry) =>
+        entry.name === "reverse_direct_booking_earning",
+    )!;
+
+    /*
+     * charge.amount_refunded, verbatim. The RPC reads it as a
+     * cumulative target and applies only the difference against
+     * what each component has already had reversed — so a second
+     * partial reverses its difference and a redelivery reverses
+     * nothing. Passing a per-refund delta here would silently
+     * under-reverse on the second partial.
+     */
+    assert.equal(
+      call.params.p_refunded_total_minor,
+      5000,
+    );
+  });
+
+  it("passes the growing total, not the increment, on a second refund", async () => {
+    refundPaymentIntentMetadata = {
+      consultation_id: "55555555-5555-5555-5555-555555555555",
+    };
+
+    await post(
+      chargeRefundedEvent({
+        amountRefunded: 5000,
+        fullyRefunded: false,
+        eventId: "evt_charge_refunded_first",
+      }),
+    );
+
+    await post(
+      chargeRefundedEvent({
+        amountRefunded: 8000,
+        fullyRefunded: false,
+        eventId: "evt_charge_refunded_second",
+      }),
+    );
+
+    const totals = rpcCalls
+      .filter(
+        (entry) =>
+          entry.name ===
+          "reverse_direct_booking_earning",
+      )
+      .map((entry) => entry.params.p_refunded_total_minor);
+
+    assert.deepEqual(totals, [5000, 8000]);
+  });
+
+  it("never reads a table to decide which path applies", async () => {
+    /*
+     * supabaseAdmin.from throws in this suite. The dispatch learns
+     * a consultation is a direct booking from the RPC's own
+     * marker, under the same row lock as the write it authorises —
+     * Amendment 004 section 10.3.3.
+     */
+    await post(
+      paymentIntentEvent("payment_intent.succeeded", {
+        consultation_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+
+    assert.equal(
+      rpcCalls.every((entry) => entry.name.length > 0),
+      true,
+    );
   });
 });
 

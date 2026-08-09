@@ -66,6 +66,9 @@ const OTHER_CONSULTANT_ID = "4b4b4b4b-4b4b-4b4b-8b4b-4b4b4b4b4b4b";
 const CAPTURED_ONLY = "55555555-5555-4555-8555-555555555555";
 const COMPLETED_UNCAPTURED = "66666666-6666-4666-8666-666666666666";
 const COMPLETED_CAPTURED = "77777777-7777-4777-8777-777777777777";
+const DIRECT_COMPLETED = "7d7d7d7d-7d7d-4d7d-8d7d-7d7d7d7d7d7d";
+const DIRECT_AT_PLATFORM_PRICE =
+  "7e7e7e7e-7e7e-4e7e-8e7e-7e7e7e7e7e7e";
 
 const COMMISSION_BPS = 5000;
 
@@ -259,6 +262,18 @@ const fakeRpc = async (
 
       if (!consultation) {
         return fail("FINANCE_CONSULTATION_NOT_FOUND");
+      }
+
+      /*
+       * Migration 045 part G. Recording a direct booking here as
+       * well as through its own path would be two earnings for one
+       * payment, and the second at the wrong split.
+       */
+      if (
+        (consultation.booking_source ?? "standard") !==
+        "standard"
+      ) {
+        return fail("FINANCE_NOT_STANDARD_BOOKING");
       }
 
       const existing = consultationEarning(
@@ -865,6 +880,373 @@ const fakeRpc = async (
       });
     }
 
+    /*
+     * Migration 045: direct consultant booking, in two components.
+     *
+     * Faithful to the real RPCs — same booking_source guard, same
+     * least(), the same "premium takes the remainder" rounding, and
+     * the same CUMULATIVE refund semantics. The orchestrator's
+     * dispatch keys off FINANCE_NOT_DIRECT_BOOKING, so the guard is
+     * what makes these tests exercise the real control flow rather
+     * than a happy path that always answers yes.
+     */
+    case "record_direct_booking_earning": {
+      const consultation = db.consultations.find(
+        (row) => row.id === args.p_consultation_id,
+      );
+
+      if (!consultation) {
+        return fail("FINANCE_CONSULTATION_NOT_FOUND");
+      }
+
+      if (
+        (consultation.booking_source ?? "standard") !==
+        "direct_booking"
+      ) {
+        return fail("FINANCE_NOT_DIRECT_BOOKING");
+      }
+
+      const readComponent = (component: string) =>
+        db.consultant_ledger_entries.find(
+          (row) =>
+            row.entry_type === "earning" &&
+            row.source_type === "direct_booking" &&
+            row.source_id === consultation.id &&
+            row.source_component === component,
+        );
+
+      const report = (created: boolean) => {
+        const standard = readComponent("standard");
+        const premium = readComponent("premium");
+
+        return ok({
+          consultation_id: consultation.id,
+          created,
+          standard_entry_id: standard?.id ?? null,
+          standard_gross_minor:
+            standard?.gross_amount_minor ?? null,
+          standard_consultant_minor:
+            standard?.consultant_amount_minor ?? null,
+          standard_platform_minor:
+            standard?.platform_amount_minor ?? null,
+          premium_entry_id: premium?.id ?? null,
+          premium_gross_minor:
+            premium?.gross_amount_minor ?? null,
+          premium_consultant_minor:
+            premium?.consultant_amount_minor ?? null,
+          premium_platform_minor:
+            premium?.platform_amount_minor ?? null,
+          currency: standard?.currency ?? null,
+        });
+      };
+
+      /* Read back first, so a repeat call stays a no-op. */
+      if (readComponent("standard")) {
+        return report(false);
+      }
+
+      if (!consultation.captured_at) {
+        return fail("FINANCE_CONSULTATION_NOT_CAPTURED");
+      }
+
+      const price = consultation.price_cents as number;
+
+      if (!price || price <= 0) {
+        return fail("FINANCE_CONSULTATION_AMOUNT_INVALID");
+      }
+
+      const settings = db.app_settings[0];
+
+      const base = settings?.consultation_price_cents as
+        | number
+        | undefined;
+
+      const standardBps =
+        settings?.consultation_consultant_commission_bps as
+          | number
+          | undefined;
+
+      if (base === undefined || standardBps === undefined) {
+        return fail("FINANCE_SETTINGS_MISSING");
+      }
+
+      /*
+       * least(), so a platform default that has risen above the
+       * booked price leaves no negative premium.
+       */
+      const standardGross = Math.min(price, base);
+      const premiumGross = price - standardGross;
+
+      const push = (
+        component: string,
+        gross: number,
+        bps: number,
+        basis: string,
+      ): void => {
+        /* Consultant rounded, platform takes the remainder. */
+        const consultantAmount = Math.round(
+          (gross * bps) / 10000,
+        );
+
+        db.consultant_ledger_entries.push({
+          id: nextId(),
+          consultant_id: consultation.consultant_id,
+          entry_type: "earning",
+          source_type: "direct_booking",
+          source_id: consultation.id,
+          source_component: component,
+          gross_amount_minor: gross,
+          consultant_amount_minor: consultantAmount,
+          platform_amount_minor: gross - consultantAmount,
+          commission_bps: bps,
+          commission_basis: basis,
+          currency: consultation.currency,
+          available_at: null,
+          reverses_entry_id: null,
+          memo: null,
+        });
+      };
+
+      push(
+        "standard",
+        standardGross,
+        standardBps,
+        "direct_booking_standard",
+      );
+
+      /* No premium, no premium row. */
+      if (premiumGross > 0) {
+        push(
+          "premium",
+          premiumGross,
+          8000,
+          "direct_booking_premium",
+        );
+      }
+
+      return report(true);
+    }
+
+    case "release_direct_booking_earning": {
+      const consultation = db.consultations.find(
+        (row) => row.id === args.p_consultation_id,
+      );
+
+      if (!consultation) {
+        return fail("FINANCE_CONSULTATION_NOT_FOUND");
+      }
+
+      if (
+        (consultation.booking_source ?? "standard") !==
+        "direct_booking"
+      ) {
+        return fail("FINANCE_NOT_DIRECT_BOOKING");
+      }
+
+      const components = db.consultant_ledger_entries.filter(
+        (row) =>
+          row.entry_type === "earning" &&
+          row.source_type === "direct_booking" &&
+          row.source_id === consultation.id,
+      );
+
+      const answer = (
+        released: boolean,
+        reason: string,
+        count: number,
+        availableAt: unknown,
+      ) =>
+        ok({
+          consultation_id: consultation.id,
+          released,
+          reason,
+          released_count: count,
+          available_at: availableAt,
+        });
+
+      if (components.length === 0) {
+        return answer(false, "no_entry", 0, null);
+      }
+
+      if (!consultation.captured_at) {
+        return answer(false, "not_captured", 0, null);
+      }
+
+      if (!consultation.completed_at) {
+        return answer(false, "not_completed", 0, null);
+      }
+
+      const pending = components.filter(
+        (row) => row.available_at === null,
+      );
+
+      if (pending.length === 0) {
+        return answer(
+          false,
+          "already_available",
+          0,
+          components[0]!.available_at,
+        );
+      }
+
+      /* Both components take the same timestamp. */
+      const now = new Date().toISOString();
+
+      for (const row of pending) {
+        row.available_at = now;
+      }
+
+      return answer(true, "released", pending.length, now);
+    }
+
+    case "reverse_direct_booking_earning": {
+      const reason = String(args.p_reason ?? "").trim();
+
+      if (!reason) {
+        return fail("FINANCE_REASON_REQUIRED");
+      }
+
+      const consultation = db.consultations.find(
+        (row) => row.id === args.p_consultation_id,
+      );
+
+      if (!consultation) {
+        return fail("FINANCE_CONSULTATION_NOT_FOUND");
+      }
+
+      if (
+        (consultation.booking_source ?? "standard") !==
+        "direct_booking"
+      ) {
+        return fail("FINANCE_NOT_DIRECT_BOOKING");
+      }
+
+      const component = (name: string) =>
+        db.consultant_ledger_entries.find(
+          (row) =>
+            row.entry_type === "earning" &&
+            row.source_type === "direct_booking" &&
+            row.source_id === consultation.id &&
+            row.source_component === name,
+        );
+
+      const standard = component("standard");
+      const premium = component("premium");
+
+      if (!standard) {
+        return ok({
+          consultation_id: consultation.id,
+          reversed: false,
+          reason: "no_entry",
+          refunded_total_minor: null,
+          standard_delta_minor: 0,
+          premium_delta_minor: 0,
+          applied_delta_minor: 0,
+        });
+      }
+
+      const totalGross =
+        (standard.gross_amount_minor as number) +
+        ((premium?.gross_amount_minor as number) ?? 0);
+
+      const target =
+        (args.p_refunded_total_minor as number | null) ??
+        totalGross;
+
+      if (target < 0) {
+        return fail("FINANCE_REVERSAL_AMOUNT_INVALID");
+      }
+
+      if (target > totalGross) {
+        return fail("FINANCE_REFUND_EXCEEDS_CONSULTATION");
+      }
+
+      /*
+       * CUMULATIVE. The premium target is the REMAINDER, never a
+       * second rounding, so the two component targets sum to the
+       * refunded total exactly.
+       */
+      const standardTarget = Math.round(
+        (target * (standard.gross_amount_minor as number)) /
+          totalGross,
+      );
+
+      const premiumTarget = target - standardTarget;
+
+      const reversedSoFar = (entryId: unknown): number =>
+        db.consultant_ledger_entries
+          .filter(
+            (row) =>
+              row.entry_type === "reversal" &&
+              row.reverses_entry_id === entryId,
+          )
+          .reduce(
+            (sum, row) =>
+              sum - (row.gross_amount_minor as number),
+            0,
+          );
+
+      const standardDone = reversedSoFar(standard.id);
+      const premiumDone = premium
+        ? reversedSoFar(premium.id)
+        : 0;
+
+      /* Each component against its OWN prior reversals. */
+      const standardDelta = standardTarget - standardDone;
+      const premiumDelta = premium
+        ? premiumTarget - premiumDone
+        : 0;
+
+      if (standardDelta <= 0 && premiumDelta <= 0) {
+        return ok({
+          consultation_id: consultation.id,
+          reversed: false,
+          reason:
+            standardDone + premiumDone >= totalGross
+              ? "already_refunded"
+              : "no_change",
+          refunded_total_minor: target,
+          standard_delta_minor: 0,
+          premium_delta_minor: 0,
+          applied_delta_minor: 0,
+        });
+      }
+
+      let appliedStandard = 0;
+      let appliedPremium = 0;
+
+      if (standardDelta > 0) {
+        await fakeRpc("reverse_ledger_entry", {
+          p_entry_id: standard.id,
+          p_reason: reason,
+          p_gross_amount_minor: standardDelta,
+        });
+
+        appliedStandard = standardDelta;
+      }
+
+      if (premiumDelta > 0 && premium) {
+        await fakeRpc("reverse_ledger_entry", {
+          p_entry_id: premium.id,
+          p_reason: reason,
+          p_gross_amount_minor: premiumDelta,
+        });
+
+        appliedPremium = premiumDelta;
+      }
+
+      return ok({
+        consultation_id: consultation.id,
+        reversed: true,
+        reason: "reversed",
+        refunded_total_minor: target,
+        standard_delta_minor: appliedStandard,
+        premium_delta_minor: appliedPremium,
+        applied_delta_minor:
+          appliedStandard + appliedPremium,
+      });
+    }
+
     default:
       return { data: null, error: { message: "unknown rpc" } };
   }
@@ -988,6 +1370,34 @@ beforeEach(() => {
       status: "completed",
       price_cents: 15_000,
       currency: "usd",
+      captured_at: "2026-08-01T10:00:00.000Z",
+      completed_at: "2026-08-01T12:00:00.000Z",
+    },
+
+    /*
+     * Migration 045. A direct booking at 20000 against the same
+     * 15000 platform price — the locked example from Amendment
+     * 011, whose answer is consultant 11500 and platform 8500.
+     */
+    {
+      id: DIRECT_COMPLETED,
+      consultant_id: CONSULTANT_ID,
+      status: "completed",
+      price_cents: 20_000,
+      currency: "usd",
+      booking_source: "direct_booking",
+      captured_at: "2026-08-01T10:00:00.000Z",
+      completed_at: "2026-08-01T12:00:00.000Z",
+    },
+
+    /* And one priced at exactly the platform default. */
+    {
+      id: DIRECT_AT_PLATFORM_PRICE,
+      consultant_id: CONSULTANT_ID,
+      status: "completed",
+      price_cents: 15_000,
+      currency: "usd",
+      booking_source: "direct_booking",
       captured_at: "2026-08-01T10:00:00.000Z",
       completed_at: "2026-08-01T12:00:00.000Z",
     },
@@ -2298,5 +2708,291 @@ describe("Finance access control", () => {
     );
 
     assert.equal(response.statusCode, 403);
+  });
+});
+
+
+/*
+ * Direct consultant booking. Migration 045, Amendment 011.
+ *
+ * These go through syncConsultationEarning and
+ * reverseConsultationEarning — the SAME entry points the webhook
+ * and the completion path call — so what is under test is the
+ * dispatch as well as the arithmetic. Nothing here names a direct
+ * booking RPC directly, because nothing in production does either.
+ */
+describe("Direct booking earnings", () => {
+  const components = () =>
+    db.consultant_ledger_entries.filter(
+      (row) =>
+        row.entry_type === "earning" &&
+        row.source_type === "direct_booking",
+    );
+
+  const component = (name: string) =>
+    components().find(
+      (row) => row.source_component === name,
+    );
+
+  it("splits the base 50/50 and the premium 80/20", async () => {
+    const outcome = await syncConsultationEarning(
+      DIRECT_COMPLETED,
+    );
+
+    assert.equal(outcome.recorded, true);
+    assert.equal(components().length, 2);
+
+    const standard = component("standard")!;
+    const premium = component("premium")!;
+
+    /* The standard-price portion, exactly as any consultation. */
+    assert.equal(standard.gross_amount_minor, 15_000);
+    assert.equal(standard.consultant_amount_minor, 7_500);
+    assert.equal(standard.platform_amount_minor, 7_500);
+    assert.equal(standard.commission_bps, COMMISSION_BPS);
+    assert.equal(
+      standard.commission_basis,
+      "direct_booking_standard",
+    );
+
+    /* Only the premium above it is 80/20. */
+    assert.equal(premium.gross_amount_minor, 5_000);
+    assert.equal(premium.consultant_amount_minor, 4_000);
+    assert.equal(premium.platform_amount_minor, 1_000);
+    assert.equal(premium.commission_bps, 8_000);
+    assert.equal(
+      premium.commission_basis,
+      "direct_booking_premium",
+    );
+
+    /* The locked example's answer. */
+    const consultantTotal = components().reduce(
+      (sum, row) =>
+        sum + (row.consultant_amount_minor as number),
+      0,
+    );
+
+    const platformTotal = components().reduce(
+      (sum, row) =>
+        sum + (row.platform_amount_minor as number),
+      0,
+    );
+
+    assert.equal(consultantTotal, 11_500);
+    assert.equal(platformTotal, 8_500);
+  });
+
+  it("writes no premium row when there is no premium", async () => {
+    await syncConsultationEarning(
+      DIRECT_AT_PLATFORM_PRICE,
+    );
+
+    assert.equal(components().length, 1);
+    assert.equal(component("premium"), undefined);
+
+    /*
+     * A direct booking priced at the platform default is simply a
+     * standard split. A zero-value premium row would record no
+     * financial fact and the ledger's sign check would refuse it.
+     */
+    assert.equal(
+      component("standard")!.consultant_amount_minor,
+      7_500,
+    );
+  });
+
+  it("does not also record a standard consultation earning", async () => {
+    await syncConsultationEarning(DIRECT_COMPLETED);
+
+    /*
+     * The failure this prevents: two earnings for one payment,
+     * the second at a flat 50/50 across the whole price, which
+     * would take the premium back off the consultant.
+     */
+    assert.equal(
+      db.consultant_ledger_entries.filter(
+        (row) => row.source_type === "consultation",
+      ).length,
+      0,
+    );
+  });
+
+  it("releases both components together, once", async () => {
+    const first = await syncConsultationEarning(
+      DIRECT_COMPLETED,
+    );
+
+    assert.equal(first.released, true);
+    assert.equal(first.reason, "released");
+
+    assert.equal(
+      components().filter(
+        (row) => row.available_at === null,
+      ).length,
+      0,
+    );
+
+    /* One timestamp, so neither component can be withdrawn alone. */
+    assert.equal(
+      new Set(
+        components().map((row) => row.available_at),
+      ).size,
+      1,
+    );
+
+    const second = await syncConsultationEarning(
+      DIRECT_COMPLETED,
+    );
+
+    assert.equal(second.recorded, false);
+    assert.equal(second.released, false);
+    assert.equal(second.reason, "already_available");
+    assert.equal(components().length, 2);
+  });
+
+  it("reads the refunded total as CUMULATIVE, not as a delta", async () => {
+    await syncConsultationEarning(DIRECT_COMPLETED);
+
+    const refundTo = (total: number) =>
+      reverseConsultationEarning({
+        consultationId: DIRECT_COMPLETED,
+        reason: "Stripe refund processed by webhook",
+        refundedTotalMinor: total,
+      });
+
+    const reversedTotal = (): number =>
+      db.consultant_ledger_entries
+        .filter((row) => row.entry_type === "reversal")
+        .reduce(
+          (sum, row) =>
+            sum - (row.gross_amount_minor as number),
+          0,
+        );
+
+    /* A first partial, split in proportion to gross. */
+    const first = await refundTo(5_000);
+    assert.equal(first.reversed, true);
+    assert.equal(reversedTotal(), 5_000);
+
+    /* Stripe redelivers the same total. Nothing more happens. */
+    const redelivered = await refundTo(5_000);
+    assert.equal(redelivered.reversed, false);
+    assert.equal(redelivered.reason, "no_change");
+    assert.equal(reversedTotal(), 5_000);
+
+    /*
+     * A second partial. The figure is the CUMULATIVE total, so
+     * only the 3000 difference is applied. Reading it as a delta
+     * would reverse 8000 here and 13000 in all — the migration 040
+     * bug, which over-reversed a consultant's ledger by the first
+     * refund's amount.
+     */
+    const second = await refundTo(8_000);
+    assert.equal(second.reversed, true);
+    assert.equal(reversedTotal(), 8_000);
+
+    /* Completing the refund applies only what remains. */
+    const full = await refundTo(20_000);
+    assert.equal(full.reversed, true);
+    assert.equal(reversedTotal(), 20_000);
+
+    const duplicateFull = await refundTo(20_000);
+    assert.equal(duplicateFull.reversed, false);
+    assert.equal(duplicateFull.reason, "already_refunded");
+    assert.equal(reversedTotal(), 20_000);
+
+    /* A fully refunded direct booking nets to nothing. */
+    assert.equal(
+      db.consultant_ledger_entries.reduce(
+        (sum, row) =>
+          sum + (row.consultant_amount_minor as number),
+        0,
+      ),
+      0,
+    );
+  });
+
+  it("splits each refund across both components exactly", async () => {
+    await syncConsultationEarning(DIRECT_COMPLETED);
+
+    await reverseConsultationEarning({
+      consultationId: DIRECT_COMPLETED,
+      reason: "Stripe refund processed by webhook",
+      refundedTotalMinor: 5_000,
+    });
+
+    const reversedAgainst = (entryId: unknown): number =>
+      db.consultant_ledger_entries
+        .filter(
+          (row) =>
+            row.entry_type === "reversal" &&
+            row.reverses_entry_id === entryId,
+        )
+        .reduce(
+          (sum, row) =>
+            sum - (row.gross_amount_minor as number),
+          0,
+        );
+
+    /*
+     * Three quarters of the gross is the standard component, so
+     * three quarters of the refund is too. The premium takes the
+     * REMAINDER rather than a second rounding, which is what makes
+     * the two sum to the refund exactly — a minor unit lost here
+     * would come out of a consultant who had nothing to do with it.
+     */
+    const standardReversed = reversedAgainst(
+      component("standard")!.id,
+    );
+
+    const premiumReversed = reversedAgainst(
+      component("premium")!.id,
+    );
+
+    assert.equal(standardReversed, 3_750);
+    assert.equal(premiumReversed, 1_250);
+    assert.equal(
+      standardReversed + premiumReversed,
+      5_000,
+    );
+  });
+
+  it("leaves a standard consultation on the standard path", async () => {
+    await syncConsultationEarning(COMPLETED_CAPTURED);
+
+    /*
+     * The dispatch probes the direct RPC first and is refused with
+     * FINANCE_NOT_DIRECT_BOOKING. What lands is one ordinary
+     * consultation earning and nothing else.
+     */
+    assert.equal(components().length, 0);
+    assert.equal(
+      db.consultant_ledger_entries.filter(
+        (row) => row.source_type === "consultation",
+      ).length,
+      1,
+    );
+
+    await reverseConsultationEarning({
+      consultationId: COMPLETED_CAPTURED,
+      reason: "Stripe refund processed by webhook",
+      refundedTotalMinor: 15_000,
+    });
+
+    /*
+     * And the standard reversal still reverses in FULL. The
+     * cumulative total is a direct booking concept; passing it
+     * must not change what a standard refund does.
+     */
+    assert.equal(
+      db.consultant_ledger_entries
+        .filter((row) => row.entry_type === "reversal")
+        .reduce(
+          (sum, row) =>
+            sum - (row.gross_amount_minor as number),
+          0,
+        ),
+      15_000,
+    );
   });
 });

@@ -295,25 +295,37 @@ begin
          the comparison window, one draft that must NOT count ---- */
 
   insert into public.consultations (
-    client_profile_id, consultant_id, status, created_at)
+    client_profile_id, consultant_id, status, created_at,
+    scheduled_start_at, scheduled_end_at, price_cents, currency)
   values (v_clp, v_con, 'completed',
-          timestamptz '2031-05-02 09:00:00+00')
+          timestamptz '2031-05-02 09:00:00+00',
+          timestamptz '2031-05-02 12:00:00+00',
+          timestamptz '2031-05-02 13:00:00+00', 15000, 'usd')
   returning id into v_consultation;
 
   insert into public.consultations (
-    client_profile_id, consultant_id, status, created_at)
+    client_profile_id, consultant_id, status, created_at,
+    scheduled_start_at, scheduled_end_at, price_cents, currency)
   values (v_clp, v_con, 'confirmed',
-          timestamptz '2031-05-06 09:00:00+00');
+          timestamptz '2031-05-06 09:00:00+00',
+          timestamptz '2031-05-08 12:00:00+00',
+          timestamptz '2031-05-08 13:00:00+00', 15000, 'usd');
 
   insert into public.consultations (
-    client_profile_id, consultant_id, status, created_at)
+    client_profile_id, consultant_id, status, created_at,
+    scheduled_start_at, scheduled_end_at, price_cents, currency)
   values (v_clp, v_con, 'draft',
-          timestamptz '2031-05-07 09:00:00+00');
+          timestamptz '2031-05-07 09:00:00+00',
+          timestamptz '2031-05-09 12:00:00+00',
+          timestamptz '2031-05-09 13:00:00+00', 15000, 'usd');
 
   insert into public.consultations (
-    client_profile_id, consultant_id, status, created_at)
+    client_profile_id, consultant_id, status, created_at,
+    scheduled_start_at, scheduled_end_at, price_cents, currency)
   values (v_clp, v_con, 'completed',
-          timestamptz '2031-04-03 09:00:00+00');
+          timestamptz '2031-04-03 09:00:00+00',
+          timestamptz '2031-04-04 12:00:00+00',
+          timestamptz '2031-04-04 13:00:00+00', 15000, 'usd');
 
   /* ---- ledger: current window ---- */
 
@@ -438,9 +450,12 @@ begin
     timestamptz '2031-05-06 12:00:00+00');
 
   insert into public.consultations (
-    client_profile_id, consultant_id, status, created_at)
+    client_profile_id, consultant_id, status, created_at,
+    scheduled_start_at, scheduled_end_at, price_cents, currency)
   values (v_clp, v_con, 'admin_attention',
-          timestamptz '2031-05-01 09:00:00+00');
+          timestamptz '2031-05-01 09:00:00+00',
+          timestamptz '2031-05-10 12:00:00+00',
+          timestamptz '2031-05-10 13:00:00+00', 15000, 'usd');
 
   perform set_config('app.v44_admin', v_admin::text, true);
   perform set_config('app.v44_cpr', v_cpr::text, true);

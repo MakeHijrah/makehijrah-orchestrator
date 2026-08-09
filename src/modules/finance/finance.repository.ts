@@ -45,7 +45,11 @@ export type FinanceMarker =
   | "FINANCE_PURCHASE_CONFLICT"
   | "FINANCE_PURCHASE_NOT_FOUND"
   | "FINANCE_PURCHASE_NOT_FULFILLABLE"
-  | "FINANCE_REFUND_EXCEEDS_PURCHASE";
+  | "FINANCE_REFUND_EXCEEDS_PURCHASE"
+  /* Migration 045: direct consultant booking. */
+  | "FINANCE_NOT_DIRECT_BOOKING"
+  | "FINANCE_NOT_STANDARD_BOOKING"
+  | "FINANCE_REFUND_EXCEEDS_CONSULTATION";
 
 const FINANCE_MARKERS: FinanceMarker[] = [
   "FINANCE_CONSULTATION_NOT_FOUND",
@@ -80,6 +84,9 @@ const FINANCE_MARKERS: FinanceMarker[] = [
   "FINANCE_PURCHASE_NOT_FOUND",
   "FINANCE_PURCHASE_NOT_FULFILLABLE",
   "FINANCE_REFUND_EXCEEDS_PURCHASE",
+  "FINANCE_NOT_DIRECT_BOOKING",
+  "FINANCE_NOT_STANDARD_BOOKING",
+  "FINANCE_REFUND_EXCEEDS_CONSULTATION",
 ];
 
 export const readFinanceMarker = (
@@ -490,5 +497,120 @@ export const reverseConsultationEarningRpc =
         p_reason: reason,
         p_gross_amount_minor:
           grossAmountMinor ?? null,
+      },
+    );
+
+
+/*
+ * Direct consultant booking finance. Migration 045, Amendment 011.
+ *
+ * A direct booking earns in TWO components: the standard-price
+ * portion at the platform's ordinary consultation rate, and the
+ * premium above it at 8000 bps. The arithmetic is entirely inside
+ * the RPCs; nothing here computes or rounds anything.
+ */
+
+export type DirectBookingEarningRow = {
+  consultation_id: string;
+  created: boolean;
+  standard_entry_id: string | null;
+  standard_gross_minor: number | null;
+  standard_consultant_minor: number | null;
+  standard_platform_minor: number | null;
+  premium_entry_id: string | null;
+  premium_gross_minor: number | null;
+  premium_consultant_minor: number | null;
+  premium_platform_minor: number | null;
+  currency: string | null;
+};
+
+export const recordDirectBookingEarning =
+  async (
+    consultationId: string,
+  ): Promise<
+    FinanceRpcResult<DirectBookingEarningRow>
+  > =>
+    callFinanceRpc<DirectBookingEarningRow>(
+      "record_direct_booking_earning",
+      { p_consultation_id: consultationId },
+    );
+
+export type DirectBookingReleaseRow = {
+  consultation_id: string;
+  released: boolean;
+  reason:
+    | "released"
+    | "already_available"
+    | "no_entry"
+    | "not_captured"
+    | "not_completed";
+  released_count: number;
+  available_at: string | null;
+};
+
+export const releaseDirectBookingEarning =
+  async (
+    consultationId: string,
+  ): Promise<
+    FinanceRpcResult<DirectBookingReleaseRow>
+  > =>
+    callFinanceRpc<DirectBookingReleaseRow>(
+      "release_direct_booking_earning",
+      { p_consultation_id: consultationId },
+    );
+
+export type DirectBookingReversalRow = {
+  consultation_id: string;
+  reversed: boolean;
+  reason:
+    | "reversed"
+    | "no_entry"
+    | "no_change"
+    | "already_refunded";
+  refunded_total_minor: number | null;
+  standard_delta_minor: number;
+  premium_delta_minor: number;
+  applied_delta_minor: number;
+};
+
+/*
+ * p_refunded_total_minor is CUMULATIVE, not a delta.
+ *
+ * It is what Stripe says has been refunded in TOTAL against this
+ * consultation — charge.amount_refunded, which grows with each
+ * partial refund and is repeated on every redelivery. The RPC
+ * computes the difference against what each component has already
+ * had reversed.
+ *
+ * Migration 040 read the same figure as a delta for service
+ * purchases, and a second partial refund over-reversed a
+ * consultant's ledger by the first refund's amount. Migration 043
+ * fixed that and renamed the parameter so a stale caller fails
+ * loudly. The name here is the same for the same reason: passing a
+ * single refund's amount would silently under-reverse.
+ *
+ * Called with NAMED arguments, always. The three reversal RPCs
+ * share a parameter order, and a positional call is one edit away
+ * from meaning something else.
+ */
+export const reverseDirectBookingEarningRpc =
+  async ({
+    consultationId,
+    reason,
+    refundedTotalMinor,
+  }: {
+    consultationId: string;
+    reason: string;
+    refundedTotalMinor?: number | null;
+  }): Promise<
+    FinanceRpcResult<DirectBookingReversalRow>
+  > =>
+    callFinanceRpc<DirectBookingReversalRow>(
+      "reverse_direct_booking_earning",
+      {
+        p_consultation_id: consultationId,
+        p_reason: reason,
+        p_refunded_total_minor:
+          refundedTotalMinor ?? null,
       },
     );

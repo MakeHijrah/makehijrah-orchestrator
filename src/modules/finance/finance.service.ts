@@ -1,8 +1,11 @@
 import {
   createLedgerAdjustment,
   recordConsultationEarning,
+  recordDirectBookingEarning,
   releaseConsultationEarning,
+  releaseDirectBookingEarning,
   reverseConsultationEarningRpc,
+  reverseDirectBookingEarningRpc,
   type AdjustmentRow,
   type FinanceMarker,
 } from "./finance.repository.js";
@@ -40,10 +43,154 @@ export type EarningSyncOutcome = {
  * runs second does the release; the first is a no-op. Neither
  * call site has to know which one it is.
  */
+/*
+ * HOW A CONSULTATION FINDS ITS FINANCE PATH.
+ *
+ * There are two, and which one applies depends on
+ * consultations.booking_source. The webhook may not read that
+ * column: Amendment 004 section 10.3.3 holds the Stripe path to
+ * RPC calls only, and the webhook tests enforce it.
+ *
+ * So the DATABASE decides, through one uniform rule: try the
+ * DIRECT RPC first, and fall back to the standard one when it
+ * answers FINANCE_NOT_DIRECT_BOOKING. All three direct RPCs raise
+ * that marker for a standard consultation, so the rule is the same
+ * for record, release and reverse.
+ *
+ * Deciding this way rather than by a lookup means the answer is
+ * read under the same row lock as the write it authorises. A
+ * separate read could be stale by the time the write happens; this
+ * cannot be.
+ *
+ * The reverse direction is guarded too: migration 045 gives
+ * record_consultation_earning a matching booking_source check, so
+ * a direct booking cannot be recorded through the standard path
+ * even by a caller that skipped this dispatch. Two earnings for
+ * one payment is the failure both guards exist to prevent.
+ */
+const isNotDirectBooking = (
+  marker: FinanceMarker | null,
+): boolean =>
+  marker === "FINANCE_NOT_DIRECT_BOOKING";
+
+/*
+ * A direct booking's two components, recorded and then released.
+ *
+ * Reported through the same EarningSyncOutcome the standard path
+ * uses, with the STANDARD component's entry id: callers use it for
+ * logging and correlation, and a direct booking has no single
+ * entry to name. The full breakdown lives in the ledger, which is
+ * the only place it should be read from anyway.
+ */
+const syncDirectBookingEarning = async ({
+  consultationId,
+  recordResult,
+}: {
+  consultationId: string;
+  /*
+   * The record call the dispatcher already made. Passed in rather
+   * than repeated: recording is idempotent, but a second call is
+   * a second row lock on the consultation for no new information.
+   */
+  recordResult: Awaited<
+    ReturnType<
+      typeof recordDirectBookingEarning
+    >
+  >;
+}): Promise<EarningSyncOutcome> => {
+  if (!recordResult.ok) {
+    if (
+      recordResult.marker ===
+      "FINANCE_CONSULTATION_NOT_CAPTURED"
+    ) {
+      return {
+        recorded: false,
+        released: false,
+        entryId: null,
+        reason: "not_captured",
+      };
+    }
+
+    console.error(
+      "Direct booking earning could not be recorded",
+      {
+        consultationId,
+        marker: recordResult.marker,
+      },
+    );
+
+    return {
+      recorded: false,
+      released: false,
+      entryId: null,
+      reason:
+        recordResult.marker ??
+        "record_failed",
+    };
+  }
+
+  const releaseResult =
+    await releaseDirectBookingEarning(
+      consultationId,
+    );
+
+  if (!releaseResult.ok) {
+    console.error(
+      "Direct booking earning could not be released",
+      {
+        consultationId,
+        marker: releaseResult.marker,
+      },
+    );
+
+    return {
+      recorded: recordResult.row.created,
+      released: false,
+      entryId:
+        recordResult.row
+          .standard_entry_id,
+      reason:
+        releaseResult.marker ??
+        "release_failed",
+    };
+  }
+
+  return {
+    recorded: recordResult.row.created,
+    released: releaseResult.row.released,
+    entryId:
+      recordResult.row.standard_entry_id,
+    reason: releaseResult.row.reason,
+  };
+};
+
 export const syncConsultationEarning =
   async (
     consultationId: string,
   ): Promise<EarningSyncOutcome> => {
+    const directResult =
+      await recordDirectBookingEarning(
+        consultationId,
+      );
+
+    if (
+      directResult.ok ||
+      !isNotDirectBooking(
+        directResult.marker,
+      )
+    ) {
+      /*
+       * Either it IS a direct booking, or it failed for a reason
+       * that has nothing to do with which path applies — not yet
+       * captured, no price, settings missing. Both belong to the
+       * direct path, which reports them properly.
+       */
+      return syncDirectBookingEarning({
+        consultationId,
+        recordResult: directResult,
+      });
+    }
+
     const recordResult =
       await recordConsultationEarning(
         consultationId,
@@ -139,11 +286,64 @@ export const reverseConsultationEarning =
     consultationId,
     reason,
     grossAmountMinor,
+    refundedTotalMinor,
   }: {
     consultationId: string;
     reason: string;
     grossAmountMinor?: number | null;
+    /*
+     * The CUMULATIVE refunded total from Stripe, used only by the
+     * direct booking path. Omitted, a direct booking is reversed
+     * in full — the right answer for a cancellation, and the wrong
+     * one for a partial refund, which is why the webhook passes
+     * charge.amount_refunded.
+     */
+    refundedTotalMinor?: number | null;
   }): Promise<ReversalOutcome> => {
+    /*
+     * Direct first, exactly as the earning path does. A standard
+     * consultation answers FINANCE_NOT_DIRECT_BOOKING and falls
+     * through.
+     */
+    const directResult =
+      await reverseDirectBookingEarningRpc({
+        consultationId,
+        reason,
+        refundedTotalMinor:
+          refundedTotalMinor ?? null,
+      });
+
+    if (directResult.ok) {
+      return {
+        reversed:
+          directResult.row.reversed,
+        entryId: null,
+        reason: directResult.row.reason,
+      };
+    }
+
+    if (
+      !isNotDirectBooking(
+        directResult.marker,
+      )
+    ) {
+      console.error(
+        "Direct booking earning could not be reversed",
+        {
+          consultationId,
+          marker: directResult.marker,
+        },
+      );
+
+      return {
+        reversed: false,
+        entryId: null,
+        reason:
+          directResult.marker ??
+          "reversal_failed",
+      };
+    }
+
     const result =
       await reverseConsultationEarningRpc({
         consultationId,

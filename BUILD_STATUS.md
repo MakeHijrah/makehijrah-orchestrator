@@ -433,6 +433,27 @@ Verification: `MIGRATION_044_VERIFICATION.sql`, 33 checks against PostgreSQL 16,
 
 ---
 
+## 9g. Direct consultant booking — migration 045 **[D]**
+
+A consultant publishes a personal booking page at a **root URL** (`makehijrah.com/aisha-rahman`) and sets their own price. PROJECT_LOCK Amendment 011.
+
+- **No second booking system.** A direct booking is an ordinary consultation: same table, same statuses, same draft hold, same double-booking exclusion, same checkout, capture, completion, refund and 48-hour timeout. No `direct_consultations` table, no parallel payment record, no second account path. `consultations.booking_source` is the only distinguishing column. **[D]**
+- **Slug authority is split.** The database owns format and uniqueness; the orchestrator owns the **reserved** set, because that list is a fact about the frontend's routing table and would drift if frozen into a migration. **No `reserved_slugs` table.** **[D]**
+- **Effective price = `max(configured, platform default)`**, computed in one function and used by **both** the public page's displayed price and the draft consultation's `price_cents`. The public projection publishes only the effective figure, so a frontend cannot render a stale price while checkout charges a higher one. **[D]**
+- **Two ledger components:** the standard-price portion at the platform's consultation rate (5000 bps today, basis `direct_booking_standard`), and only the premium above it at **8000 bps** (basis `direct_booking_premium`). The premium row is written only when the premium is positive. Migration 034 had already admitted both components and both bases; this is the first use of them. **[D]**
+- **The locked example holds:** 15000 default, 20000 direct → consultant **11500**, platform **8500**. **[D]**
+- **Refunds are CUMULATIVE**, migration 043 semantics. `p_refunded_total_minor` is Stripe's `charge.amount_refunded`; the split across components uses the remainder for the premium rather than a second rounding, so the component reversals sum to the refund **exactly**. First partial, redelivery, second partial, partial-then-full and duplicate full all behave. The pre-043 delta bug is not reproduced. **[D]**
+- **The two finance paths cannot cross.** The webhook may not read `booking_source` (Amendment 004 §10.3.3), so the dispatch tries the direct RPC first and falls back on `FINANCE_NOT_DIRECT_BOOKING` — the database decides, under the same row lock as the write. Migration 045 also guards `record_consultation_earning` with `FINANCE_NOT_STANDARD_BOOKING`, which prevents two earnings for one payment. **[D]**
+- **Server authority.** The draft endpoint accepts no price, currency, `booking_source`, commission, split or earnings value; a request carrying both a slug and a `consultant_id` is refused rather than resolved by precedence. A consultant edits only their own settings (resolved from the token; the API takes no consultant identifier). An admin may **disable** a page but may not rename a link or set a price. **[D]**
+- **Amendment 002 preserved.** Public draft creation may still provision an account before payment; that is not authentication, and dashboard access still requires post-payment OTP / magic-link. **[D]**
+- **Analytics unchanged.** Migration 044 groups by `source_type`, so `direct_booking` surfaces on its own row with no dashboard change. **[D]**
+
+Verification: `MIGRATION_045_VERIFICATION.sql`, **27 checks against PostgreSQL 16**, with `app_settings` pinned to the locked example inside the rolled-back transaction so the finance assertions are exact rather than dependent on staging's current price. Migrations 038–044 re-verified against the same database. Orchestrator: **603 tests pass**, including the slug reserved list, the public projection's exact key set and leak markers, every refusal in the settings API, the two-component split, release idempotency, the full cumulative refund sequence, and the webhook passing Stripe's cumulative total. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Not done:** no frontend. The root-URL route, the booking page, the consultant settings panel and the admin control are a separate build in the frontend repository, which is not present in this workspace. **The frontend must render `effective_direct_booking_price_cents` and must not reproduce the price rule.**
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -462,6 +483,7 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 - Public self-signup prohibition and `shouldCreateUser: false`.
 - Client provisioning through the booking backend; consultant provisioning through invitations.
 - Server-controlled consultation price and currency; price snapshot immutability.
+- The effective direct booking price rule, and the reserved slug list, which must gain an entry whenever a top-level frontend route is added (Amendment 011).
 - Stripe manual-capture workflow.
 - `consultations.stripe_mode` as the selector for existing payments.
 - Stripe credentials in Railway environment variables only.
@@ -540,11 +562,12 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_008_CONSULTANT_ONBOARDING_AND_IMMUTABLE_GENDER.md`
 - `PROJECT_LOCK_AMENDMENT_009_SERVICE_PURCHASE_FINANCE.md`
 - `PROJECT_LOCK_AMENDMENT_010_POST_PURCHASE_SERVICE_INSTRUCTIONS.md`
+- `PROJECT_LOCK_AMENDMENT_011_DIRECT_CONSULTANT_BOOKING.md`
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 044
+- `supabase/migrations/` — migrations 001 through 045
 
 ---
 

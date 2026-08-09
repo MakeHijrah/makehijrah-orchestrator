@@ -717,6 +717,21 @@ export const processStripeWebhookEvent =
               normalized.consultationId,
             reason:
               "Stripe refund processed by webhook",
+            /*
+             * charge.amount_refunded is CUMULATIVE: it is the
+             * total refunded against this charge so far, not the
+             * amount of this refund, and Stripe repeats it on
+             * every redelivery.
+             *
+             * The direct booking reversal reads it as such and
+             * applies only the difference against what each
+             * component has already had reversed, so two partial
+             * refunds reverse each partial once and a redelivery
+             * reverses nothing. The standard path ignores it and
+             * still reverses in full, exactly as before.
+             */
+            refundedTotalMinor:
+              normalized.amountCents,
           });
         }
       } catch (error) {
