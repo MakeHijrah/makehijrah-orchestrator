@@ -8,6 +8,7 @@ import {
   loadCountryIds,
 } from "../consultant-profile/consultant-profile.repository.js";
 import { hasUsableWorkingHours } from "../consultant-profile/consultant-profile.working-hours.js";
+import { assignDefaultSlugIfMissing } from "../direct-booking/direct-booking.assignment.service.js";
 
 /*
  * Machine-readable activation requirement labels.
@@ -430,6 +431,48 @@ export const activateConsultant =
         message:
           "The consultant profile is incomplete.",
         missing,
+      };
+    }
+
+    /*
+     * THE BOOKING LINK, before activation completes.
+     * PROJECT_LOCK Amendment 012.
+     *
+     * Consultants no longer choose their own slug, so one is
+     * derived here from the name the platform already publishes. It
+     * runs BEFORE the activation write on purpose: an active
+     * consultant with no booking link is a half-finished state
+     * somebody would have to notice and repair by hand, and the
+     * whole point of generating it is that nobody has to.
+     *
+     * Nothing is overwritten. A consultant who already has a link -
+     * generated earlier, or set by an administrator - keeps it,
+     * including across a deactivate/reactivate cycle. A link that
+     * moved on its own would break every card and signature already
+     * carrying it.
+     *
+     * This does NOT switch direct booking on. An address is not a
+     * decision to publish; that stays the consultant's.
+     */
+    const slugResult =
+      await assignDefaultSlugIfMissing({
+        consultantId,
+      });
+
+    if (!slugResult.ok) {
+      console.error(
+        "Consultant activation blocked: no booking link could be generated",
+        {
+          consultantId,
+          code: slugResult.code,
+        },
+      );
+
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The consultant could not be activated.",
       };
     }
 

@@ -44,6 +44,9 @@ for (const [key, value] of Object.entries(testEnv)) {
 }
 
 const { default: Fastify } = await import("fastify");
+type InjectOptions = Parameters<
+  ReturnType<typeof Fastify>["inject"]
+>[0] & object;
 const { supabaseAdmin } = await import("../../lib/supabase.js");
 const { invalidateSettingsCache } = await import(
   "../settings/settings.provider.js"
@@ -308,14 +311,25 @@ const call = async ({
   token?: string | null;
   body?: unknown;
 }): Promise<Response> => {
-  const response = await app.inject({
+  /*
+   * Assembled first and typed as one object. Passing a union
+   * `method` inline makes TypeScript pick inject's CHAINABLE
+   * overload, whose result has no statusCode - which is a type
+   * error rather than a runtime one, and was invisible until
+   * typecheck:test was run.
+   */
+  const options: InjectOptions = {
     method,
     url,
     ...(token
       ? { headers: { authorization: `Bearer ${token}` } }
       : {}),
-    ...(body === undefined ? {} : { payload: body }),
-  });
+    ...(body === undefined
+      ? {}
+      : { payload: body as object }),
+  };
+
+  const response = await app.inject(options);
 
   return {
     statusCode: response.statusCode,
@@ -659,16 +673,22 @@ describe("Consultant booking page settings", () => {
     );
   });
 
-  it("rejects a reserved booking link", async () => {
+  /*
+   * Amendment 012. The booking link is admin-managed: a slug is a
+   * ROOT url in the same namespace as every top-level route the
+   * platform owns, and a link a consultant can rewrite is a link
+   * that breaks every card and signature already carrying it.
+   *
+   * The schema is strict, so a client still sending the field gets
+   * a 400 rather than a silent no-op - the right answer for
+   * something that used to work.
+   */
+  it("refuses a consultant's attempt to set their own link", async () => {
     const response = await patch({
-      consultant_slug: "Dashboard",
+      consultant_slug: "something-else",
     });
 
     assert.equal(response.statusCode, 400);
-    assert.deepEqual(
-      response.json().error!.details,
-      { reason: "SLUG_RESERVED" },
-    );
 
     assert.equal(
       db.consultants[0]!.consultant_slug,
@@ -676,27 +696,42 @@ describe("Consultant booking page settings", () => {
     );
   });
 
-  it("rejects a booking link another consultant holds", async () => {
+  it("refuses it even alongside settings they may change", async () => {
     const response = await patch({
-      consultant_slug: "Yusuf Al Amin",
+      direct_booking_price_cents: 30_000,
+      consultant_slug: "something-else",
     });
 
-    assert.equal(response.statusCode, 409);
-    assert.deepEqual(
-      response.json().error!.details,
-      { reason: "SLUG_TAKEN" },
+    assert.equal(response.statusCode, 400);
+
+    /* And the permitted field did not sneak through either. */
+    assert.equal(
+      db.consultants[0]!.direct_booking_price_cents,
+      20_000,
+    );
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman",
     );
   });
 
-  it("stores the normalized link, not what was typed", async () => {
-    const response = await patch({
-      consultant_slug: "  Aïsha  Rahman-2  ",
+  it("still lets a consultant read their link and booking URL", async () => {
+    const response = await call({
+      method: "GET",
+      url: "/api/consultant/direct-booking",
+      token: CONSULTANT_PROFILE,
     });
 
-    assert.equal(response.statusCode, 200);
+    const settings = response.json().data!
+      .direct_booking as Record<string, unknown>;
+
     assert.equal(
-      db.consultants[0]!.consultant_slug,
-      "aisha-rahman-2",
+      settings.consultant_slug,
+      "aisha-rahman",
+    );
+    assert.equal(
+      settings.booking_url,
+      "https://app.example.test/aisha-rahman",
     );
   });
 
@@ -718,11 +753,15 @@ describe("Consultant booking page settings", () => {
   });
 
   it("will not publish an inactive consultant", async () => {
-    db.consultants[2]!.consultant_slug = null;
+    /*
+     * An inactive consultant has a link (activation generates one)
+     * but may not switch their page live.
+     */
+    db.consultants[2]!.consultant_slug =
+      "not-activated";
 
     const response = await patch(
       {
-        consultant_slug: "not-activated",
         direct_booking_price_cents: 20_000,
         direct_booking_enabled: true,
       },
@@ -924,6 +963,194 @@ describe("Admin booking page management", () => {
     });
 
     assert.equal(page.statusCode, 404);
+  });
+
+  const adminSlug = (
+    body: unknown,
+    token = ADMIN_PROFILE,
+  ) =>
+    call({
+      method: "PATCH",
+      url: `/api/admin/consultants/${CONSULTANT_ID}/direct-booking`,
+      token,
+      body,
+    });
+
+  it("sets a consultant's booking link", async () => {
+    const response = await adminSlug({
+      consultant_slug: "  Aïsha  Rahman-2  ",
+    });
+
+    assert.equal(response.statusCode, 200);
+
+    /* Stored normalized, never as typed. */
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman-2",
+    );
+
+    assert.equal(
+      (
+        response.json().data!
+          .direct_booking as Record<
+          string,
+          unknown
+        >
+      ).booking_url,
+      "https://app.example.test/aisha-rahman-2",
+    );
+  });
+
+  it("leaves the price and the enabled flag alone", async () => {
+    await adminSlug({
+      consultant_slug: "new-link",
+    });
+
+    /*
+     * An admin sets the address. Whether the page is live and what
+     * it charges remain the consultant's.
+     */
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      true,
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_price_cents,
+      20_000,
+    );
+  });
+
+  it("refuses a reserved link", async () => {
+    const response = await adminSlug({
+      consultant_slug: "Dashboard",
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.deepEqual(
+      response.json().error!.details,
+      { reason: "SLUG_RESERVED" },
+    );
+
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman",
+    );
+  });
+
+  it("refuses the hyphenated policy routes too", async () => {
+    for (const reserved of [
+      "privacy-policy",
+      "terms-of-service",
+    ]) {
+      const response = await adminSlug({
+        consultant_slug: reserved,
+      });
+
+      assert.equal(
+        response.statusCode,
+        400,
+        `${reserved} was accepted`,
+      );
+      assert.deepEqual(
+        response.json().error!.details,
+        { reason: "SLUG_RESERVED" },
+      );
+    }
+  });
+
+  it("refuses a link another consultant holds", async () => {
+    const response = await adminSlug({
+      consultant_slug: "Yusuf Al Amin",
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.deepEqual(
+      response.json().error!.details,
+      { reason: "SLUG_TAKEN" },
+    );
+
+    /*
+     * An admin typed this one, so it is refused rather than
+     * silently suffixed. Only generated defaults suffix.
+     */
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman",
+    );
+  });
+
+  it("refuses a malformed or empty link", async () => {
+    const tooShort = await adminSlug({
+      consultant_slug: "ab",
+    });
+
+    assert.equal(tooShort.statusCode, 400);
+    assert.deepEqual(
+      tooShort.json().error!.details,
+      { reason: "SLUG_TOO_SHORT" },
+    );
+
+    const tooLong = await adminSlug({
+      consultant_slug: "a".repeat(61),
+    });
+
+    assert.equal(tooLong.statusCode, 400);
+    assert.deepEqual(
+      tooLong.json().error!.details,
+      { reason: "SLUG_TOO_LONG" },
+    );
+
+    const empty = await adminSlug({
+      consultant_slug: "///",
+    });
+
+    assert.equal(empty.statusCode, 400);
+    assert.deepEqual(
+      empty.json().error!.details,
+      { reason: "SLUG_EMPTY" },
+    );
+  });
+
+  it("refuses anything other than a link", async () => {
+    for (const body of [
+      { direct_booking_price_cents: 1 },
+      { direct_booking_enabled: true },
+      {
+        consultant_slug: "fine",
+        direct_booking_enabled: true,
+      },
+    ]) {
+      const response = await adminSlug(body);
+
+      assert.equal(response.statusCode, 400);
+    }
+  });
+
+  it("is closed to consultants and clients for the slug write too", async () => {
+    for (const token of [
+      CONSULTANT_PROFILE,
+      CLIENT_PROFILE,
+    ]) {
+      const response = await adminSlug(
+        { consultant_slug: "taken-over" },
+        token,
+      );
+
+      assert.equal(response.statusCode, 403);
+    }
+
+    const anonymous = await call({
+      method: "PATCH",
+      url: `/api/admin/consultants/${CONSULTANT_ID}/direct-booking`,
+      body: { consultant_slug: "taken-over" },
+    });
+
+    assert.equal(anonymous.statusCode, 401);
+
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman",
+    );
   });
 
   it("is closed to consultants and clients", async () => {

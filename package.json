@@ -13,7 +13,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json",
-    "test": "node --import tsx --test \"src/**/*.test.ts\""
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "backfill:consultant-slugs": "tsx src/scripts/backfill-consultant-slugs.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

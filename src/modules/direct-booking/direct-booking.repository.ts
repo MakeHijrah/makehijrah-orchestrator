@@ -405,3 +405,215 @@ export const adminDisableDirectBooking =
 
     return { ok: true, row };
   };
+
+
+/*
+ * The name a default slug is derived from.
+ *
+ * consultants.display_name is the public projection of
+ * profiles.full_name (Amendment 008) and is what every public
+ * surface already renders, so it is the source. profiles.full_name
+ * is read only when the projection is missing — a consultant
+ * activated before migration 030's backfill, or one whose name was
+ * never projected. There is no third name and no second authority.
+ */
+export const loadConsultantNameForSlug =
+  async (
+    consultantId: string,
+  ): Promise<
+    RepositoryResult<{
+      displayName: string | null;
+      fullName: string | null;
+      consultantSlug: string | null;
+    } | null>
+  > => {
+    const { data, error } =
+      await supabaseAdmin
+        .from("consultants")
+        .select(
+          "id, display_name, profile_id, consultant_slug",
+        )
+        .eq("id", consultantId)
+        .maybeSingle();
+
+    if (error) {
+      console.error(
+        "Consultant name lookup for slug generation failed",
+        {
+          consultantId,
+          code: error.code,
+          message: error.message,
+        },
+      );
+
+      return { ok: false };
+    }
+
+    const row = data as {
+      id: string;
+      display_name: string | null;
+      profile_id: string;
+      consultant_slug: string | null;
+    } | null;
+
+    if (!row) {
+      return { ok: true, data: null };
+    }
+
+    /*
+     * Only reached when the projection is empty, so an ordinary
+     * activation costs one query rather than two.
+     */
+    if (row.display_name) {
+      return {
+        ok: true,
+        data: {
+          displayName: row.display_name,
+          fullName: null,
+          consultantSlug:
+            row.consultant_slug,
+        },
+      };
+    }
+
+    const { data: profileData, error: profileError } =
+      await supabaseAdmin
+        .from("profiles")
+        .select("full_name")
+        .eq("id", row.profile_id)
+        .maybeSingle();
+
+    if (profileError) {
+      console.error(
+        "Consultant profile name lookup for slug generation failed",
+        {
+          consultantId,
+          code: profileError.code,
+          message: profileError.message,
+        },
+      );
+
+      return { ok: false };
+    }
+
+    return {
+      ok: true,
+      data: {
+        displayName: null,
+        fullName:
+          (profileData as {
+            full_name: string | null;
+          } | null)?.full_name ?? null,
+        consultantSlug: row.consultant_slug,
+      },
+    };
+  };
+
+export type ClaimSlugResult =
+  | { ok: true; claimed: true }
+  | { ok: false; code: "SLUG_TAKEN" | "INTERNAL_ERROR" };
+
+/*
+ * Claim a slug for a consultant that does not have one.
+ *
+ * The `is` filter on consultant_slug is what makes this safe to
+ * call concurrently and safe to rerun: a consultant who already has
+ * a slug matches nothing, so an existing link can never be
+ * overwritten by generation — not by a racing activation, not by a
+ * second run of the backfill, not by a mistaken call.
+ *
+ * A 23505 means another consultant took the candidate between the
+ * availability check and this write. The caller moves to the next
+ * candidate; the unique index remains the final authority on who
+ * holds a link.
+ */
+export const claimGeneratedSlug = async ({
+  consultantId,
+  slug,
+}: {
+  consultantId: string;
+  slug: string;
+}): Promise<ClaimSlugResult> => {
+  const { data, error } = await supabaseAdmin
+    .from("consultants")
+    .update({ consultant_slug: slug })
+    .eq("id", consultantId)
+    .is("consultant_slug", null)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "23505") {
+      return { ok: false, code: "SLUG_TAKEN" };
+    }
+
+    console.error(
+      "Consultant slug claim failed",
+      {
+        consultantId,
+        slug,
+        code: error.code,
+        message: error.message,
+      },
+    );
+
+    return { ok: false, code: "INTERNAL_ERROR" };
+  }
+
+  if (!data) {
+    /*
+     * No row matched, which means the consultant already holds a
+     * slug. Not an error and not a claim: generation never
+     * overwrites.
+     */
+    return { ok: false, code: "INTERNAL_ERROR" };
+  }
+
+  return { ok: true, claimed: true };
+};
+
+/*
+ * Every active consultant still missing a booking link.
+ *
+ * Ordered so a backfill run is reproducible and its log reads in a
+ * stable order.
+ */
+export const listActiveConsultantsWithoutSlug =
+  async (): Promise<
+    RepositoryResult<
+      Array<{ id: string; displayName: string | null }>
+    >
+  > => {
+    const { data, error } =
+      await supabaseAdmin
+        .from("consultants")
+        .select("id, display_name")
+        .is("consultant_slug", null)
+        .eq("is_active", true)
+        .order("id", { ascending: true });
+
+    if (error) {
+      console.error(
+        "Consultant slug backfill listing failed",
+        {
+          code: error.code,
+          message: error.message,
+        },
+      );
+
+      return { ok: false };
+    }
+
+    return {
+      ok: true,
+      data: (
+        (data ?? []) as Array<{
+          id: string;
+          display_name: string | null;
+        }>
+      ).map((row) => ({
+        id: row.id,
+        displayName: row.display_name,
+      })),
+    };
+  };

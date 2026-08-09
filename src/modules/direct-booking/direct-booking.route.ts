@@ -10,6 +10,7 @@ import {
   getAdminDirectBookingSettings,
   getOwnDirectBookingSettings,
   getPublicConsultantBySlug,
+  setConsultantSlugAsAdmin,
   updateOwnDirectBookingSettings,
   type DirectBookingSettingsResult,
 } from "./direct-booking.service.js";
@@ -37,21 +38,24 @@ const consultantIdParamsSchema = z.object({
  * The consultant's own settings. STRICT, and the strictness is the
  * security control.
  *
- * Three fields, all of them the consultant's to set. Anything else
- * — a consultant id, a commission rate, a split, an earnings
- * figure, a booking_source — is rejected by .strict() rather than
- * ignored, so an attempt to send one fails loudly instead of
- * silently doing nothing and looking like it worked.
+ * TWO fields now, not three. consultant_slug was removed by
+ * Amendment 012: a slug is a ROOT url in the same namespace as
+ * every top-level route the platform owns, and a link a consultant
+ * can rewrite is a link that breaks every card, signature and post
+ * already carrying it. Slugs are generated at activation and
+ * changed only by an administrator.
+ *
+ * Because the schema is strict, a client still sending
+ * consultant_slug gets a 400 rather than a silent no-op — which is
+ * the right answer for a field that used to work. A consultant may
+ * still read their slug and their booking URL from the GET.
+ *
+ * Everything else — a consultant id, a commission rate, a split, an
+ * earnings figure, a booking_source — is refused for the same
+ * reason it always was.
  */
 const updateSettingsSchema = z
   .object({
-    consultant_slug: z
-      .union([
-        z.string().trim().min(1).max(SLUG_MAX_LENGTH * 2),
-        z.null(),
-      ])
-      .optional(),
-
     direct_booking_enabled: z
       .boolean()
       .optional(),
@@ -66,6 +70,21 @@ const updateSettingsSchema = z
         z.null(),
       ])
       .optional(),
+  })
+  .strict();
+
+/*
+ * The administrator's slug write. Also strict, and also one field:
+ * an admin sets the address, not the price and not whether the page
+ * is live. Those remain the consultant's.
+ */
+const adminSlugSchema = z
+  .object({
+    consultant_slug: z
+      .string()
+      .trim()
+      .min(1)
+      .max(SLUG_MAX_LENGTH * 2),
   })
   .strict();
 
@@ -305,6 +324,68 @@ export const registerDirectBookingRoutes = async (
         await getAdminDirectBookingSettings(
           params.data.id,
         ),
+      );
+    },
+  );
+
+  app.patch(
+    "/api/admin/consultants/:id/direct-booking",
+    async (request, reply) => {
+      const authentication =
+        await requireRole(request, [
+          "admin",
+        ]);
+
+      if (!authentication.ok) {
+        return sendError(
+          reply,
+          authentication.statusCode,
+          authentication.code,
+          authentication.message,
+        );
+      }
+
+      const params =
+        consultantIdParamsSchema.safeParse(
+          request.params,
+        );
+
+      if (!params.success) {
+        return sendError(
+          reply,
+          400,
+          "VALIDATION_ERROR",
+          "A valid consultant identifier is required.",
+        );
+      }
+
+      const parsed =
+        adminSlugSchema.safeParse(
+          request.body,
+        );
+
+      if (!parsed.success) {
+        return sendError(
+          reply,
+          400,
+          "VALIDATION_ERROR",
+          "A booking link is required.",
+          parsed.error.flatten(),
+        );
+      }
+
+      /*
+       * Straight through to the same service the generator and the
+       * public lookup use. Normalization, the reserved set, format,
+       * length and uniqueness are settled in one place; a raw
+       * unique-violation never reaches HTTP.
+       */
+      return sendSettingsResult(
+        reply,
+        await setConsultantSlugAsAdmin({
+          consultantId: params.data.id,
+          slug: parsed.data.consultant_slug,
+        }),
       );
     },
   );

@@ -696,6 +696,7 @@ describe("Same-slot reselection", () => {
     holdExpiresAt: new Date(
       Date.now() + 28 * 60 * 1000,
     ).toISOString(),
+    intakeEmail: "original@example.invalid",
   };
 
   it("recognises the same slot however the timestamp is written", () => {

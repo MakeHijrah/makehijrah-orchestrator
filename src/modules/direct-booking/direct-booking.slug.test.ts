@@ -107,6 +107,12 @@ describe("Reserved slugs", () => {
     "favicon.ico",
     "robots.txt",
     "sitemap.xml",
+
+    /* Added by Amendment 012's route audit. */
+    "contact",
+    "about",
+    "privacy-policy",
+    "terms-of-service",
   ];
 
   it("reserves every name the amendment names", () => {

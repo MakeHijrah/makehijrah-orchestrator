@@ -279,30 +279,50 @@ Consultant role. Returns the caller's own settings:
 
 ### `PATCH /api/consultant/direct-booking`
 
-Consultant role. Rate limit: 20 / minute. **Strict body** — exactly these three keys, all optional:
+Consultant role. Rate limit: 20 / minute. **Strict body** — exactly these two keys, both optional:
 
 ```json
 {
-  "consultant_slug": "string | null",
   "direct_booking_enabled": "boolean",
   "direct_booking_price_cents": "integer | null"
 }
 ```
 
-Any other key is a `400 VALIDATION_ERROR`, **not** a silently ignored field. In particular a commission, a split, an earnings figure, a `consultant_id` or a `profile_id` is refused outright: **no editable commission percentage exists anywhere in this API.**
+**`consultant_slug` was removed by Amendment 012.** A slug is a root URL in the same namespace as every top-level route the platform owns, and a link a consultant can rewrite is a link that breaks every card and signature already carrying it. Slugs are generated at activation and changed only by an administrator (§3c). Because the body is strict, a client still sending `consultant_slug` gets a `400` rather than a silent no-op. Consultants may still **read** their slug and canonical booking URL from the GET above.
+
+Any other key is likewise a `400 VALIDATION_ERROR`, **not** a silently ignored field. In particular a commission, a split, an earnings figure, a `consultant_id` or a `profile_id` is refused outright: **no editable commission percentage exists anywhere in this API.**
 
 **Own settings only, structurally.** The consultant row is resolved from the profile id on the verified access token. The API accepts no consultant identifier at all, so there is nothing to tamper with.
 
 | Failure | Status | `error.details.reason` |
 |---|---|---|
-| Reserved booking link | 400 | `SLUG_RESERVED` |
-| Link too short / too long / empty after normalization | 400 | `SLUG_TOO_SHORT`, `SLUG_TOO_LONG`, `SLUG_EMPTY` |
-| Link already held by another consultant | **409** | `SLUG_TAKEN` |
 | Price below the platform's current consultation price | 400 | `PRICE_BELOW_PLATFORM_MINIMUM` |
 | Enabling with no link / no price | 400 | `SLUG_REQUIRED`, `PRICE_REQUIRED` |
 | Enabling while `is_active = false` | 409 | `CONSULTANT_NOT_ACTIVE` |
 
-The **stored** slug is the normalized one, never the raw input.
+### `PATCH /api/admin/consultants/:id/direct-booking`
+
+**New in Amendment 012.** Admin role. **Strict body** — exactly one key:
+
+```json
+{ "consultant_slug": "string" }
+```
+
+The only path that writes a hand-entered slug. It runs the same validation everything else does — normalize, reserved, format, length, uniqueness — and **stores the normalized value, never the raw input**.
+
+It deliberately does **not** suffix. Generated defaults may quietly become `john-smith-2` because nobody asked for that exact string; an administrator typed this one, so a collision is refused rather than silently renamed. The price and the enabled flag are carried through unchanged — those remain the consultant's.
+
+| Failure | Status | `error.details.reason` |
+|---|---|---|
+| Reserved booking link | 400 | `SLUG_RESERVED` |
+| Empty after normalization | 400 | `SLUG_EMPTY` |
+| Too short / too long | 400 | `SLUG_TOO_SHORT`, `SLUG_TOO_LONG` |
+| Malformed | 400 | `SLUG_INVALID` |
+| Already held by another consultant | **409** | `SLUG_TAKEN` |
+
+**No raw unique-constraint error ever reaches HTTP.**
+
+**Changing a slug breaks the old URL.** There is no redirect and no slug history; anyone holding the previous link gets a 404. That is why slug changes are administrative rather than self-service — see Amendment 012 §9.
 
 ### `GET /api/admin/consultants/:id/direct-booking`
 
@@ -881,7 +901,7 @@ Templates are plain HTML in the orchestrator repo. No template service in MVP.
 4. ~~**Price:** staging placeholder `DEFAULT_CONSULTATION_PRICE_CENTS=15000` ($150 USD).~~ **Superseded by PROJECT_LOCK Amendment 007 (migration 025).** The price is now `app_settings.consultation_price_cents`, admin-managed and seeded at the same `15000`. The environment variable is retained only as the migration seed and a bootstrap fallback.
 5. **Reminders:** 24h consultant acceptance reminder; 24h + 1h session reminders. Approved as proposed.
 
-**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006, 007, 008, 010 and 011.** Any new endpoint requires Dave's written approval and a version bump of this document.
+**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006, 007, 008, 010, 011 and 012.** Any new endpoint requires Dave's written approval and a version bump of this document.
 
 Endpoint additions since v1.0, each authorised by an approved amendment:
 
@@ -892,6 +912,7 @@ Endpoint additions since v1.0, each authorised by an approved amendment:
 | §3b | four application settings endpoints | 007 |
 | §2b | `PUT /api/consultant/profile` | 008 |
 | §2c | `GET /api/public/consultants/:slug`, `GET`/`PATCH /api/consultant/direct-booking`, `GET`/`POST /api/admin/consultants/:id/direct-booking[/disable]` | 011 |
+| §2c | `PATCH /api/admin/consultants/:id/direct-booking` — admin slug management; `consultant_slug` removed from the consultant PATCH | 012 |
 
 No other endpoint has been added. No existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1, the price/duration/Stripe-mode sourcing described in §1 and §3b, and the admin activation completeness guard described in §3, which now returns `CONSULTANT_PROFILE_INCOMPLETE` in place of `ACTIVATION_BLOCKED` (Amendment 008).
 

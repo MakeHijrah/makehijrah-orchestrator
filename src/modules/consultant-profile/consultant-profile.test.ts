@@ -141,6 +141,11 @@ class FakeQuery {
     return this;
   }
 
+  neq(column: string, value: unknown): this {
+    this.filters.push((row) => row[column] !== value);
+    return this;
+  }
+
   limit(): this {
     return this;
   }
@@ -422,6 +427,13 @@ const completeConsultant = (overrides: Row = {}): Row => ({
   working_hours_jsonb: { ...STORED_HOURS },
   is_active: false,
   onboarding_completed_at: null,
+  /*
+   * Amendment 012. Activation now generates a booking link when
+   * there is none, so the fixture carries the fields that
+   * generation reads and writes.
+   */
+  display_name: "Aisha Consultant",
+  consultant_slug: null,
   ...overrides,
 });
 
@@ -1219,6 +1231,104 @@ describe("Admin activation: shared completeness evaluator", () => {
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().data.consultant.is_active, true);
     assert.equal(consultantRow().is_active, true);
+  });
+
+  /*
+   * Amendment 012. A consultant no longer chooses their own booking
+   * link, so activation has to produce one - and an active
+   * consultant with no link would be a half-finished state somebody
+   * would have to repair by hand.
+   */
+  it("generates a booking link from the consultant's name", async () => {
+    complete();
+    await activate(CONSULTANT_ID);
+
+    assert.equal(
+      consultantRow().consultant_slug,
+      "aisha-consultant",
+    );
+  });
+
+  it("does not enable direct booking", async () => {
+    complete();
+    await activate(CONSULTANT_ID);
+
+    /*
+     * A link is an address, not a decision to publish. Switching
+     * the page on stays the consultant's.
+     */
+    assert.notEqual(
+      consultantRow().direct_booking_enabled,
+      true,
+    );
+  });
+
+  it("never overwrites a link the consultant already has", async () => {
+    complete();
+    db.consultants[0]!.consultant_slug =
+      "chosen-by-an-admin";
+
+    await activate(CONSULTANT_ID);
+
+    assert.equal(
+      consultantRow().consultant_slug,
+      "chosen-by-an-admin",
+    );
+  });
+
+  it("suffixes when the name is already taken", async () => {
+    complete();
+
+    /* Another consultant already holds the obvious link. */
+    db.consultants[1]!.consultant_slug =
+      "aisha-consultant";
+
+    await activate(CONSULTANT_ID);
+
+    assert.equal(
+      consultantRow().consultant_slug,
+      "aisha-consultant-2",
+    );
+  });
+
+  it("falls back to the authoritative name when the projection is empty", async () => {
+    complete();
+    db.consultants[0]!.display_name = null;
+
+    await activate(CONSULTANT_ID);
+
+    /*
+     * display_name is the public projection of
+     * profiles.full_name. The authoritative field is the fallback,
+     * not a second source of truth.
+     */
+    assert.equal(
+      consultantRow().consultant_slug,
+      "aisha-consultant",
+    );
+  });
+
+  it("does not regenerate the link when the name changes", async () => {
+    complete();
+    await activate(CONSULTANT_ID);
+
+    const original =
+      consultantRow().consultant_slug;
+
+    db.consultants[0]!.display_name =
+      "Aisha Someone Else";
+    db.consultants[0]!.is_active = false;
+
+    await activate(CONSULTANT_ID);
+
+    /*
+     * A link that moved on its own would break every card,
+     * signature and post already carrying it.
+     */
+    assert.equal(
+      consultantRow().consultant_slug,
+      original,
+    );
   });
 
   it("still refuses a non-admin caller", async () => {

@@ -332,7 +332,6 @@ export const getOwnDirectBookingSettings =
   };
 
 export type UpdateDirectBookingInput = {
-  consultant_slug?: string | null;
   direct_booking_enabled?: boolean;
   direct_booking_price_cents?:
     | number
@@ -409,56 +408,21 @@ export const updateOwnDirectBookingSettings =
         ? current.direct_booking_price_cents
         : input.direct_booking_price_cents;
 
-    let nextSlug =
-      input.consultant_slug === undefined
-        ? current.consultant_slug
-        : input.consultant_slug;
-
-    if (
-      input.consultant_slug !== undefined &&
-      input.consultant_slug !== null
-    ) {
-      const validation =
-        validateConsultantSlug(
-          input.consultant_slug,
-        );
-
-      if (!validation.ok) {
-        return {
-          ok: false,
-          code: "VALIDATION_ERROR",
-          message: validation.message,
-          reason: validation.code,
-        };
-      }
-
-      nextSlug = validation.slug;
-
-      const taken =
-        await isSlugTakenByAnother({
-          slug: nextSlug,
-          consultantId: current.id,
-        });
-
-      if (!taken.ok) {
-        return {
-          ok: false,
-          code: "INTERNAL_ERROR",
-          message:
-            "Your booking page settings could not be saved.",
-        };
-      }
-
-      if (taken.data) {
-        return {
-          ok: false,
-          code: "CONFLICT",
-          message:
-            "That booking link is already taken. Please choose another.",
-          reason: "SLUG_TAKEN",
-        };
-      }
-    }
+    /*
+     * THE SLUG IS NOT THEIRS TO CHANGE. Amendment 012.
+     *
+     * A consultant slug is a ROOT url in the same namespace as
+     * every top-level route the platform owns, and a link that a
+     * consultant can rewrite is a link that breaks every card,
+     * signature and post that already carries it. It is
+     * admin-managed: generated at activation, changed only by an
+     * administrator, and read-only here.
+     *
+     * The stored value is carried forward unchanged. The request
+     * schema refuses consultant_slug outright, so this is the
+     * second line rather than the first.
+     */
+    const nextSlug = current.consultant_slug;
 
     /*
      * The price floor, checked AT SAVE TIME against the platform's
@@ -628,6 +592,163 @@ export const getAdminDirectBookingSettings =
       ok: true,
       settings: toSettingsView({
         row: lookup.data,
+        platformPriceCents:
+          settings.consultation_price_cents,
+        currency:
+          settings.consultation_currency,
+      }),
+    };
+  };
+
+/*
+ * An administrator sets a consultant's booking link.
+ *
+ * The ONLY path that writes a hand-entered slug. It runs the same
+ * validation a generated one runs — normalize, reserved, format,
+ * length, uniqueness — because a second implementation is a second
+ * set of rules waiting to disagree.
+ *
+ * It deliberately does NOT suffix. Generation may quietly turn
+ * john-smith into john-smith-2 because nobody asked for that exact
+ * string; an administrator typed this one, and silently storing
+ * something else would be worse than saying it is taken.
+ */
+export const setConsultantSlugAsAdmin =
+  async ({
+    consultantId,
+    slug,
+  }: {
+    consultantId: string;
+    slug: string;
+  }): Promise<DirectBookingSettingsResult> => {
+    let settings;
+
+    try {
+      settings = await getSettings();
+    } catch {
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The booking link could not be saved.",
+      };
+    }
+
+    const lookup =
+      await loadDirectBookingSettingsById(
+        consultantId,
+      );
+
+    if (!lookup.ok) {
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The booking link could not be saved.",
+      };
+    }
+
+    if (!lookup.data) {
+      return {
+        ok: false,
+        code: "NOT_FOUND",
+        message:
+          "The consultant was not found.",
+      };
+    }
+
+    const current = lookup.data;
+
+    const validation =
+      validateConsultantSlug(slug);
+
+    if (!validation.ok) {
+      return {
+        ok: false,
+        code: "VALIDATION_ERROR",
+        message: validation.message,
+        reason: validation.code,
+      };
+    }
+
+    const taken = await isSlugTakenByAnother({
+      slug: validation.slug,
+      consultantId: current.id,
+    });
+
+    if (!taken.ok) {
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The booking link could not be saved.",
+      };
+    }
+
+    if (taken.data) {
+      return {
+        ok: false,
+        code: "CONFLICT",
+        message:
+          "That booking link is already taken. Please choose another.",
+        reason: "SLUG_TAKEN",
+      };
+    }
+
+    /*
+     * The enabled flag and the price are carried through
+     * unchanged. An admin sets the address; whether the page is
+     * live and what it charges remain the consultant's.
+     */
+    const saved =
+      await saveDirectBookingSettings({
+        consultantId: current.id,
+        slug: validation.slug,
+        enabled:
+          current.direct_booking_enabled,
+        priceCents:
+          current.direct_booking_price_cents,
+      });
+
+    if (!saved.ok) {
+      if (saved.code === "SLUG_TAKEN") {
+        /*
+         * Claimed between the check and the write. The unique
+         * index is the referee; a raw 23505 never reaches HTTP.
+         */
+        return {
+          ok: false,
+          code: "CONFLICT",
+          message:
+            "That booking link is already taken. Please choose another.",
+          reason: "SLUG_TAKEN",
+        };
+      }
+
+      if (
+        saved.code === "CONSTRAINT_VIOLATION"
+      ) {
+        return {
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message:
+            "That booking link is not valid.",
+          reason: "SLUG_INVALID",
+        };
+      }
+
+      return {
+        ok: false,
+        code: "INTERNAL_ERROR",
+        message:
+          "The booking link could not be saved.",
+      };
+    }
+
+    return {
+      ok: true,
+      settings: toSettingsView({
+        row: saved.row,
         platformPriceCents:
           settings.consultation_price_cents,
         currency:
