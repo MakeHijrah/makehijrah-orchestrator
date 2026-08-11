@@ -559,6 +559,23 @@ Verification: migrations 038–049 re-verified (no migration added). Orchestrato
 
 ---
 
+## 9m. Direct booking Stripe cancel routing — no migration **[D]**
+
+A visitor who abandoned Stripe Checkout on a **direct** booking was returned to `/consultation?booking=cancelled&cid=…` — the generic consultation page, not the consultant's own page they had been booking from. They landed somewhere they had never been, with no route back.
+
+- **Root cause.** `cancel_url` in `checkout.service.ts` was a literal `${APP_URL}/consultation`, written before direct booking existed and never revisited. The checkout projection did not read `booking_source` or `consultant_id` at all, so the information needed to decide was not in the function. **[D]**
+- **Standard bookings are unchanged** — still `{APP_URL}/consultation?booking=cancelled&cid={id}`. **[D]**
+- **Direct bookings return to the consultant's page** — `{APP_URL}/{consultant_slug}?booking=cancelled&cid={id}`. **[D]**
+- **Server remains the sole authority for Stripe return URLs.** The request carries no cancel URL, no slug and no booking source, and there is nowhere for one to arrive: `createStripeCheckout` takes a single consultation id. `booking_source` and `consultant_id` come off the consultation row; the slug comes off the consultant row. A test asserts the function's arity so a later options parameter fails there rather than becoming an open redirect. **[D]**
+- **The slug is read, never re-derived.** Regenerating it from the consultant's name would reproduce the generator's collision suffixes and could point at a different consultant entirely — `john-smith` when the booking belongs to `john-smith-2`. **[D]**
+- **A direct booking whose consultant has no slug refuses checkout** rather than falling back to the generic page. That state should not exist — activation generates a slug and neither sanctioned write path can null it — so creating a payment session on top of it would hide a data integrity problem behind a successful checkout. **[D]**
+- **One builder, one origin normalisation.** `buildCancelUrl` is the only place a cancel URL is composed; the direct branch reuses `buildDirectBookingUrl`, so an `APP_URL` with a trailing slash cannot produce `//slug`. Query values are percent-encoded. **[D]**
+- **Success URL and manual capture untouched** — this was cancel routing only, and a test reads both off the same recorded session object so a change to either fails. **[D]**
+
+Verification: **702 orchestrator tests pass**, including nine new ones driving the real service against a patched Stripe client and asserting the recorded `cancel_url` as a parsed URL. No migration, no schema, RLS, finance or lifecycle change. **[D]** source, **[ ]** not yet applied to staging or live.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)

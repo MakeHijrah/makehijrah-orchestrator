@@ -5,16 +5,70 @@ import {
   getStripeClient,
 } from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
+import { loadDirectBookingSettingsById } from "../direct-booking/direct-booking.repository.js";
+import { buildDirectBookingUrl } from "../direct-booking/direct-booking.slug.js";
 import { calculateHoldExpiration } from "./draft-hold.js";
 
 type CheckoutConsultationRow = {
   id: string;
   client_profile_id: string;
+  consultant_id: string;
+  booking_source: string;
   status: string;
   price_cents: number;
   currency: string;
   stripe_payment_intent_id: string | null;
   created_at: string;
+};
+
+/*
+ * WHERE STRIPE SENDS A VISITOR WHO CHANGES THEIR MIND.
+ *
+ * A standard booking came from /consultation and goes back there. A
+ * DIRECT booking came from the consultant's own page at a root URL,
+ * and returning it to the generic consultation page drops the
+ * visitor somewhere they never were - a different page, with a
+ * different consultant, and no way back to the one they were
+ * booking.
+ *
+ * Built in ONE place. The alternative is a route handler composing
+ * URLs, and two composers eventually disagree about the trailing
+ * slash or the encoding.
+ *
+ * The origin is normalised so an APP_URL of https://hijrah.network/
+ * does not produce a doubled slash; buildDirectBookingUrl already
+ * does that for the consultant page, and the generic branch does
+ * the same thing the same way.
+ *
+ * The consultation id is percent-encoded. It is a uuid and needs
+ * nothing, but encoding what goes in a query string is not a thing
+ * to decide case by case.
+ */
+const buildCancelUrl = ({
+  appUrl,
+  consultationId,
+  consultantSlug,
+}: {
+  appUrl: string;
+  consultationId: string;
+  /*
+   * Present only for a direct booking, and read from the
+   * consultant's stored row. Never derived from a name again, and
+   * never accepted from a request.
+   */
+  consultantSlug: string | null;
+}): string => {
+  const base = consultantSlug
+    ? buildDirectBookingUrl({
+        origin: appUrl,
+        slug: consultantSlug,
+      })
+    : `${appUrl.replace(/\/+$/, "")}/consultation`;
+
+  return (
+    `${base}?booking=cancelled` +
+    `&cid=${encodeURIComponent(consultationId)}`
+  );
 };
 
 type CheckoutIntakeRow = {
@@ -66,7 +120,13 @@ const loadCheckoutRecord = async (
   } = await supabaseAdmin
     .from("consultations")
     .select(
-      "id, client_profile_id, status, price_cents, currency, stripe_payment_intent_id, created_at",
+      /*
+       * consultant_id and booking_source are read for the CANCEL
+       * URL: a visitor who abandons a direct booking must land back
+       * on the consultant's own page, not the generic one. See
+       * buildCancelUrl below.
+       */
+      "id, client_profile_id, consultant_id, booking_source, status, price_cents, currency, stripe_payment_intent_id, created_at",
     )
     .eq("id", consultationId)
     .maybeSingle();
@@ -248,6 +308,80 @@ export const createStripeCheckout =
     }
 
     /*
+     * WHERE A CANCELLED CHECKOUT RETURNS TO, decided here from the
+     * PERSISTED records and from nothing else.
+     *
+     * The request carries no cancel URL, no slug and no booking
+     * source, and none would be accepted: a browser that could name
+     * its own return URL could send a visitor anywhere under the
+     * platform's domain with a real consultation id attached.
+     * booking_source and consultant_id come off the consultation
+     * row, and the slug off the consultant row.
+     *
+     * The slug is READ, never re-derived. Regenerating it from the
+     * consultant's name would reproduce the generator's collision
+     * suffixes and could point at a different consultant entirely -
+     * john-smith when the booking belongs to john-smith-2.
+     */
+    let consultantSlug: string | null = null;
+
+    if (
+      consultation.booking_source ===
+      "direct_booking"
+    ) {
+      const consultantRecord =
+        await loadDirectBookingSettingsById(
+          consultation.consultant_id,
+        );
+
+      if (!consultantRecord.ok) {
+        return {
+          ok: false,
+          code: "INTERNAL_ERROR",
+          message:
+            "The consultation could not be prepared for payment.",
+        };
+      }
+
+      consultantSlug =
+        consultantRecord.data
+          ?.consultant_slug ?? null;
+
+      /*
+       * A direct booking whose consultant has no link should not
+       * exist: activation generates one, the column guard stops a
+       * client clearing it, and neither sanctioned write path can
+       * null it. If it happens anyway, refuse rather than fall back
+       * to the generic page - creating a payment session on top of
+       * a data integrity problem hides the problem behind a
+       * successful checkout.
+       */
+      if (!consultantSlug) {
+        console.error(
+          "Direct booking checkout blocked: the consultant has no booking link",
+          {
+            consultationId,
+            consultantId:
+              consultation.consultant_id,
+          },
+        );
+
+        return {
+          ok: false,
+          code: "INTERNAL_ERROR",
+          message:
+            "The consultation could not be prepared for payment.",
+        };
+      }
+    }
+
+    const cancelUrl = buildCancelUrl({
+      appUrl: env.APP_URL,
+      consultationId: consultation.id,
+      consultantSlug,
+    });
+
+    /*
      * The Checkout Session is created under the currently active
      * mode, so any PaymentIntent it produces belongs to that
      * Stripe account. The mode is recorded on the consultation
@@ -317,12 +451,7 @@ export const createStripeCheckout =
                 "/dashboard",
               )}`,
 
-            cancel_url:
-              `${env.APP_URL}/consultation` +
-              `?booking=cancelled` +
-              `&cid=${encodeURIComponent(
-                consultation.id,
-              )}`,
+            cancel_url: cancelUrl,
           },
           {
             idempotencyKey:
