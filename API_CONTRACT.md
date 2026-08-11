@@ -277,50 +277,68 @@ Consultant role. Returns the caller's own settings:
 
 `booking_url` is the canonical link to share. `effective_direct_booking_price_cents` is null until a price is configured — reporting the platform default before the consultant has chosen anything would read as a price they had set.
 
+### Who owns which setting (Amendment 013)
+
+| Setting | Writes | Reads |
+|---|---|---|
+| `consultant_slug` | **admin** | consultant, admin |
+| `direct_booking_enabled` | **admin** | consultant, admin |
+| `direct_booking_price_cents` | **consultant** | consultant, admin |
+| `effective_direct_booking_price_cents` | **nobody** — server-derived | consultant, admin |
+
+What is published under the platform's own domain is the platform's decision; what somebody charges for their own time is theirs. **Ownership governs writes only** — both roles read everything, and both GETs are unchanged.
+
 ### `PATCH /api/consultant/direct-booking`
 
-Consultant role. Rate limit: 20 / minute. **Strict body** — exactly these two keys, both optional:
+Consultant role. Rate limit: 20 / minute. **Strict body** — exactly one key:
 
 ```json
-{
-  "direct_booking_enabled": "boolean",
-  "direct_booking_price_cents": "integer | null"
-}
+{ "direct_booking_price_cents": "integer | null" }
 ```
 
-**`consultant_slug` was removed by Amendment 012.** A slug is a root URL in the same namespace as every top-level route the platform owns, and a link a consultant can rewrite is a link that breaks every card and signature already carrying it. Slugs are generated at activation and changed only by an administrator (§3c). Because the body is strict, a client still sending `consultant_slug` gets a `400` rather than a silent no-op. Consultants may still **read** their slug and canonical booking URL from the GET above.
+`consultant_slug` and `direct_booking_enabled` are **absent from the schema**, so sending either is a `400`, not a silent no-op — the right answer for fields that used to work. Null clears a configured price. Consultants may still **read** their slug, enabled state and canonical booking URL from the GET above.
 
-Any other key is likewise a `400 VALIDATION_ERROR`, **not** a silently ignored field. In particular a commission, a split, an earnings figure, a `consultant_id` or a `profile_id` is refused outright: **no editable commission percentage exists anywhere in this API.**
+Any other key is likewise a `400 VALIDATION_ERROR`. In particular a commission, a split, an earnings figure, a `consultant_id` or a `profile_id` is refused outright: **no editable commission percentage exists anywhere in this API.**
 
 **Own settings only, structurally.** The consultant row is resolved from the profile id on the verified access token. The API accepts no consultant identifier at all, so there is nothing to tamper with.
 
 | Failure | Status | `error.details.reason` |
 |---|---|---|
 | Price below the platform's current consultation price | 400 | `PRICE_BELOW_PLATFORM_MINIMUM` |
-| Enabling with no link / no price | 400 | `SLUG_REQUIRED`, `PRICE_REQUIRED` |
-| Enabling while `is_active = false` | 409 | `CONSULTANT_NOT_ACTIVE` |
 
 ### `PATCH /api/admin/consultants/:id/direct-booking`
 
-**New in Amendment 012.** Admin role. **Strict body** — exactly one key:
+Admin role. **Strict body** — two keys, **at least one required**:
 
 ```json
-{ "consultant_slug": "string" }
+{
+  "consultant_slug": "string",
+  "direct_booking_enabled": "boolean"
+}
 ```
 
-The only path that writes a hand-entered slug. It runs the same validation everything else does — normalize, reserved, format, length, uniqueness — and **stores the normalized value, never the raw input**.
+`direct_booking_price_cents` is **absent from the schema**: an admin who could set a consultant's price could set what that consultant earns, and through the effective price rule what a client is charged. A body containing neither supported field is a `400` — answering 200 to a request that changes nothing would hide whatever mistake produced it.
 
-It deliberately does **not** suffix. Generated defaults may quietly become `john-smith-2` because nobody asked for that exact string; an administrator typed this one, so a collision is refused rather than silently renamed. The price and the enabled flag are carried through unchanged — those remain the consultant's.
+The only path that writes a hand-entered slug. It runs the same validation everything else does — normalize, reserved, format, length, uniqueness — and **stores the normalized value, never the raw input**. It deliberately does **not** suffix: generated defaults may quietly become `john-smith-2` because nobody asked for that exact string, but an administrator typed this one.
+
+**Enabling is held to exactly the preconditions a consultant was held to.** The change of actor is a change of authority, not a relaxation of the rules.
 
 | Failure | Status | `error.details.reason` |
 |---|---|---|
+| Consultant not active | **409** | `CONSULTANT_NOT_ACTIVE` |
+| Enabling with no link | 400 | `SLUG_REQUIRED` |
+| Enabling with no price | 400 | `PRICE_REQUIRED` |
 | Reserved booking link | 400 | `SLUG_RESERVED` |
 | Empty after normalization | 400 | `SLUG_EMPTY` |
 | Too short / too long | 400 | `SLUG_TOO_SHORT`, `SLUG_TOO_LONG` |
 | Malformed | 400 | `SLUG_INVALID` |
 | Already held by another consultant | **409** | `SLUG_TAKEN` |
 
+The active check is evaluated first — it is the one that cannot be worked around. There is deliberately no separate "effective price ≥ minimum" refusal: the effective price is `max(configured, platform)` and is at or above the minimum by construction.
+
 **No raw unique-constraint error ever reaches HTTP.**
+
+**Disabling turns the page off and nothing else.** The slug is preserved, so it stays reserved for that consultant and re-enabling restores the same URL; the configured price is preserved, so the consultant does not have to set it again.
 
 **Changing a slug breaks the old URL.** There is no redirect and no slug history; anyone holding the previous link gets a 404. That is why slug changes are administrative rather than self-service — see Amendment 012 §9.
 
@@ -901,7 +919,7 @@ Templates are plain HTML in the orchestrator repo. No template service in MVP.
 4. ~~**Price:** staging placeholder `DEFAULT_CONSULTATION_PRICE_CENTS=15000` ($150 USD).~~ **Superseded by PROJECT_LOCK Amendment 007 (migration 025).** The price is now `app_settings.consultation_price_cents`, admin-managed and seeded at the same `15000`. The environment variable is retained only as the migration seed and a bootstrap fallback.
 5. **Reminders:** 24h consultant acceptance reminder; 24h + 1h session reminders. Approved as proposed.
 
-**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006, 007, 008, 010, 011 and 012.** Any new endpoint requires Dave's written approval and a version bump of this document.
+**Contract status: FROZEN v1.0, plus Amendments 004, 005, 006, 007, 008, 010, 011, 012 and 013.** Any new endpoint requires Dave's written approval and a version bump of this document.
 
 Endpoint additions since v1.0, each authorised by an approved amendment:
 
@@ -913,6 +931,7 @@ Endpoint additions since v1.0, each authorised by an approved amendment:
 | §2b | `PUT /api/consultant/profile` | 008 |
 | §2c | `GET /api/public/consultants/:slug`, `GET`/`PATCH /api/consultant/direct-booking`, `GET`/`POST /api/admin/consultants/:id/direct-booking[/disable]` | 011 |
 | §2c | `PATCH /api/admin/consultants/:id/direct-booking` — admin slug management; `consultant_slug` removed from the consultant PATCH | 012 |
+| §2c | `direct_booking_enabled` moved to the admin PATCH; consultant PATCH narrowed to `direct_booking_price_cents` alone | 013 |
 
 No other endpoint has been added. No existing endpoint changed behaviour, except the non-consultation acknowledgement on `POST /api/webhooks/stripe` described in §1, the price/duration/Stripe-mode sourcing described in §1 and §3b, and the admin activation completeness guard described in §3, which now returns `CONSULTANT_PROFILE_INCOMPLETE` in place of `ACTIVATION_BLOCKED` (Amendment 008).
 

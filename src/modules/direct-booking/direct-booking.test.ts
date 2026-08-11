@@ -715,6 +715,31 @@ describe("Consultant booking page settings", () => {
     );
   });
 
+  it("returns the unchanged read contract", async () => {
+    const response = await call({
+      method: "GET",
+      url: "/api/consultant/direct-booking",
+      token: CONSULTANT_PROFILE,
+    });
+
+    const settings = response.json().data!
+      .direct_booking as Record<string, unknown>;
+
+    assert.deepEqual(
+      Object.keys(settings).sort(),
+      [
+        "booking_url",
+        "consultant_id",
+        "consultant_slug",
+        "currency",
+        "direct_booking_enabled",
+        "direct_booking_price_cents",
+        "effective_direct_booking_price_cents",
+        "minimum_direct_booking_price_cents",
+      ].sort(),
+    );
+  });
+
   it("still lets a consultant read their link and booking URL", async () => {
     const response = await call({
       method: "GET",
@@ -735,6 +760,50 @@ describe("Consultant booking page settings", () => {
     );
   });
 
+  it("accepts a valid price change", async () => {
+    const response = await patch({
+      direct_booking_price_cents: 30_000,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      db.consultants[0]!.direct_booking_price_cents,
+      30_000,
+    );
+
+    /* And the settings an admin owns did not move with it. */
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman",
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      true,
+    );
+  });
+
+  it("reports the effective price after a change", async () => {
+    const response = await patch({
+      direct_booking_price_cents: 30_000,
+    });
+
+    const settings = response.json().data!
+      .direct_booking as Record<string, unknown>;
+
+    /*
+     * max(configured, platform). The rule is unchanged by the
+     * ownership correction.
+     */
+    assert.equal(
+      settings.effective_direct_booking_price_cents,
+      30_000,
+    );
+    assert.equal(
+      settings.minimum_direct_booking_price_cents,
+      PLATFORM_PRICE,
+    );
+  });
+
   it("refuses a price below the platform's own", async () => {
     const response = await patch({
       direct_booking_price_cents: PLATFORM_PRICE - 1,
@@ -752,62 +821,37 @@ describe("Consultant booking page settings", () => {
     );
   });
 
-  it("will not publish an inactive consultant", async () => {
+  it("refuses a consultant's attempt to publish their own page", async () => {
     /*
-     * An inactive consultant has a link (activation generates one)
-     * but may not switch their page live.
+     * Amendment 013 moved enabling to the administrator. Publishing
+     * a page under the platform's own domain is a platform
+     * decision, the same kind activation already is.
      */
-    db.consultants[2]!.consultant_slug =
-      "not-activated";
-
-    const response = await patch(
-      {
-        direct_booking_price_cents: 20_000,
-        direct_booking_enabled: true,
-      },
-      INACTIVE_PROFILE,
-    );
-
-    assert.equal(response.statusCode, 409);
-    assert.deepEqual(
-      response.json().error!.details,
-      { reason: "CONSULTANT_NOT_ACTIVE" },
-    );
-
-    assert.equal(
-      db.consultants[2]!.direct_booking_enabled,
-      false,
-    );
-  });
-
-  it("will not publish without a link or without a price", async () => {
-    db.consultants[1]!.direct_booking_price_cents = null;
-
-    const noPrice = await patch(
+    for (const body of [
       { direct_booking_enabled: true },
-      OTHER_PROFILE,
-    );
-
-    assert.equal(noPrice.statusCode, 400);
-    assert.deepEqual(
-      noPrice.json().error!.details,
-      { reason: "PRICE_REQUIRED" },
-    );
-
-    db.consultants[1]!.consultant_slug = null;
-
-    const noSlug = await patch(
+      { direct_booking_enabled: false },
       {
-        direct_booking_enabled: true,
-        direct_booking_price_cents: 20_000,
+        direct_booking_price_cents: 30_000,
+        direct_booking_enabled: false,
       },
-      OTHER_PROFILE,
-    );
+    ]) {
+      const response = await patch(body);
 
-    assert.equal(noSlug.statusCode, 400);
-    assert.deepEqual(
-      noSlug.json().error!.details,
-      { reason: "SLUG_REQUIRED" },
+      assert.equal(
+        response.statusCode,
+        400,
+        `${JSON.stringify(body)} was not refused`,
+      );
+    }
+
+    /* Neither field moved. */
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      true,
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_price_cents,
+      20_000,
     );
   });
 
@@ -903,6 +947,36 @@ describe("Consultant booking page settings", () => {
 });
 
 describe("Admin booking page management", () => {
+  it("returns the unchanged read contract", async () => {
+    const response = await call({
+      method: "GET",
+      url: `/api/admin/consultants/${CONSULTANT_ID}/direct-booking`,
+      token: ADMIN_PROFILE,
+    });
+
+    const settings = response.json().data!
+      .direct_booking as Record<string, unknown>;
+
+    /*
+     * Amendment 013 changed who may WRITE each setting. It changed
+     * nothing about what either role may read, and the envelope is
+     * the same shape for both.
+     */
+    assert.deepEqual(
+      Object.keys(settings).sort(),
+      [
+        "booking_url",
+        "consultant_id",
+        "consultant_slug",
+        "currency",
+        "direct_booking_enabled",
+        "direct_booking_price_cents",
+        "effective_direct_booking_price_cents",
+        "minimum_direct_booking_price_cents",
+      ].sort(),
+    );
+  });
+
   it("reads the enabled flag, the link and both prices", async () => {
     const response = await call({
       method: "GET",
@@ -1111,19 +1185,165 @@ describe("Admin booking page management", () => {
     );
   });
 
-  it("refuses anything other than a link", async () => {
+  it("refuses to set a consultant's price", async () => {
+    /*
+     * The field is absent from the admin schema entirely.
+     * Amendment 013: an admin who could set a consultant's price
+     * could set what that consultant earns, and through the
+     * effective price rule what a client is charged.
+     */
     for (const body of [
       { direct_booking_price_cents: 1 },
-      { direct_booking_enabled: true },
       {
         consultant_slug: "fine",
-        direct_booking_enabled: true,
+        direct_booking_price_cents: 50_000,
       },
     ]) {
       const response = await adminSlug(body);
 
-      assert.equal(response.statusCode, 400);
+      assert.equal(
+        response.statusCode,
+        400,
+        `${JSON.stringify(body)} was not refused`,
+      );
     }
+
+    assert.equal(
+      db.consultants[0]!.direct_booking_price_cents,
+      20_000,
+    );
+  });
+
+  it("refuses a body that asks for nothing", async () => {
+    /*
+     * Answering 200 to a request that changes nothing would hide
+     * whatever mistake produced it.
+     */
+    const response = await adminSlug({});
+
+    assert.equal(response.statusCode, 400);
+  });
+
+  it("enables and disables a consultant's page", async () => {
+    db.consultants[0]!.direct_booking_enabled =
+      false;
+
+    const enabled = await adminSlug({
+      direct_booking_enabled: true,
+    });
+
+    assert.equal(enabled.statusCode, 200);
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      true,
+    );
+
+    const disabled = await adminSlug({
+      direct_booking_enabled: false,
+    });
+
+    assert.equal(disabled.statusCode, 200);
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      false,
+    );
+
+    /*
+     * Disabling turns the page off and nothing else. The link
+     * stays reserved for this consultant so re-enabling restores
+     * the same URL, and the price stays stored so they do not have
+     * to set it again.
+     */
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman",
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_price_cents,
+      20_000,
+    );
+  });
+
+  it("sets the link and the enabled state together", async () => {
+    db.consultants[0]!.direct_booking_enabled =
+      false;
+
+    const response = await adminSlug({
+      consultant_slug: "aisha-r",
+      direct_booking_enabled: true,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-r",
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      true,
+    );
+  });
+
+  it("holds an admin to the same publish preconditions", async () => {
+    /*
+     * The actor changed; the rules did not. An admin enabling a
+     * page is held to exactly what a consultant was held to when
+     * enabling was theirs.
+     */
+    db.consultants[1]!.direct_booking_price_cents =
+      null;
+
+    const noPrice = await call({
+      method: "PATCH",
+      url: `/api/admin/consultants/${OTHER_CONSULTANT_ID}/direct-booking`,
+      token: ADMIN_PROFILE,
+      body: { direct_booking_enabled: true },
+    });
+
+    assert.equal(noPrice.statusCode, 400);
+    assert.deepEqual(
+      noPrice.json().error!.details,
+      { reason: "PRICE_REQUIRED" },
+    );
+
+    db.consultants[1]!.direct_booking_price_cents =
+      20_000;
+    db.consultants[1]!.consultant_slug = null;
+
+    const noSlug = await call({
+      method: "PATCH",
+      url: `/api/admin/consultants/${OTHER_CONSULTANT_ID}/direct-booking`,
+      token: ADMIN_PROFILE,
+      body: { direct_booking_enabled: true },
+    });
+
+    assert.equal(noSlug.statusCode, 400);
+    assert.deepEqual(
+      noSlug.json().error!.details,
+      { reason: "SLUG_REQUIRED" },
+    );
+
+    /* And an inactive consultant is not publishable at all. */
+    const inactive = await call({
+      method: "PATCH",
+      url: `/api/admin/consultants/${INACTIVE_CONSULTANT_ID}/direct-booking`,
+      token: ADMIN_PROFILE,
+      body: {
+        consultant_slug: "not-activated",
+        direct_booking_enabled: true,
+      },
+    });
+
+    assert.equal(inactive.statusCode, 409);
+    assert.deepEqual(
+      inactive.json().error!.details,
+      { reason: "CONSULTANT_NOT_ACTIVE" },
+    );
+
+    assert.equal(
+      db.consultants[2]!.direct_booking_enabled,
+      false,
+    );
   });
 
   it("is closed to consultants and clients for the slug write too", async () => {

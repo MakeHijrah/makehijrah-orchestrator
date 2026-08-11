@@ -10,7 +10,7 @@ import {
   getAdminDirectBookingSettings,
   getOwnDirectBookingSettings,
   getPublicConsultantBySlug,
-  setConsultantSlugAsAdmin,
+  updateDirectBookingAsAdmin,
   updateOwnDirectBookingSettings,
   type DirectBookingSettingsResult,
 } from "./direct-booking.service.js";
@@ -38,17 +38,20 @@ const consultantIdParamsSchema = z.object({
  * The consultant's own settings. STRICT, and the strictness is the
  * security control.
  *
- * TWO fields now, not three. consultant_slug was removed by
- * Amendment 012: a slug is a ROOT url in the same namespace as
- * every top-level route the platform owns, and a link a consultant
- * can rewrite is a link that breaks every card, signature and post
- * already carrying it. Slugs are generated at activation and
- * changed only by an administrator.
+ * ONE field. Amendment 013 settled the ownership split: a
+ * consultant sets what they charge for their own time, and an
+ * administrator manages the booking link and whether the page is
+ * live — both of which publish something under the platform's own
+ * domain.
  *
- * Because the schema is strict, a client still sending
- * consultant_slug gets a 400 rather than a silent no-op — which is
- * the right answer for a field that used to work. A consultant may
- * still read their slug and their booking URL from the GET.
+ * consultant_slug and direct_booking_enabled are therefore absent,
+ * and because the schema is strict a client sending either gets a
+ * 400 rather than a silent no-op. That is the right answer for
+ * fields that used to work: a save that appeared to succeed and
+ * changed nothing is worse than one that failed.
+ *
+ * A consultant may still READ both, and their booking URL, from
+ * the GET.
  *
  * Everything else — a consultant id, a commission rate, a split, an
  * earnings figure, a booking_source — is refused for the same
@@ -56,10 +59,6 @@ const consultantIdParamsSchema = z.object({
  */
 const updateSettingsSchema = z
   .object({
-    direct_booking_enabled: z
-      .boolean()
-      .optional(),
-
     direct_booking_price_cents: z
       .union([
         z
@@ -74,19 +73,42 @@ const updateSettingsSchema = z
   .strict();
 
 /*
- * The administrator's slug write. Also strict, and also one field:
- * an admin sets the address, not the price and not whether the page
- * is live. Those remain the consultant's.
+ * The administrator's write. Strict, and exactly the two settings
+ * an administrator owns. Amendment 013.
+ *
+ * direct_booking_price_cents is ABSENT, and that is the point: an
+ * admin who could set a consultant's price could set what that
+ * consultant earns, and through the effective price rule what a
+ * client is charged. Sending it is a 400, not a silent no-op.
+ *
+ * At least one field must be present. A body that asks for nothing
+ * is a mistake somewhere, and answering 200 to it would hide the
+ * mistake behind a success.
  */
-const adminSlugSchema = z
+const adminUpdateSchema = z
   .object({
     consultant_slug: z
       .string()
       .trim()
       .min(1)
-      .max(SLUG_MAX_LENGTH * 2),
+      .max(SLUG_MAX_LENGTH * 2)
+      .optional(),
+
+    direct_booking_enabled: z
+      .boolean()
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.consultant_slug !== undefined ||
+      value.direct_booking_enabled !==
+        undefined,
+    {
+      message:
+        "Provide a booking link or an enabled state to change.",
+    },
+  );
 
 const sendSettingsResult = (
   reply: Parameters<typeof sendSuccess>[0],
@@ -360,7 +382,7 @@ export const registerDirectBookingRoutes = async (
       }
 
       const parsed =
-        adminSlugSchema.safeParse(
+        adminUpdateSchema.safeParse(
           request.body,
         );
 
@@ -369,22 +391,24 @@ export const registerDirectBookingRoutes = async (
           reply,
           400,
           "VALIDATION_ERROR",
-          "A booking link is required.",
+          "Those booking page settings are not valid.",
           parsed.error.flatten(),
         );
       }
 
       /*
-       * Straight through to the same service the generator and the
-       * public lookup use. Normalization, the reserved set, format,
-       * length and uniqueness are settled in one place; a raw
-       * unique-violation never reaches HTTP.
+       * Straight through to the same service the consultant's own
+       * update uses. Normalization, the reserved set, format,
+       * length, uniqueness and every publish precondition are
+       * settled in one place; a raw unique-violation never reaches
+       * HTTP, and an admin enabling a page is held to exactly the
+       * preconditions a consultant was.
        */
       return sendSettingsResult(
         reply,
-        await setConsultantSlugAsAdmin({
+        await updateDirectBookingAsAdmin({
           consultantId: params.data.id,
-          slug: parsed.data.consultant_slug,
+          input: parsed.data,
         }),
       );
     },

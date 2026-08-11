@@ -536,6 +536,29 @@ Verification: `MIGRATION_049_VERIFICATION.sql`, **16 checks against PostgreSQL 1
 
 ---
 
+## 9l. Direct booking setting ownership — no migration **[D]**
+
+A governance correction settling who writes each of the three direct booking settings. PROJECT_LOCK Amendment 013, which supersedes one rule of Amendment 012.
+
+- **The model.** Admin writes `consultant_slug` and `direct_booking_enabled`; consultant writes `direct_booking_price_cents`; the effective price is server-derived and written by nobody. Both roles read all four. **[D]**
+- **The line is not arbitrary.** What is published under the platform's own domain is the platform's decision — a slug is a root URL in the platform's namespace, and enabling puts a page live under the platform's brand, the same kind of decision activation already is. What somebody charges for their own time is theirs, and an admin who could set it could set what that consultant earns. **[D]**
+- **`direct_booking_enabled` moved from consultant to admin.** That is the whole change from 012. **[D]**
+- **Both schemas are strict and neither carries the other's field**, so sending one is a `400` rather than a silent no-op — the right answer for fields that used to work. The admin body also requires at least one supported field: answering 200 to a request that changes nothing would hide whatever mistake produced it. **[D]**
+- **Preconditions unchanged and applied to the new actor.** An admin enabling a page is held to exactly what a consultant was: active, slug present, price present, price at or above the platform minimum. The active check now runs **first** — it is the one that cannot be worked around, and sending an admin to set a price for a consultant who cannot be published either way points them at the wrong problem. **[D]**
+- **No "effective price ≥ minimum" refusal, deliberately.** The effective price is `max(configured, platform)` and is at or above the minimum by construction; a check for a case that cannot arise would be dead code, and would wrongly block enabling a consultant whose stored price predates a price rise. **[D]**
+- **Disabling turns the page off and nothing else** — slug preserved so re-enabling restores the same URL, configured price preserved so it need not be set again. **[D]**
+- **Two entry points, separate input types**, rather than one function taking an actor. There is no object that can carry "any direct booking field", so a later edit cannot widen an actor's reach by adding a property. Validation and the write are shared and defined once: ownership differs, the rules do not. **[D]**
+- **`adminDisableDirectBooking` removed from the repository** — the disable endpoint now delegates to the shared admin path, and the old function was dead. **[D]**
+- **No migration.** Migration 049 already blocks direct browser writes to all three columns and is untouched. No schema, RLS, policy or finance change. **[D]**
+
+Read contracts are **unchanged** for both roles — same eight keys, same envelope — and asserted key-by-key in the tests.
+
+Verification: migrations 038–049 re-verified (no migration added). Orchestrator: **689 tests pass**, including the full ownership matrix on both endpoints, disable-preserves-slug-and-price, admin held to every publish precondition, and both GET contracts asserted as exact key sets. **[D]** source, **[ ]** not yet applied to staging or live.
+
+**Not done:** no frontend. The consultant settings panel must drop its enable/disable control as well as its slug input — both will otherwise receive 400s; the admin consultant page gains both.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -567,6 +590,7 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 - Server-controlled consultation price and currency; price snapshot immutability.
 - The effective direct booking price rule, and the reserved slug list, which must gain an entry whenever a top-level frontend route is added (Amendments 011 and 012).
 - Admin-only consultant slug management, and the column guard closing consultant_slug, direct_booking_enabled and direct_booking_price_cents to direct browser writes (Amendment 012, migration 049).
+- The direct booking ownership split: admin writes slug and enabled, consultant writes price, nobody writes the effective price (Amendment 013).
 - `create_draft_consultation`'s five-column return contract, and `unique_reserved_consultant_slot` as the sole authority on slot conflicts (migration 046).
 - The thirty-minute draft hold, defined in SQL beside `hold_expires_at`, and the rule that a superseded draft is released only *after* its replacement is fully prepared (migration 047).
 - Stripe manual-capture workflow.
@@ -649,6 +673,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_010_POST_PURCHASE_SERVICE_INSTRUCTIONS.md`
 - `PROJECT_LOCK_AMENDMENT_011_DIRECT_CONSULTANT_BOOKING.md`
 - `PROJECT_LOCK_AMENDMENT_012_CONSULTANT_SLUG_GOVERNANCE.md`
+- `PROJECT_LOCK_AMENDMENT_013_DIRECT_BOOKING_SETTING_OWNERSHIP.md`
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`

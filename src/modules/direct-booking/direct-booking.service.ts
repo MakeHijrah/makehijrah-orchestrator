@@ -5,7 +5,6 @@ import {
   SettingsUnavailableError,
 } from "../settings/settings.provider.js";
 import {
-  adminDisableDirectBooking,
   isSlugTakenByAnother,
   loadDirectBookingSettingsById,
   loadDirectBookingSettingsByProfileId,
@@ -331,25 +330,266 @@ export const getOwnDirectBookingSettings =
     };
   };
 
-export type UpdateDirectBookingInput = {
-  direct_booking_enabled?: boolean;
+/*
+ * WHO OWNS WHICH SETTING. PROJECT_LOCK Amendment 013.
+ *
+ * Three columns, three different answers, and the split is not
+ * arbitrary:
+ *
+ *   consultant_slug          ADMIN writes, consultant reads.
+ *                            A root URL in the platform's own
+ *                            namespace, and a link that moves
+ *                            breaks every card already carrying it.
+ *
+ *   direct_booking_enabled   ADMIN writes, consultant reads.
+ *                            Publishing a page under the
+ *                            platform's domain is a platform
+ *                            decision, the same kind of decision
+ *                            activation already is.
+ *
+ *   direct_booking_price_cents
+ *                            CONSULTANT writes, admin reads.
+ *                            What somebody charges for their own
+ *                            time is theirs, and an admin who
+ *                            could set it could set what a
+ *                            consultant earns.
+ *
+ *   effective price          NOBODY writes. Derived by
+ *                            resolveEffectiveDirectPrice above.
+ *
+ * The two entry points below are deliberately separate functions
+ * with separate input types rather than one function taking an
+ * actor. There is no object here that can carry "any direct
+ * booking field", so a later edit cannot widen an actor's reach by
+ * adding a property - it would have to add a parameter to a
+ * function whose name says who is calling it.
+ *
+ * What they share is the VALIDATION, which is common to both and
+ * lives in one place below. Ownership differs; the rules do not.
+ */
+
+export type ConsultantDirectBookingUpdate = {
+  /*
+   * The only field a consultant may write. Null clears a
+   * configured price, which is meaningful: it is how a consultant
+   * withdraws a price they no longer want to offer.
+   */
   direct_booking_price_cents?:
     | number
     | null;
 };
 
+export type AdminDirectBookingUpdate = {
+  consultant_slug?: string;
+  direct_booking_enabled?: boolean;
+};
+
+type ResolvedUpdate = {
+  slug: string | null;
+  enabled: boolean;
+  priceCents: number | null;
+};
+
 /*
- * A consultant edits THEIR OWN page.
+ * Every rule that governs the three columns, in one place, applied
+ * to the resolved next state regardless of who asked for it.
+ *
+ * Both actors run all of it. An admin enabling a page is held to
+ * exactly the preconditions a consultant was held to when enabling
+ * was theirs: the change of actor is a change of authority, not a
+ * relaxation of the rules.
+ */
+const validateResolvedUpdate = ({
+  current,
+  next,
+  platformPriceCents,
+}: {
+  current: ConsultantDirectBookingRow;
+  next: ResolvedUpdate;
+  platformPriceCents: number;
+}):
+  | { ok: true }
+  | {
+      ok: false;
+      code: "VALIDATION_ERROR" | "CONFLICT";
+      message: string;
+      reason: string;
+    } => {
+  /*
+   * The price floor, checked AT SAVE TIME against the platform's
+   * current price.
+   *
+   * Deliberately not a database constraint: the platform default
+   * may later rise above a stored price, and a constraint would
+   * then invalidate an untouched row and block every unrelated
+   * update to it. The effective price rule is what keeps that safe
+   * afterwards - a stale low price is charged at the platform
+   * default rather than below it.
+   */
+  if (
+    next.priceCents !== null &&
+    next.priceCents < platformPriceCents
+  ) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message: `The price must be at least the standard consultation price of ${platformPriceCents} minor units.`,
+      reason: "PRICE_BELOW_PLATFORM_MINIMUM",
+    };
+  }
+
+  /*
+   * Publishing requires a URL to publish at and a price to charge.
+   * The database says the same thing; saying it here turns a
+   * constraint violation into a sentence.
+   *
+   * Note there is no separate "effective price is at least the
+   * platform minimum" check, and none is needed: the effective
+   * price is max(configured, platform), so it is at or above the
+   * minimum by construction. Adding a refusal for a case that
+   * cannot arise would be dead code, and it would wrongly block an
+   * admin from enabling a consultant whose stored price simply
+   * predates a price rise - which the effective price rule already
+   * handles by charging the higher figure.
+   */
+  /*
+   * An inactive consultant cannot be published. Activation is a
+   * separate administrative decision with its own completeness
+   * rules, and a live booking page for somebody who has not passed
+   * them is a public listing the platform never approved.
+   *
+   * Checked BEFORE the slug and price preconditions because it is
+   * the one that cannot be worked around: telling an admin to set
+   * a price for a consultant who cannot be published either way
+   * sends them to fix the wrong thing.
+   */
+  if (next.enabled && !current.is_active) {
+    return {
+      ok: false,
+      code: "CONFLICT",
+      message:
+        "The consultant must be active before their booking page can go live.",
+      reason: "CONSULTANT_NOT_ACTIVE",
+    };
+  }
+
+  if (next.enabled && !next.slug) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message:
+        "A booking link is required before the booking page can go live.",
+      reason: "SLUG_REQUIRED",
+    };
+  }
+
+  if (next.enabled && next.priceCents === null) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message:
+        "A price is required before the booking page can go live.",
+      reason: "PRICE_REQUIRED",
+    };
+  }
+
+  return { ok: true };
+};
+
+/*
+ * The one write. Both entry points resolve their own actor's
+ * fields, then hand the complete next state here.
+ */
+const saveResolvedUpdate = async ({
+  current,
+  next,
+  platformPriceCents,
+  currency,
+  failureMessage,
+}: {
+  current: ConsultantDirectBookingRow;
+  next: ResolvedUpdate;
+  platformPriceCents: number;
+  currency: string;
+  failureMessage: string;
+}): Promise<DirectBookingSettingsResult> => {
+  const validation = validateResolvedUpdate({
+    current,
+    next,
+    platformPriceCents,
+  });
+
+  if (!validation.ok) {
+    return {
+      ok: false,
+      code: validation.code,
+      message: validation.message,
+      reason: validation.reason,
+    };
+  }
+
+  const saved = await saveDirectBookingSettings({
+    consultantId: current.id,
+    slug: next.slug,
+    enabled: next.enabled,
+    priceCents: next.priceCents,
+  });
+
+  if (!saved.ok) {
+    if (saved.code === "SLUG_TAKEN") {
+      /*
+       * Claimed between the availability check and this write. The
+       * unique index is the referee; a raw 23505 never reaches
+       * HTTP.
+       */
+      return {
+        ok: false,
+        code: "CONFLICT",
+        message:
+          "That booking link is already taken. Please choose another.",
+        reason: "SLUG_TAKEN",
+      };
+    }
+
+    if (saved.code === "CONSTRAINT_VIOLATION") {
+      return {
+        ok: false,
+        code: "VALIDATION_ERROR",
+        message:
+          "Those booking page settings are not valid.",
+        reason: "SLUG_INVALID",
+      };
+    }
+
+    return {
+      ok: false,
+      code: "INTERNAL_ERROR",
+      message: failureMessage,
+    };
+  }
+
+  return {
+    ok: true,
+    settings: toSettingsView({
+      row: saved.row,
+      platformPriceCents,
+      currency,
+    }),
+  };
+};
+
+/*
+ * A consultant sets their own price. That is the whole of their
+ * write surface.
  *
  * The consultant row is resolved from the profile id on the
- * verified token. No consultant id is accepted from the request,
- * so there is no identifier to tamper with — one consultant cannot
- * address another's settings even by guessing a uuid.
+ * verified access token, so there is no identifier to tamper with
+ * - one consultant cannot address another's settings even by
+ * guessing a uuid.
  *
- * Note what this function will not write: no commission
- * percentage, no split, no earnings figure. Those are not fields
- * on this shape and are not columns a consultant may set. The 50/50
- * base and the 80/20 premium are platform rules.
+ * The slug and the enabled flag are carried forward from the
+ * stored row untouched. The request schema refuses both outright,
+ * so this is the second line rather than the first.
  */
 export const updateOwnDirectBookingSettings =
   async ({
@@ -357,8 +597,11 @@ export const updateOwnDirectBookingSettings =
     input,
   }: {
     profileId: string;
-    input: UpdateDirectBookingInput;
+    input: ConsultantDirectBookingUpdate;
   }): Promise<DirectBookingSettingsResult> => {
+    const failureMessage =
+      "Your booking page settings could not be saved.";
+
     let settings;
 
     try {
@@ -367,8 +610,7 @@ export const updateOwnDirectBookingSettings =
       return {
         ok: false,
         code: "INTERNAL_ERROR",
-        message:
-          "Your booking page settings could not be saved.",
+        message: failureMessage,
       };
     }
 
@@ -381,8 +623,7 @@ export const updateOwnDirectBookingSettings =
       return {
         ok: false,
         code: "INTERNAL_ERROR",
-        message:
-          "Your booking page settings could not be saved.",
+        message: failureMessage,
       };
     }
 
@@ -397,157 +638,27 @@ export const updateOwnDirectBookingSettings =
 
     const current = lookup.data;
 
-    /* Absent fields keep their stored value; this is a PATCH. */
-    const nextEnabled =
-      input.direct_booking_enabled ??
-      current.direct_booking_enabled;
-
-    const nextPrice =
-      input.direct_booking_price_cents ===
-      undefined
-        ? current.direct_booking_price_cents
-        : input.direct_booking_price_cents;
-
-    /*
-     * THE SLUG IS NOT THEIRS TO CHANGE. Amendment 012.
-     *
-     * A consultant slug is a ROOT url in the same namespace as
-     * every top-level route the platform owns, and a link that a
-     * consultant can rewrite is a link that breaks every card,
-     * signature and post that already carries it. It is
-     * admin-managed: generated at activation, changed only by an
-     * administrator, and read-only here.
-     *
-     * The stored value is carried forward unchanged. The request
-     * schema refuses consultant_slug outright, so this is the
-     * second line rather than the first.
-     */
-    const nextSlug = current.consultant_slug;
-
-    /*
-     * The price floor, checked AT SAVE TIME against the platform's
-     * current price.
-     *
-     * Deliberately not a database constraint: the platform default
-     * may later rise above a stored price, and a constraint would
-     * then invalidate an untouched row and block every unrelated
-     * update to it. The effective price rule is what keeps that
-     * safe afterwards — a stale low price is charged at the
-     * platform default rather than below it.
-     */
-    if (
-      nextPrice !== null &&
-      nextPrice <
-        settings.consultation_price_cents
-    ) {
-      return {
-        ok: false,
-        code: "VALIDATION_ERROR",
-        message: `Your price must be at least the standard consultation price of ${settings.consultation_price_cents} minor units.`,
-        reason: "PRICE_BELOW_PLATFORM_MINIMUM",
-      };
-    }
-
-    /*
-     * Publishing requires a URL to publish at and a price to
-     * charge. The database says the same thing; saying it here
-     * turns a constraint violation into a sentence.
-     */
-    if (nextEnabled && !nextSlug) {
-      return {
-        ok: false,
-        code: "VALIDATION_ERROR",
-        message:
-          "Choose a booking link before turning your booking page on.",
-        reason: "SLUG_REQUIRED",
-      };
-    }
-
-    if (nextEnabled && nextPrice === null) {
-      return {
-        ok: false,
-        code: "VALIDATION_ERROR",
-        message:
-          "Set your price before turning your booking page on.",
-        reason: "PRICE_REQUIRED",
-      };
-    }
-
-    /*
-     * An inactive consultant cannot publish. Activation is the
-     * admin's decision and a booking page is a public listing; a
-     * consultant who has not been activated must not be able to
-     * create one for themselves.
-     */
-    if (nextEnabled && !current.is_active) {
-      return {
-        ok: false,
-        code: "CONFLICT",
-        message:
-          "Your profile must be active before your booking page can go live.",
-        reason: "CONSULTANT_NOT_ACTIVE",
-      };
-    }
-
-    const saved =
-      await saveDirectBookingSettings({
-        consultantId: current.id,
-        slug: nextSlug,
-        enabled: nextEnabled,
-        priceCents: nextPrice,
-      });
-
-    if (!saved.ok) {
-      if (saved.code === "SLUG_TAKEN") {
-        return {
-          ok: false,
-          code: "CONFLICT",
-          message:
-            "That booking link is already taken. Please choose another.",
-          reason: "SLUG_TAKEN",
-        };
-      }
-
-      if (
-        saved.code ===
-        "CONSTRAINT_VIOLATION"
-      ) {
-        return {
-          ok: false,
-          code: "VALIDATION_ERROR",
-          message:
-            "Those booking page settings are not valid.",
-        };
-      }
-
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-        message:
-          "Your booking page settings could not be saved.",
-      };
-    }
-
-    return {
-      ok: true,
-      settings: toSettingsView({
-        row: saved.row,
-        platformPriceCents:
-          settings.consultation_price_cents,
-        currency:
-          settings.consultation_currency,
-      }),
-    };
+    return saveResolvedUpdate({
+      current,
+      next: {
+        /* Not theirs. Carried through, never read from input. */
+        slug: current.consultant_slug,
+        enabled: current.direct_booking_enabled,
+        /* Absent keeps the stored value; this is a PATCH. */
+        priceCents:
+          input.direct_booking_price_cents ===
+          undefined
+            ? current.direct_booking_price_cents
+            : input.direct_booking_price_cents,
+      },
+      platformPriceCents:
+        settings.consultation_price_cents,
+      currency:
+        settings.consultation_currency,
+      failureMessage,
+    });
   };
 
-/*
- * The admin read and the admin action.
- *
- * An admin sees the enabled flag, the slug, the configured price
- * and the effective price — enough to answer "what is this
- * consultant charging, and is that what the client is quoted?" —
- * and can switch the page off. Nothing else.
- */
 export const getAdminDirectBookingSettings =
   async (
     consultantId: string,
@@ -613,14 +724,31 @@ export const getAdminDirectBookingSettings =
  * string; an administrator typed this one, and silently storing
  * something else would be worse than saying it is taken.
  */
-export const setConsultantSlugAsAdmin =
+/*
+ * An administrator sets the booking link and decides whether the
+ * page is live. Those two, and nothing else.
+ *
+ * The PRICE IS NOT HERE and is not a parameter. An admin who could
+ * set a consultant's price could set what that consultant earns,
+ * and the effective price rule means it would also change what a
+ * client is charged. It is carried through from the stored row.
+ *
+ * Slug changes do NOT suffix. A generated default may quietly
+ * become john-smith-2 because nobody asked for that exact string;
+ * an administrator typed this one, so a collision is refused
+ * rather than silently renamed.
+ */
+export const updateDirectBookingAsAdmin =
   async ({
     consultantId,
-    slug,
+    input,
   }: {
     consultantId: string;
-    slug: string;
+    input: AdminDirectBookingUpdate;
   }): Promise<DirectBookingSettingsResult> => {
+    const failureMessage =
+      "The booking page settings could not be saved.";
+
     let settings;
 
     try {
@@ -629,8 +757,7 @@ export const setConsultantSlugAsAdmin =
       return {
         ok: false,
         code: "INTERNAL_ERROR",
-        message:
-          "The booking link could not be saved.",
+        message: failureMessage,
       };
     }
 
@@ -643,8 +770,7 @@ export const setConsultantSlugAsAdmin =
       return {
         ok: false,
         code: "INTERNAL_ERROR",
-        message:
-          "The booking link could not be saved.",
+        message: failureMessage,
       };
     }
 
@@ -659,63 +785,39 @@ export const setConsultantSlugAsAdmin =
 
     const current = lookup.data;
 
-    const validation =
-      validateConsultantSlug(slug);
+    let nextSlug = current.consultant_slug;
 
-    if (!validation.ok) {
-      return {
-        ok: false,
-        code: "VALIDATION_ERROR",
-        message: validation.message,
-        reason: validation.code,
-      };
-    }
+    if (input.consultant_slug !== undefined) {
+      const validation =
+        validateConsultantSlug(
+          input.consultant_slug,
+        );
 
-    const taken = await isSlugTakenByAnother({
-      slug: validation.slug,
-      consultantId: current.id,
-    });
+      if (!validation.ok) {
+        return {
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: validation.message,
+          reason: validation.code,
+        };
+      }
 
-    if (!taken.ok) {
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-        message:
-          "The booking link could not be saved.",
-      };
-    }
+      nextSlug = validation.slug;
 
-    if (taken.data) {
-      return {
-        ok: false,
-        code: "CONFLICT",
-        message:
-          "That booking link is already taken. Please choose another.",
-        reason: "SLUG_TAKEN",
-      };
-    }
-
-    /*
-     * The enabled flag and the price are carried through
-     * unchanged. An admin sets the address; whether the page is
-     * live and what it charges remain the consultant's.
-     */
-    const saved =
-      await saveDirectBookingSettings({
+      const taken = await isSlugTakenByAnother({
+        slug: nextSlug,
         consultantId: current.id,
-        slug: validation.slug,
-        enabled:
-          current.direct_booking_enabled,
-        priceCents:
-          current.direct_booking_price_cents,
       });
 
-    if (!saved.ok) {
-      if (saved.code === "SLUG_TAKEN") {
-        /*
-         * Claimed between the check and the write. The unique
-         * index is the referee; a raw 23505 never reaches HTTP.
-         */
+      if (!taken.ok) {
+        return {
+          ok: false,
+          code: "INTERNAL_ERROR",
+          message: failureMessage,
+        };
+      }
+
+      if (taken.data) {
         return {
           ok: false,
           code: "CONFLICT",
@@ -724,101 +826,46 @@ export const setConsultantSlugAsAdmin =
           reason: "SLUG_TAKEN",
         };
       }
-
-      if (
-        saved.code === "CONSTRAINT_VIOLATION"
-      ) {
-        return {
-          ok: false,
-          code: "VALIDATION_ERROR",
-          message:
-            "That booking link is not valid.",
-          reason: "SLUG_INVALID",
-        };
-      }
-
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-        message:
-          "The booking link could not be saved.",
-      };
     }
 
-    return {
-      ok: true,
-      settings: toSettingsView({
-        row: saved.row,
-        platformPriceCents:
-          settings.consultation_price_cents,
-        currency:
-          settings.consultation_currency,
-      }),
-    };
+    return saveResolvedUpdate({
+      current,
+      next: {
+        slug: nextSlug,
+        enabled:
+          input.direct_booking_enabled ??
+          current.direct_booking_enabled,
+        /*
+         * Not theirs. Carried through, never read from input -
+         * AdminDirectBookingUpdate has no price field at all.
+         */
+        priceCents:
+          current.direct_booking_price_cents,
+      },
+      platformPriceCents:
+        settings.consultation_price_cents,
+      currency:
+        settings.consultation_currency,
+      failureMessage,
+    });
   };
 
+/*
+ * The dedicated disable action, kept as its own endpoint because
+ * it is the moderation gesture an admin reaches for and it should
+ * not require constructing a body.
+ *
+ * Delegates rather than duplicating. Disabling leaves the slug and
+ * the price exactly as they are: the link stays reserved for that
+ * consultant so re-enabling restores the same URL rather than
+ * freeing it for somebody else, and the price stays stored so they
+ * do not have to set it again.
+ */
 export const disableDirectBookingAsAdmin =
   async (
     consultantId: string,
-  ): Promise<DirectBookingSettingsResult> => {
-    let settings;
-
-    try {
-      settings = await getSettings();
-    } catch {
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-        message:
-          "The booking page could not be disabled.",
-      };
-    }
-
-    const lookup =
-      await loadDirectBookingSettingsById(
-        consultantId,
-      );
-
-    if (!lookup.ok) {
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-        message:
-          "The booking page could not be disabled.",
-      };
-    }
-
-    if (!lookup.data) {
-      return {
-        ok: false,
-        code: "NOT_FOUND",
-        message:
-          "The consultant was not found.",
-      };
-    }
-
-    const disabled =
-      await adminDisableDirectBooking(
-        consultantId,
-      );
-
-    if (!disabled.ok) {
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-        message:
-          "The booking page could not be disabled.",
-      };
-    }
-
-    return {
-      ok: true,
-      settings: toSettingsView({
-        row: disabled.row,
-        platformPriceCents:
-          settings.consultation_price_cents,
-        currency:
-          settings.consultation_currency,
-      }),
-    };
-  };
+  ): Promise<DirectBookingSettingsResult> =>
+    updateDirectBookingAsAdmin({
+      consultantId,
+      input: { direct_booking_enabled: false },
+    });

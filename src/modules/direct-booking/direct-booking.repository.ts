@@ -351,63 +351,6 @@ export const saveDirectBookingSettings =
   };
 
 /*
- * The admin's one write: switch a consultant's page off.
- *
- * Deliberately narrow. An admin does not rename a consultant's
- * booking link and does not set their price — those are the
- * consultant's, and an admin who could change them could change
- * what a consultant earns. Disabling is the moderation action, and
- * it is reversible by the consultant.
- *
- * The slug and the price are left exactly as they are, so
- * re-enabling restores the same URL rather than freeing it for
- * somebody else to claim.
- */
-export const adminDisableDirectBooking =
-  async (
-    consultantId: string,
-  ): Promise<SaveDirectBookingResult> => {
-    const { data, error } =
-      await supabaseAdmin
-        .from("consultants")
-        .update({
-          direct_booking_enabled: false,
-        })
-        .eq("id", consultantId)
-        .select(SETTINGS_COLUMNS)
-        .maybeSingle();
-
-    if (error) {
-      console.error(
-        "Admin direct booking disable failed",
-        {
-          consultantId,
-          code: error.code,
-          message: error.message,
-        },
-      );
-
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-      };
-    }
-
-    const row =
-      data as ConsultantDirectBookingRow | null;
-
-    if (!row) {
-      return {
-        ok: false,
-        code: "INTERNAL_ERROR",
-      };
-    }
-
-    return { ok: true, row };
-  };
-
-
-/*
  * The name a default slug is derived from.
  *
  * consultants.display_name is the public projection of
