@@ -576,6 +576,32 @@ Verification: **702 orchestrator tests pass**, including nine new ones driving t
 
 ---
 
+## 9n. Finance + direct booking release baseline — FROZEN **[D]**
+
+The finance and direct booking feature group has completed backend regression, frontend automated verification and manual browser verification, and is frozen as the current verified release baseline.
+
+**Full record: `FINANCE_DIRECT_BOOKING_BASELINE.md`.** That document carries the evidence marks, the per-case results, the commit list and the frozen rules. This section is the pointer, not a second copy.
+
+**Freeze statement:**
+
+> Finance, payouts, recommendation purchases, admin finance analytics, and independent consultant direct booking have completed backend regression, frontend automated verification, and manual browser verification. This feature group is frozen as the current verified release baseline. Future changes require a separately approved scope and regression appropriate to the affected subsystem.
+
+**This freezes the feature group only.** It is not a statement that the MakeHijrah application is production-complete; `V1_RELEASE_REPORT.md` remains the authority on the v1.0.0 product release and is unchanged.
+
+**Verified — backend, in this workspace [D]:** migrations 001–049 replayed with 0 failures; backend suite **702/702**; typecheck, typecheck:test and build clean; migration verification suites 038–049 at 138 pass-notices / 0 errors; financial reconciliation **PASS** across all nineteen cases — standard economics, direct booking economics, snapshot immutability, balance reconciliation, the full payout lifecycle, refunds and reversals, negative-balance behaviour, admin adjustments, service purchase finance, multi-currency separation, idempotency and authorization. Backend cleared for frontend verification.
+
+**Verified — frontend [O] / manual [M]:** automated suite passed; the platform revenue CSV missing-export defect was fixed in frontend commit `00e676e`; manual consultant finance, admin finance, client role-gating, consultant/admin number reconciliation, direct booking finance, payout UI, CSV exports and mobile finance all **PASS**; no remaining finance defects reported.
+
+**Backend commits in the baseline [D]:** `4326df4` (direct booking setting ownership correction), `25e4bf0` (direct booking Stripe cancel return URL). Live verification of both **[M]**.
+
+**Frontend verified release commits [O]** — recorded as supplied; the frontend repository is not present in this workspace and these were not resolved here: `ddeaf41`, `fdff975`, `b87d90e`, `8c34b06`, `b49502f`, `554a758`, `00e676e`.
+
+**Frozen finance rules:** integer minor units only; append-only ledger; standard 50/50; direct booking base 50/50 with the premium above the default at 80/20 in the consultant's favour; historical snapshots immutable; consultation earnings available after completion; service purchase earnings created on payment and available after fulfilment; refunds append negative entries; admin corrections append adjustments; payout requests reserve; rejected and cancelled payouts release; paid payouts terminal; negative balances permitted after post-payout refunds and offset by future earnings; currencies separate; no FX; no automatic payouts; PAY and ADJ references globally monotonic under the current implementation.
+
+**Technical debt carried forward, not fixed:** stale verification artifacts in migrations 026, 027, 030, 031, 032, 033, 035 and 037 — low-priority test-artifact debt, not a production finance defect, behaviour re-covered by the later suites. And CSV formula-injection protection causing negative exported amounts to import as text in spreadsheet applications — non-blocking export-format debt, no release blocker.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -625,15 +651,21 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 
 ## 13. Next task
 
+**Review the remaining MVP acceptance criteria against the current verified build state and identify the first genuinely incomplete criterion.**
+
+No next feature has been selected, deliberately. The finance and direct booking group is frozen (section 9n), and choosing what follows it before that review would risk building against an assumption rather than against what the product still actually needs.
+
+### Standing constraints, unchanged
+
 **v1.1 planning; v1.0.x production patches only.**
 
 v1.0 is released and frozen. Until v1.1 is planned and approved, the only permitted changes are v1.0.x production patches:
 
 1. Production defect fixes.
-2. The non-blocking technical debt in section 9b.
+2. The non-blocking technical debt in sections 9b and 9n.
 3. Documentation corrections.
 
-No new feature ships against v1.0. New scope requires a v1.1 plan or an amendment under the existing change-control rule.
+New scope requires a v1.1 plan or an amendment under the existing change-control rule.
 
 ### Release tags
 
@@ -691,6 +723,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_011_DIRECT_CONSULTANT_BOOKING.md`
 - `PROJECT_LOCK_AMENDMENT_012_CONSULTANT_SLUG_GOVERNANCE.md`
 - `PROJECT_LOCK_AMENDMENT_013_DIRECT_BOOKING_SETTING_OWNERSHIP.md`
+- `FINANCE_DIRECT_BOOKING_BASELINE.md` — the frozen finance + direct booking release baseline
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
