@@ -181,11 +181,6 @@ as text** in spreadsheet applications. **[O]**
 - **Classification:** non-blocking **export-format** technical debt.
 - **Not a release blocker.** The protection itself is correct and is doing its job; the cost is a formatting nuisance on negative values.
 
-### 7.3 Operational items outstanding
-
-- The **production consultant slug backfill** (`npm run backfill:consultant-slugs`) has not been run from this workspace — no production credentials are available here. **[D]**
-- The **frontend must not send** `consultant_slug` or `direct_booking_enabled` to `PATCH /api/consultant/direct-booking`; both are now refused with `400` under Amendments 012 and 013. **[D]**
-
 ---
 
 ## 8. Freeze statement

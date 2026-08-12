@@ -532,7 +532,7 @@ Verification: `MIGRATION_049_VERIFICATION.sql`, **16 checks against PostgreSQL 1
 
 **Known limitation, recorded rather than discovered later:** an admin changing a slug **breaks the old URL**. There is no redirect and no slug history; anyone holding the previous link gets a 404. Making changes administrative is the mitigation, not a fix. See Amendment 012 §9.
 
-**Not done:** no frontend. The consultant settings panel must drop its slug input (it will otherwise start receiving 400s); the admin consultant page gains one.
+**Frontend: shipped and verified.** The consultant settings panel no longer sends `consultant_slug`, and the admin consultant page manages it. Implemented and manually verified — see section 9n. Production consultant slugs were corrected directly and direct-booking slug behaviour is live verified, so no backfill run is outstanding.
 
 ---
 
@@ -555,7 +555,7 @@ Read contracts are **unchanged** for both roles — same eight keys, same envelo
 
 Verification: migrations 038–049 re-verified (no migration added). Orchestrator: **689 tests pass**, including the full ownership matrix on both endpoints, disable-preserves-slug-and-price, admin held to every publish precondition, and both GET contracts asserted as exact key sets. **[D]** source, **[ ]** not yet applied to staging or live.
 
-**Not done:** no frontend. The consultant settings panel must drop its enable/disable control as well as its slug input — both will otherwise receive 400s; the admin consultant page gains both.
+**Frontend: shipped and verified.** The consultant settings panel no longer sends `consultant_slug` or `direct_booking_enabled` — it sends only `direct_booking_price_cents` — and the admin consultant page manages both. Implemented and manually verified; see section 9n.
 
 ---
 
