@@ -38,7 +38,7 @@ const consultantIdParamsSchema = z.object({
  * The consultant's own settings. STRICT, and the strictness is the
  * security control.
  *
- * ONE field. Amendment 013 settled the ownership split: a
+ * TWO fields. Amendment 013 settled the ownership split: a
  * consultant sets what they charge for their own time, and an
  * administrator manages the booking link and whether the page is
  * live — both of which publish something under the platform's own
@@ -52,6 +52,12 @@ const consultantIdParamsSchema = z.object({
  *
  * A consultant may still READ both, and their booking URL, from
  * the GET.
+ *
+ * The CALCULATOR TERMS the GET publishes — standard_booking_price_cents,
+ * base_consultant_commission_bps, premium_consultant_commission_bps —
+ * are absent here too, and from the admin schema. They describe the
+ * platform's own commission rules; nobody edits them through a
+ * booking settings endpoint. Amendment 014.
  *
  * Everything else — a consultant id, a commission rate, a split, an
  * earnings figure, a booking_source — is refused for the same
@@ -68,6 +74,14 @@ const updateSettingsSchema = z
           .max(1_000_000),
         z.null(),
       ])
+      .optional(),
+
+    /*
+     * "I only want direct bookings." Amendment 014. Consultant's
+     * own, because it is a statement about how they want to work.
+     */
+    direct_booking_only: z
+      .boolean()
       .optional(),
   })
   .strict();

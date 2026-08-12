@@ -57,6 +57,10 @@ const { registerDirectBookingRoutes } = await import(
 const { resolveEffectiveDirectPrice } = await import(
   "./direct-booking.service.js"
 );
+const {
+  DIRECT_BOOKING_PREMIUM_CONSULTANT_BPS,
+  estimateDirectBookingConsultantEarnings,
+} = await import("./direct-booking.commission.js");
 
 /* Variant bits must be 8, 9, a or b for a valid v4 UUID. */
 const CONSULTANT_PROFILE = "11111111-1111-4111-8111-111111111111";
@@ -386,6 +390,7 @@ beforeEach(() => {
       consultant_slug: "aisha-rahman",
       direct_booking_enabled: true,
       direct_booking_price_cents: 20_000,
+      direct_booking_only: false,
       /* Must never appear in a public projection. */
       payout_email: SECRET_EMAIL,
       internal_note: "leak-marker-internal",
@@ -398,6 +403,7 @@ beforeEach(() => {
       consultant_slug: "yusuf-al-amin",
       direct_booking_enabled: false,
       direct_booking_price_cents: 18_000,
+      direct_booking_only: false,
       timezone: "UTC",
     },
     {
@@ -408,6 +414,7 @@ beforeEach(() => {
       consultant_slug: null,
       direct_booking_enabled: false,
       direct_booking_price_cents: null,
+      direct_booking_only: false,
       timezone: "UTC",
     },
   ];
@@ -432,6 +439,7 @@ beforeEach(() => {
     {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       consultation_price_cents: PLATFORM_PRICE,
+      consultation_consultant_commission_bps: 5_000,
       consultation_currency: "usd",
       consultation_duration_minutes: 60,
       stripe_mode: "test",
@@ -715,7 +723,7 @@ describe("Consultant booking page settings", () => {
     );
   });
 
-  it("returns the unchanged read contract", async () => {
+  it("returns the full read contract", async () => {
     const response = await call({
       method: "GET",
       url: "/api/consultant/direct-booking",
@@ -728,14 +736,18 @@ describe("Consultant booking page settings", () => {
     assert.deepEqual(
       Object.keys(settings).sort(),
       [
+        "base_consultant_commission_bps",
         "booking_url",
         "consultant_id",
         "consultant_slug",
         "currency",
         "direct_booking_enabled",
+        "direct_booking_only",
         "direct_booking_price_cents",
         "effective_direct_booking_price_cents",
         "minimum_direct_booking_price_cents",
+        "premium_consultant_commission_bps",
+        "standard_booking_price_cents",
       ].sort(),
     );
   });
@@ -947,7 +959,7 @@ describe("Consultant booking page settings", () => {
 });
 
 describe("Admin booking page management", () => {
-  it("returns the unchanged read contract", async () => {
+  it("returns the full read contract", async () => {
     const response = await call({
       method: "GET",
       url: `/api/admin/consultants/${CONSULTANT_ID}/direct-booking`,
@@ -958,21 +970,27 @@ describe("Admin booking page management", () => {
       .direct_booking as Record<string, unknown>;
 
     /*
-     * Amendment 013 changed who may WRITE each setting. It changed
-     * nothing about what either role may read, and the envelope is
-     * the same shape for both.
+     * Amendment 013 settled who may WRITE each setting; Amendment
+     * 014 added direct_booking_only and the three read-only
+     * calculator terms. Both roles read the same object, and the
+     * exact key set is asserted so a field cannot appear or vanish
+     * without somebody deciding to.
      */
     assert.deepEqual(
       Object.keys(settings).sort(),
       [
+        "base_consultant_commission_bps",
         "booking_url",
         "consultant_id",
         "consultant_slug",
         "currency",
         "direct_booking_enabled",
+        "direct_booking_only",
         "direct_booking_price_cents",
         "effective_direct_booking_price_cents",
         "minimum_direct_booking_price_cents",
+        "premium_consultant_commission_bps",
+        "standard_booking_price_cents",
       ].sort(),
     );
   });
@@ -1397,6 +1415,395 @@ describe("Admin booking page management", () => {
     assert.equal(
       db.consultants[0]!.direct_booking_enabled,
       true,
+    );
+  });
+});
+
+/*
+ * Direct-booking-only, and the calculator terms. Amendment 014.
+ *
+ * The exclusion itself is an RLS policy — the /consultation chooser
+ * reads public.consultants directly, so that is where it has to
+ * live, and MIGRATION_050_VERIFICATION exercises it as anon and as
+ * each authenticated role. What is tested HERE is the half the
+ * orchestrator owns: who may write the preference, and that the
+ * calculator terms are published read-only and match the backend's
+ * own configuration.
+ */
+describe("Direct-booking-only preference", () => {
+  const patch = (body: unknown, token = CONSULTANT_PROFILE) =>
+    call({
+      method: "PATCH",
+      url: "/api/consultant/direct-booking",
+      token,
+      body,
+    });
+
+  it("defaults to false, preserving today's eligibility", async () => {
+    const response = await call({
+      method: "GET",
+      url: "/api/consultant/direct-booking",
+      token: CONSULTANT_PROFILE,
+    });
+
+    assert.equal(
+      (
+        response.json().data!
+          .direct_booking as Record<string, unknown>
+      ).direct_booking_only,
+      false,
+    );
+  });
+
+  it("lets a consultant turn it on and off again", async () => {
+    const on = await patch({
+      direct_booking_only: true,
+    });
+
+    assert.equal(on.statusCode, 200);
+    assert.equal(
+      db.consultants[0]!.direct_booking_only,
+      true,
+    );
+
+    const off = await patch({
+      direct_booking_only: false,
+    });
+
+    assert.equal(off.statusCode, 200);
+    assert.equal(
+      db.consultants[0]!.direct_booking_only,
+      false,
+    );
+  });
+
+  it("accepts it while the direct page is disabled", async () => {
+    /*
+     * The consultant is then bookable nowhere — excluded from the
+     * chooser with no live page to replace it. That is a state
+     * they chose, and refusing it would let an admin-owned setting
+     * block a consultant's own preference. The frontend warns; the
+     * backend does not refuse.
+     */
+    db.consultants[0]!.direct_booking_enabled = false;
+
+    const response = await patch({
+      direct_booking_only: true,
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      db.consultants[0]!.direct_booking_only,
+      true,
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      false,
+    );
+  });
+
+  it("does not disturb the settings an admin owns", async () => {
+    await patch({ direct_booking_only: true });
+
+    assert.equal(
+      db.consultants[0]!.consultant_slug,
+      "aisha-rahman",
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_enabled,
+      true,
+    );
+    assert.equal(
+      db.consultants[0]!.direct_booking_price_cents,
+      20_000,
+    );
+  });
+
+  it("is refused on the admin endpoint", async () => {
+    /*
+     * Admin may READ it — it is in the shared view — but the admin
+     * schema has no such field, so asking to set it is a 400.
+     */
+    const response = await call({
+      method: "PATCH",
+      url: `/api/admin/consultants/${CONSULTANT_ID}/direct-booking`,
+      token: ADMIN_PROFILE,
+      body: { direct_booking_only: true },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(
+      db.consultants[0]!.direct_booking_only,
+      false,
+    );
+  });
+
+  it("is visible read-only to an admin", async () => {
+    db.consultants[0]!.direct_booking_only = true;
+
+    const response = await call({
+      method: "GET",
+      url: `/api/admin/consultants/${CONSULTANT_ID}/direct-booking`,
+      token: ADMIN_PROFILE,
+    });
+
+    assert.equal(
+      (
+        response.json().data!
+          .direct_booking as Record<string, unknown>
+      ).direct_booking_only,
+      true,
+    );
+  });
+
+  it("is closed to clients and anonymous callers", async () => {
+    const client = await patch(
+      { direct_booking_only: true },
+      CLIENT_PROFILE,
+    );
+
+    assert.equal(client.statusCode, 403);
+
+    const anonymous = await call({
+      method: "PATCH",
+      url: "/api/consultant/direct-booking",
+      body: { direct_booking_only: true },
+    });
+
+    assert.equal(anonymous.statusCode, 401);
+
+    assert.equal(
+      db.consultants[0]!.direct_booking_only,
+      false,
+    );
+  });
+});
+
+describe("Direct booking calculator terms", () => {
+  const readTerms = async (): Promise<
+    Record<string, unknown>
+  > => {
+    const response = await call({
+      method: "GET",
+      url: "/api/consultant/direct-booking",
+      token: CONSULTANT_PROFILE,
+    });
+
+    return response.json().data!
+      .direct_booking as Record<string, unknown>;
+  };
+
+  it("matches the backend's own commission configuration", async () => {
+    const terms = await readTerms();
+
+    /*
+     * The base rate is READ from app_settings — the same row
+     * record_consultation_earning and the base component of
+     * record_direct_booking_earning both read. No copy.
+     */
+    assert.equal(
+      terms.base_consultant_commission_bps,
+      db.app_settings[0]!
+        .consultation_consultant_commission_bps,
+    );
+
+    /*
+     * The premium rate is MIRRORED from the ledger function, which
+     * has no table to read. MIGRATION_050_VERIFICATION check 2
+     * fails if the two ever diverge.
+     */
+    assert.equal(
+      terms.premium_consultant_commission_bps,
+      DIRECT_BOOKING_PREMIUM_CONSULTANT_BPS,
+    );
+    assert.equal(
+      terms.premium_consultant_commission_bps,
+      8_000,
+    );
+
+    assert.equal(
+      terms.standard_booking_price_cents,
+      db.app_settings[0]!.consultation_price_cents,
+    );
+  });
+
+  it("keeps the two names for the platform price in step", async () => {
+    const terms = await readTerms();
+
+    /*
+     * standard_booking_price_cents and
+     * minimum_direct_booking_price_cents are one number answering
+     * two questions. They must never diverge.
+     */
+    assert.equal(
+      terms.standard_booking_price_cents,
+      terms.minimum_direct_booking_price_cents,
+    );
+  });
+
+  it("follows the platform price when it moves", async () => {
+    db.app_settings[0]!.consultation_price_cents = 25_000;
+    db.app_settings[0]!
+      .consultation_consultant_commission_bps = 4_000;
+    invalidateSettingsCache();
+
+    const terms = await readTerms();
+
+    assert.equal(
+      terms.standard_booking_price_cents,
+      25_000,
+    );
+    assert.equal(
+      terms.base_consultant_commission_bps,
+      4_000,
+    );
+  });
+
+  it("does not move when the consultant changes their price", async () => {
+    const before = await readTerms();
+
+    const response = await call({
+      method: "PATCH",
+      url: "/api/consultant/direct-booking",
+      token: CONSULTANT_PROFILE,
+      body: { direct_booking_price_cents: 40_000 },
+    });
+
+    assert.equal(response.statusCode, 200);
+
+    const after = await readTerms();
+
+    /* The terms are the platform's, not the consultant's. */
+    assert.equal(
+      after.standard_booking_price_cents,
+      before.standard_booking_price_cents,
+    );
+    assert.equal(
+      after.base_consultant_commission_bps,
+      before.base_consultant_commission_bps,
+    );
+    assert.equal(
+      after.premium_consultant_commission_bps,
+      before.premium_consultant_commission_bps,
+    );
+
+    /* And only the price they own actually moved. */
+    assert.equal(
+      after.direct_booking_price_cents,
+      40_000,
+    );
+  });
+
+  it("leaves the effective and minimum price rules unchanged", async () => {
+    const terms = await readTerms();
+
+    assert.equal(
+      terms.effective_direct_booking_price_cents,
+      20_000,
+    );
+    assert.equal(
+      terms.minimum_direct_booking_price_cents,
+      PLATFORM_PRICE,
+    );
+
+    /* A stale price below the platform default still lifts. */
+    db.consultants[0]!.direct_booking_price_cents = 20_000;
+    db.app_settings[0]!.consultation_price_cents = 30_000;
+    invalidateSettingsCache();
+
+    const lifted = await readTerms();
+
+    assert.equal(
+      lifted.effective_direct_booking_price_cents,
+      30_000,
+    );
+  });
+
+  it("neither role may write any of the three", async () => {
+    for (const body of [
+      { standard_booking_price_cents: 1 },
+      { base_consultant_commission_bps: 9_000 },
+      { premium_consultant_commission_bps: 10_000 },
+    ]) {
+      const consultant = await call({
+        method: "PATCH",
+        url: "/api/consultant/direct-booking",
+        token: CONSULTANT_PROFILE,
+        body,
+      });
+
+      assert.equal(
+        consultant.statusCode,
+        400,
+        `consultant PATCH accepted ${JSON.stringify(body)}`,
+      );
+
+      const admin = await call({
+        method: "PATCH",
+        url: `/api/admin/consultants/${CONSULTANT_ID}/direct-booking`,
+        token: ADMIN_PROFILE,
+        body,
+      });
+
+      assert.equal(
+        admin.statusCode,
+        400,
+        `admin PATCH accepted ${JSON.stringify(body)}`,
+      );
+    }
+  });
+
+  it("reproduces the ledger's arithmetic exactly", async () => {
+    /*
+     * The locked example: 15000 platform default, 20000 direct
+     * price. record_direct_booking_earning writes 7500 + 4000 =
+     * 11500 to the consultant. The calculator must agree, or a
+     * consultant is shown a number the ledger will not honour.
+     */
+    const terms = {
+      standardBookingPriceCents: 15_000,
+      baseConsultantCommissionBps: 5_000,
+      premiumConsultantCommissionBps:
+        DIRECT_BOOKING_PREMIUM_CONSULTANT_BPS,
+    };
+
+    assert.equal(
+      estimateDirectBookingConsultantEarnings({
+        priceCents: 20_000,
+        terms,
+      }),
+      11_500,
+    );
+
+    /* At exactly the platform price it is an ordinary 50/50. */
+    assert.equal(
+      estimateDirectBookingConsultantEarnings({
+        priceCents: 15_000,
+        terms,
+      }),
+      7_500,
+    );
+
+    /*
+     * Below the platform price the effective price rule lifts the
+     * charge, so the estimate must lift with it rather than
+     * quoting an amount nobody will be charged.
+     */
+    assert.equal(
+      estimateDirectBookingConsultantEarnings({
+        priceCents: 9_000,
+        terms,
+      }),
+      7_500,
+    );
+
+    /* Rounded per component, never on the blended total. */
+    assert.equal(
+      estimateDirectBookingConsultantEarnings({
+        priceCents: 15_001,
+        terms,
+      }),
+      7_501,
     );
   });
 });

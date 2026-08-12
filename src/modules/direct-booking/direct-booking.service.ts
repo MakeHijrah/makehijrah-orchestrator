@@ -16,6 +16,7 @@ import {
   buildDirectBookingUrl,
   validateConsultantSlug,
 } from "./direct-booking.slug.js";
+import { DIRECT_BOOKING_PREMIUM_CONSULTANT_BPS } from "./direct-booking.commission.js";
 
 /*
  * Direct consultant booking. PROJECT_LOCK Amendment 011.
@@ -215,10 +216,36 @@ export type DirectBookingSettingsView = {
   direct_booking_price_cents:
     | number
     | null;
+  /*
+   * Consultant-managed. When true the consultant is excluded from
+   * the ordinary /consultation chooser and is bookable only through
+   * their own link. Amendment 014.
+   */
+  direct_booking_only: boolean;
   effective_direct_booking_price_cents:
     | number
     | null;
   minimum_direct_booking_price_cents: number;
+  /*
+   * THE CALCULATOR TERMS, read-only everywhere. Amendment 014.
+   *
+   * Published so the consultant settings screen can show a
+   * "price ↔ you earn" calculator without hardcoding percentages.
+   * No PATCH accepts any of these three.
+   *
+   * standard_booking_price_cents is the SAME number as
+   * minimum_direct_booking_price_cents above - one value answering
+   * two questions, "the lowest price I may set" and "where my
+   * premium starts". They are published separately because the
+   * calculator asks the second question, and they must never be
+   * allowed to diverge.
+   *
+   * The ledger remains authoritative for what is actually paid;
+   * see direct-booking.commission.ts.
+   */
+  standard_booking_price_cents: number;
+  base_consultant_commission_bps: number;
+  premium_consultant_commission_bps: number;
   currency: string;
   booking_url: string | null;
 };
@@ -226,10 +253,12 @@ export type DirectBookingSettingsView = {
 const toSettingsView = ({
   row,
   platformPriceCents,
+  baseCommissionBps,
   currency,
 }: {
   row: ConsultantDirectBookingRow;
   platformPriceCents: number;
+  baseCommissionBps: number;
   currency: string;
 }): DirectBookingSettingsView => ({
   consultant_id: row.id,
@@ -238,6 +267,8 @@ const toSettingsView = ({
     row.direct_booking_enabled,
   direct_booking_price_cents:
     row.direct_booking_price_cents,
+  direct_booking_only:
+    row.direct_booking_only,
   /*
    * Null until a price is configured. Reporting the platform
    * default as "your effective price" before a consultant has set
@@ -253,6 +284,12 @@ const toSettingsView = ({
         }),
   minimum_direct_booking_price_cents:
     platformPriceCents,
+  standard_booking_price_cents:
+    platformPriceCents,
+  base_consultant_commission_bps:
+    baseCommissionBps,
+  premium_consultant_commission_bps:
+    DIRECT_BOOKING_PREMIUM_CONSULTANT_BPS,
   currency,
   booking_url: row.consultant_slug
     ? buildDirectBookingUrl({
@@ -324,6 +361,8 @@ export const getOwnDirectBookingSettings =
         row: lookup.data,
         platformPriceCents:
           settings.consultation_price_cents,
+        baseCommissionBps:
+          settings.consultation_consultant_commission_bps,
         currency:
           settings.consultation_currency,
       }),
@@ -370,13 +409,23 @@ export const getOwnDirectBookingSettings =
 
 export type ConsultantDirectBookingUpdate = {
   /*
-   * The only field a consultant may write. Null clears a
-   * configured price, which is meaningful: it is how a consultant
-   * withdraws a price they no longer want to offer.
+   * Null clears a configured price, which is meaningful: it is how
+   * a consultant withdraws a price they no longer want to offer.
    */
   direct_booking_price_cents?:
     | number
     | null;
+
+  /*
+   * "I only want direct bookings." Amendment 014.
+   *
+   * Consultant-managed because it is a statement about how they
+   * want to work, not a platform decision. Deliberately NOT
+   * refused when their direct page is off: they are then bookable
+   * nowhere, which is a state they chose. Refusing it would let an
+   * admin-owned setting block a consultant's own preference.
+   */
+  direct_booking_only?: boolean;
 };
 
 export type AdminDirectBookingUpdate = {
@@ -388,6 +437,7 @@ type ResolvedUpdate = {
   slug: string | null;
   enabled: boolean;
   priceCents: number | null;
+  directBookingOnly: boolean;
 };
 
 /*
@@ -504,12 +554,14 @@ const saveResolvedUpdate = async ({
   current,
   next,
   platformPriceCents,
+  baseCommissionBps,
   currency,
   failureMessage,
 }: {
   current: ConsultantDirectBookingRow;
   next: ResolvedUpdate;
   platformPriceCents: number;
+  baseCommissionBps: number;
   currency: string;
   failureMessage: string;
 }): Promise<DirectBookingSettingsResult> => {
@@ -533,6 +585,7 @@ const saveResolvedUpdate = async ({
     slug: next.slug,
     enabled: next.enabled,
     priceCents: next.priceCents,
+    directBookingOnly: next.directBookingOnly,
   });
 
   if (!saved.ok) {
@@ -573,6 +626,7 @@ const saveResolvedUpdate = async ({
     settings: toSettingsView({
       row: saved.row,
       platformPriceCents,
+      baseCommissionBps,
       currency,
     }),
   };
@@ -650,9 +704,14 @@ export const updateOwnDirectBookingSettings =
           undefined
             ? current.direct_booking_price_cents
             : input.direct_booking_price_cents,
+        directBookingOnly:
+          input.direct_booking_only ??
+          current.direct_booking_only,
       },
       platformPriceCents:
         settings.consultation_price_cents,
+      baseCommissionBps:
+        settings.consultation_consultant_commission_bps,
       currency:
         settings.consultation_currency,
       failureMessage,
@@ -705,6 +764,8 @@ export const getAdminDirectBookingSettings =
         row: lookup.data,
         platformPriceCents:
           settings.consultation_price_cents,
+        baseCommissionBps:
+          settings.consultation_consultant_commission_bps,
         currency:
           settings.consultation_currency,
       }),
@@ -837,13 +898,18 @@ export const updateDirectBookingAsAdmin =
           current.direct_booking_enabled,
         /*
          * Not theirs. Carried through, never read from input -
-         * AdminDirectBookingUpdate has no price field at all.
+         * AdminDirectBookingUpdate has neither a price nor a
+         * direct-booking-only field at all.
          */
         priceCents:
           current.direct_booking_price_cents,
+        directBookingOnly:
+          current.direct_booking_only,
       },
       platformPriceCents:
         settings.consultation_price_cents,
+      baseCommissionBps:
+        settings.consultation_consultant_commission_bps,
       currency:
         settings.consultation_currency,
       failureMessage,

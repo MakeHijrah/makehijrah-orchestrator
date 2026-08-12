@@ -122,6 +122,7 @@ export type ConsultantDirectBookingRow = {
   consultant_slug: string | null;
   direct_booking_enabled: boolean;
   direct_booking_price_cents: number | null;
+  direct_booking_only: boolean;
 };
 
 const SETTINGS_COLUMNS = [
@@ -131,6 +132,7 @@ const SETTINGS_COLUMNS = [
   "consultant_slug",
   "direct_booking_enabled",
   "direct_booking_price_cents",
+  "direct_booking_only",
 ].join(", ");
 
 /*
@@ -280,11 +282,13 @@ export const saveDirectBookingSettings =
     slug,
     enabled,
     priceCents,
+    directBookingOnly,
   }: {
     consultantId: string;
     slug: string | null;
     enabled: boolean;
     priceCents: number | null;
+    directBookingOnly: boolean;
   }): Promise<SaveDirectBookingResult> => {
     const { data, error } =
       await supabaseAdmin
@@ -294,6 +298,8 @@ export const saveDirectBookingSettings =
           direct_booking_enabled: enabled,
           direct_booking_price_cents:
             priceCents,
+          direct_booking_only:
+            directBookingOnly,
         })
         .eq("id", consultantId)
         .select(SETTINGS_COLUMNS)

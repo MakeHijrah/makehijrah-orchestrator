@@ -15,7 +15,8 @@ type ConsultantGenderPreference =
  */
 export type DraftConsultantRejectionReason =
   | "consultant_not_general"
-  | "consultant_country_mismatch";
+  | "consultant_country_mismatch"
+  | "consultant_direct_booking_only";
 
 const DESTINATION_MESSAGE =
   "The selected consultant is not available for this destination.";
@@ -53,11 +54,21 @@ export const validateDraftConsultantGender =
     consultantId,
     countryId,
     preferredConsultantGender,
+    bookingSource,
   }: {
     consultantId: string;
     countryId: string | null;
     preferredConsultantGender:
       ConsultantGenderPreference;
+    /*
+     * Which flow is asking. A direct-booking-only consultant is
+     * refused for 'standard' and unaffected for 'direct_booking' -
+     * the whole point of the preference is that their own link
+     * keeps working. Amendment 014.
+     */
+    bookingSource:
+      | "standard"
+      | "direct_booking";
   }): Promise<DraftGenderValidationResult> => {
     const {
       data,
@@ -65,7 +76,7 @@ export const validateDraftConsultantGender =
     } = await supabaseAdmin
       .from("consultants")
       .select(
-        "id, gender, is_active, available_for_general",
+        "id, gender, is_active, available_for_general, direct_booking_only",
       )
       .eq(
         "id",
@@ -107,6 +118,33 @@ export const validateDraftConsultantGender =
         code: "NOT_FOUND",
         message:
           "The selected consultant is not available.",
+      };
+    }
+
+    /*
+     * DIRECT-BOOKING-ONLY, checked before anything else about the
+     * consultant.
+     *
+     * The RLS narrowing in migration 050 already keeps them out of
+     * the /consultation chooser, so a standard request naming them
+     * has arrived from a stale list, a cached page or a
+     * hand-crafted call. Invisible is not the same as unbookable,
+     * and this is what makes it unbookable.
+     *
+     * Direct bookings pass straight through: the consultant is
+     * refusing the platform's chooser, not their own clients.
+     */
+    if (
+      bookingSource === "standard" &&
+      (data as { direct_booking_only?: boolean })
+        .direct_booking_only === true
+    ) {
+      return {
+        ok: false,
+        code: "VALIDATION_ERROR",
+        message:
+          "The selected consultant is not available for this booking.",
+        reason: "consultant_direct_booking_only",
       };
     }
 

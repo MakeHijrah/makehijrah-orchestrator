@@ -172,6 +172,7 @@ export const registerDraftConsultationRoute = async (
       const genderValidation =
         await validateDraftConsultantGender({
           consultantId,
+          bookingSource,
           countryId:
             parsed.data.country_id,
           preferredConsultantGender:

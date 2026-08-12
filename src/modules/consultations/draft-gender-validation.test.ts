@@ -159,6 +159,7 @@ const installStubs = (): void => {
       gender: "male",
       is_active: true,
       available_for_general: false,
+      direct_booking_only: false,
     },
   ];
   /*
@@ -210,12 +211,14 @@ const installStubs = (): void => {
 const validate = (overrides: {
   countryId: string | null;
   preferredConsultantGender?: "male" | "female" | "no_preference";
+  bookingSource?: "standard" | "direct_booking";
 }) =>
   validateDraftConsultantGender({
     consultantId: CONSULTANT_ID,
     countryId: overrides.countryId,
     preferredConsultantGender:
       overrides.preferredConsultantGender ?? "no_preference",
+    bookingSource: overrides.bookingSource ?? "standard",
   });
 
 describe("draft consultant destination validation", () => {
@@ -465,5 +468,119 @@ describe("draft route rejects before any side effect", () => {
       "consultant_not_general",
     );
     assert.deepEqual(writes, [], "no insert, update or delete occurred");
+  });
+});
+
+/*
+ * Direct-booking-only, at the booking gate. Amendment 014.
+ *
+ * Migration 050's narrowed RLS policy already keeps these
+ * consultants out of the /consultation chooser. This is the other
+ * half: invisible is not the same as unbookable, and a standard
+ * request naming them by id — from a stale list, a cached page or a
+ * hand-crafted call — has to be refused rather than merely
+ * unlikely.
+ */
+describe("direct-booking-only consultants", () => {
+  beforeEach(installStubs);
+
+  const makeDirectOnly = (): void => {
+    (db.consultants[0] as Row).direct_booking_only = true;
+    (db.consultants[0] as Row).available_for_general = true;
+  };
+
+  it("refuses a standard booking for a country", async () => {
+    makeDirectOnly();
+
+    const result = await validate({
+      countryId: COUNTRY_ID,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.ok === false && result.reason,
+      "consultant_direct_booking_only",
+    );
+    assert.equal(writes.length, 0);
+  });
+
+  it("refuses a standard general-information booking", async () => {
+    makeDirectOnly();
+
+    const result = await validate({ countryId: null });
+
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.ok === false && result.reason,
+      "consultant_direct_booking_only",
+    );
+  });
+
+  it("still allows their own direct booking", async () => {
+    makeDirectOnly();
+
+    /*
+     * The whole point of the preference: they are refusing the
+     * platform's chooser, not their own clients.
+     */
+    const country = await validate({
+      countryId: COUNTRY_ID,
+      bookingSource: "direct_booking",
+    });
+
+    assert.equal(country.ok, true);
+
+    const general = await validate({
+      countryId: null,
+      bookingSource: "direct_booking",
+    });
+
+    assert.equal(general.ok, true);
+  });
+
+  it("leaves an ordinary consultant alone", async () => {
+    const result = await validate({
+      countryId: COUNTRY_ID,
+    });
+
+    assert.equal(result.ok, true);
+  });
+
+  it("restores normal eligibility when switched off", async () => {
+    makeDirectOnly();
+
+    assert.equal(
+      (await validate({ countryId: COUNTRY_ID })).ok,
+      false,
+    );
+
+    (db.consultants[0] as Row).direct_booking_only = false;
+
+    assert.equal(
+      (await validate({ countryId: COUNTRY_ID })).ok,
+      true,
+    );
+  });
+
+  it("does not rescue an inactive consultant", async () => {
+    /*
+     * The existing rules still apply first. Direct-booking-only is
+     * an additional exclusion, not an alternative route in.
+     */
+    makeDirectOnly();
+    (db.consultants[0] as Row).is_active = false;
+
+    const standard = await validate({
+      countryId: COUNTRY_ID,
+    });
+
+    assert.equal(standard.ok, false);
+
+    const direct = await validate({
+      countryId: COUNTRY_ID,
+      bookingSource: "direct_booking",
+    });
+
+    assert.equal(direct.ok, false);
   });
 });

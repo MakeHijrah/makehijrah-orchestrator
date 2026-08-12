@@ -252,6 +252,7 @@ declare
   v_table text;
   v_enabled boolean;
   v_policies integer;
+  v_policies_name text;
 begin
   foreach v_table in array array[
     'consultants', 'consultations', 'consultant_ledger_entries',
@@ -300,25 +301,60 @@ begin
    * from Supabase would display a stale figure and the client
    * would then be charged a higher one.
    */
-  select count(*) into v_policies
-    from pg_policies
-   where schemaname = 'public' and tablename = 'consultants';
+  /*
+   * Asserted by NAME and by MEANING, not by counting.
+   *
+   * This check once compared the policy count to 3. Migration 050
+   * legitimately added a fourth, and the check failed while
+   * nothing was wrong - the same brittleness that left migrations
+   * 030 to 033 asserting a table count of 16. A count answers
+   * "did anything change anywhere", which is not the question;
+   * the question is whether THIS migration's guarantees still
+   * hold.
+   */
+  foreach v_policies_name in array array[
+    'consultants_select_active_public',
+    'consultants_select_own_or_admin',
+    'consultants_update_own_or_admin'
+  ]
+  loop
+    if not exists (
+      select 1 from pg_policies
+       where schemaname = 'public'
+         and tablename = 'consultants'
+         and policyname = v_policies_name
+    ) then
+      raise exception
+        'VERIFICATION FAILED 27: the pre-existing policy % is missing',
+        v_policies_name;
+    end if;
+  end loop;
 
-  if v_policies <> 3 then
-    raise exception
-      'VERIFICATION FAILED 27: consultants carries % policies; migration 045 added none and the pre-existing three are expected',
-      v_policies;
-  end if;
-
+  /*
+   * The public policy must still gate on is_active. It may carry
+   * further conditions - migration 050 added direct_booking_only -
+   * but a deactivated consultant must never be publicly readable.
+   */
   if not exists (
     select 1 from pg_policies
      where schemaname = 'public'
        and tablename = 'consultants'
        and policyname = 'consultants_select_active_public'
        and cmd = 'SELECT'
-       and qual = '(is_active = true)') then
+       and qual like '%is_active = true%') then
     raise exception
       'VERIFICATION FAILED 27: the public consultant policy is missing or no longer gated on is_active; a deactivated consultant would be publicly readable';
+  end if;
+
+  /* And no policy may grant anon anything but SELECT. */
+  if exists (
+    select 1 from pg_policies
+     where schemaname = 'public'
+       and tablename = 'consultants'
+       and 'anon' = any(roles)
+       and cmd <> 'SELECT') then
+    raise exception
+      'VERIFICATION FAILED 27: anon holds a non-SELECT policy on consultants';
   end if;
 
   raise notice 'PASS 27: RLS is intact on every table this migration touched or could have touched';

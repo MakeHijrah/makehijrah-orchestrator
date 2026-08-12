@@ -21,6 +21,15 @@ export type StripeModeSetting =
 export type AppSettings = {
   id: string;
   consultation_price_cents: number;
+  /*
+   * The consultant's share of a standard consultation, in basis
+   * points. Read by record_consultation_earning and by the base
+   * component of record_direct_booking_earning - this projection
+   * exists so the orchestrator can PUBLISH the same figure to the
+   * direct booking calculator without keeping a second copy of it.
+   * Amendment 014.
+   */
+  consultation_consultant_commission_bps: number;
   consultation_currency: string;
   consultation_duration_minutes: number;
   stripe_mode: StripeModeSetting;
@@ -32,6 +41,7 @@ export type AppSettings = {
 const SETTINGS_COLUMNS = [
   "id",
   "consultation_price_cents",
+  "consultation_consultant_commission_bps",
   "consultation_currency",
   "consultation_duration_minutes",
   "stripe_mode",

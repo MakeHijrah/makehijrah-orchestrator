@@ -78,6 +78,7 @@ create table consultants (
   consultant_slug text,                                     -- root booking URL (Amendment 011, migration 045)
   direct_booking_enabled boolean not null default false,    -- Amendment 011, migration 045
   direct_booking_price_cents integer,                       -- CONFIGURED price; see the effective price rule
+  direct_booking_only boolean not null default false,       -- Amendment 014, migration 050
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint consultants_slug_format_check
@@ -139,7 +140,11 @@ Only these two public-safe fields are projected. No other `profiles` column — 
 
 **All three columns are closed to direct browser writes (Amendment 012, migration 049).** `guard_consultants_columns` now refuses a non-privileged change to `consultant_slug`, `direct_booking_enabled` or `direct_booking_price_cents`, joining `is_active`, `profile_id`, `onboarding_completed_at` and post-onboarding `gender` on the same trigger. This closed a real bypass: `consultants_update_own_or_admin` has existed since migration 002, so a consultant holding their own JWT could set any of the three through PostgREST — taking a reserved slug, publishing a page an admin had not activated, or pricing a booking below the platform's own consultation, since the price floor is enforced only by the orchestrator by design. SELECT is untouched: a consultant must be able to read and copy their own booking link.
 
-**Ownership, settled by Amendment 013:** an **administrator** writes `consultant_slug` and `direct_booking_enabled`; the **consultant** writes `direct_booking_price_cents`; the effective price is server-derived and written by nobody. Both roles read all four. What is published under the platform's own domain is the platform's decision; what somebody charges for their own time is theirs. Migration 049 is what makes that enforceable — without it a consultant could set any of the three from a browser regardless of what the API accepts.
+**`direct_booking_only` (Amendment 014, migration 050).** Consultant-managed. When true the consultant is excluded from the ordinary `/consultation` chooser — both country-specific and general-information selection — and remains bookable only through their own direct link. Deliberately **not** a reuse of `is_active` (admin: do they work here), `available_for_general` (which standard flow) or `direct_booking_enabled` (admin: is the direct page live) — none of those means this one. Defaulted `false`, so no existing consultant's eligibility changes.
+
+The exclusion is enforced by the **RLS policy**, because the `/consultation` chooser reads `consultants` directly rather than through an orchestrator endpoint: `consultants_select_active_public` now reads `is_active = true and direct_booking_only = false`. A companion policy, `consultants_select_booked_direct_only`, restores visibility to a client who already holds a consultation with that consultant — scoped to `direct_booking_only = true` so it gives back exactly what the narrowing removed. The orchestrator separately refuses a *standard* draft naming such a consultant; direct bookings are unaffected.
+
+**Ownership, settled by Amendment 013 and extended by 014:** an **administrator** writes `consultant_slug` and `direct_booking_enabled`; the **consultant** writes `direct_booking_price_cents` and `direct_booking_only`; the effective price is server-derived and written by nobody. Both roles read all four. What is published under the platform's own domain is the platform's decision; what somebody charges for their own time is theirs. Migration 049 is what makes that enforceable — without it a consultant could set any of the three from a browser regardless of what the API accepts.
 
 **The slug is admin-managed (Amendment 012).** It is generated at activation from `display_name` (falling back to `profiles.full_name`) when `consultant_slug IS NULL`, never regenerated on a rename, and changed thereafter only by an administrator. The database still owns format, length and uniqueness; the reserved set stays in the orchestrator.
 

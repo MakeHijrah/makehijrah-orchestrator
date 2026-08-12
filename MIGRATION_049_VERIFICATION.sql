@@ -160,16 +160,14 @@ declare
     'consultants_update_own_or_admin'
   ];
 begin
-  select count(*) into v_count
-    from pg_policies
-   where schemaname = 'public' and tablename = 'consultants';
-
-  if v_count <> array_length(v_expected, 1) then
-    raise exception
-      'VERIFICATION FAILED 15: consultants carries % policies; migration 049 adds none and expects %',
-      v_count, array_length(v_expected, 1);
-  end if;
-
+  /*
+   * By NAME, not by count. This once compared against a policy
+   * count of 3; migration 050 legitimately added a fourth and the
+   * check failed while nothing was wrong. A count answers "did
+   * anything change anywhere", which is not what this migration
+   * guarantees - it guarantees that IT added no policy and that
+   * the pre-existing ones survive.
+   */
   foreach v_policy in array v_expected
   loop
     if not exists (

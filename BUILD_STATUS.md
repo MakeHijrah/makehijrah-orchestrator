@@ -602,6 +602,29 @@ The finance and direct booking feature group has completed backend regression, f
 
 ---
 
+## 9o. Direct-booking-only + calculator terms — migration 050 **[D]**
+
+A consultant may say "I only want direct bookings", and their settings screen can now show a price ↔ earnings calculator without hardcoding commission percentages. PROJECT_LOCK Amendment 014.
+
+- **`consultants.direct_booking_only`**, boolean, default false — so no existing consultant's eligibility changes. Deliberately not a reuse of `is_active`, `available_for_general` or `direct_booking_enabled`; none of those means this one, and overloading any would make two intents share one switch. **[D]**
+- **The exclusion is an RLS policy, and that was the decisive audit finding.** There is no orchestrator endpoint that lists consultants for `/consultation` — the chooser reads `consultants` directly. A filter in orchestrator code cannot remove a consultant from a list the orchestrator does not produce, so `consultants_select_active_public` now reads `is_active = true and direct_booking_only = false`. One policy covers country-specific and general-information selection together, because both read it. **[D]**
+- **A companion policy restores what the narrowing would have broken.** Without it, a client who had already booked the consultant would lose their name off their own dashboard. Scoped to `direct_booking_only = true` plus an existing consultation, so it returns exactly what was removed and nothing more. **[D]**
+- **Invisible is not unbookable.** `validateDraftConsultantGender` refuses a *standard* draft naming a direct-booking-only consultant (`reason: consultant_direct_booking_only`); a stale list or hand-crafted call gets nowhere. Direct bookings pass straight through — the consultant is refusing the platform's chooser, not their own clients. **[D]**
+- **Guarded at the database.** Migration 050 extends `guard_consultants_columns` with the new column, joining the other three direct-booking settings. Consultant-managed but orchestrator-written, exactly as the price is. **[D]**
+- **Direct-booking-only with the page disabled is accepted, not refused** — a state the consultant chose. Refusing it would let an admin-owned setting block a consultant's own preference. **[D]**
+- **Calculator terms published read-only** on both GETs: `standard_booking_price_cents`, `base_consultant_commission_bps`, `premium_consultant_commission_bps`. Neither PATCH schema carries them, so sending one is a 400. **[D]**
+- **Provenance, and it is not symmetrical.** The base rate is **read** from `app_settings.consultation_consultant_commission_bps` — the row the ledger RPCs read; the settings provider projection was widened and no copy exists. The premium rate has **no table to read**: its only authority is `c_premium_bps constant integer := 8000` inside `record_direct_booking_earning`, so it is **mirrored** as `DIRECT_BOOKING_PREMIUM_CONSULTANT_BPS`. **That constant is not the financial authority** and the module says so at the top. **[D]**
+- **The mirror cannot drift silently.** `MIGRATION_050_VERIFICATION.sql` check 2 reads the ledger function's own source, with comments stripped, and fails if the literal is no longer 8000 — before any consultant sees a figure the ledger will not honour. **[D]**
+- **No finance change.** Verification asserts all eleven finance RPCs and the ledger append-only trigger are intact; the frozen baseline's rules are untouched. **[D]**
+
+Verification: `MIGRATION_050_VERIFICATION.sql`, **20 checks against PostgreSQL 16**, exercising the policies as `anon`, as an unrelated client, as the booking client, as the consultant, as an admin and as `service_role` rather than reading their source. Migrations 045–049 re-verified; 050 re-run for idempotency; clean replay 001–050. Orchestrator: **722 tests pass**.
+
+**Also fixed:** `MIGRATION_045_VERIFICATION` check 27 and `MIGRATION_049_VERIFICATION` check 15 asserted a hard-coded policy **count** of 3. Migration 050 legitimately added a fourth and both failed while nothing was wrong — the same brittleness that leaves migrations 030–033 asserting a table count of 16. Both now assert the pre-existing policies **by name and by meaning**, which is what those checks were actually for. **[D]**
+
+**Not done:** no frontend. The checkbox, the bidirectional calculator, the tooltip and client-side `/consultation` filtering are a separate build.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -633,7 +656,8 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 - Server-controlled consultation price and currency; price snapshot immutability.
 - The effective direct booking price rule, and the reserved slug list, which must gain an entry whenever a top-level frontend route is added (Amendments 011 and 012).
 - Admin-only consultant slug management, and the column guard closing consultant_slug, direct_booking_enabled and direct_booking_price_cents to direct browser writes (Amendment 012, migration 049).
-- The direct booking ownership split: admin writes slug and enabled, consultant writes price, nobody writes the effective price (Amendment 013).
+- The direct booking ownership split: admin writes slug and enabled, consultant writes price and direct_booking_only, nobody writes the effective price or the calculator terms (Amendments 013 and 014).
+- `DIRECT_BOOKING_PREMIUM_CONSULTANT_BPS` is a display mirror, never the financial authority; `record_direct_booking_earning` decides the money, and MIGRATION_050_VERIFICATION check 2 fails if the two diverge (Amendment 014).
 - `create_draft_consultation`'s five-column return contract, and `unique_reserved_consultant_slot` as the sole authority on slot conflicts (migration 046).
 - The thirty-minute draft hold, defined in SQL beside `hold_expires_at`, and the rule that a superseded draft is released only *after* its replacement is fully prepared (migration 047).
 - Stripe manual-capture workflow.
@@ -723,12 +747,13 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_011_DIRECT_CONSULTANT_BOOKING.md`
 - `PROJECT_LOCK_AMENDMENT_012_CONSULTANT_SLUG_GOVERNANCE.md`
 - `PROJECT_LOCK_AMENDMENT_013_DIRECT_BOOKING_SETTING_OWNERSHIP.md`
+- `PROJECT_LOCK_AMENDMENT_014_DIRECT_BOOKING_ONLY.md`
 - `FINANCE_DIRECT_BOOKING_BASELINE.md` — the frozen finance + direct booking release baseline
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 049
+- `supabase/migrations/` — migrations 001 through 050
 
 ---
 
