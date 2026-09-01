@@ -23,6 +23,10 @@ import { registerAcceptanceRoute } from "./modules/consultations/acceptance.rout
 import { registerCheckoutRoute } from "./modules/consultations/checkout.route.js";
 import { registerCompletionRoute } from "./modules/consultations/completion.route.js";
 import {
+  startBookingNotificationWorker,
+  stopBookingNotificationWorker,
+} from "./modules/consultations/booking-notification.worker.js";
+import {
   startDeclineNotificationWorker,
   stopDeclineNotificationWorker,
 } from "./modules/consultations/decline-notification.worker.js";
@@ -283,6 +287,7 @@ const start =
       });
 
       startMessageNotificationWorker();
+      startBookingNotificationWorker();
       startDeclineNotificationWorker();
       startAuthorizationTimeoutNotificationWorker();
       startAuthorizationTimeoutWorker();
@@ -303,6 +308,7 @@ const shutdown =
     await stopAuthorizationTimeoutWorker();
     await stopAuthorizationTimeoutNotificationWorker();
     await stopDeclineNotificationWorker();
+    await stopBookingNotificationWorker();
     await stopMessageNotificationWorker();
 
     await app.close();

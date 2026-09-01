@@ -625,6 +625,24 @@ Verification: `MIGRATION_050_VERIFICATION.sql`, **20 checks against PostgreSQL 1
 
 ---
 
+## 9p. Consultant "new booking to accept" email — no migration **[D]**
+
+A consultant is now emailed when a client books them and the payment is authorized. PROJECT_LOCK Amendment 015. **This is a v1.0.x production patch, not new scope.**
+
+- **It was specified and never built, and the audit is the finding.** `API_CONTRACT.md` section 6 has always listed *"Payment authorized (webhook) → consultant ('new booking to accept')"*. The webhook scheduled **no notification of any kind**. A consultant learned of a booking only by opening their dashboard, while a 48-hour acceptance window ran down and the authorization expired on its own. **[D]**
+- **Sent at payment authorization**, per the contract — the first moment a real commitment exists. Deliberately not at draft creation: a draft holds a slot for thirty minutes and most expire unpaid, so emailing then would train consultants to ignore the email that matters. **[D]**
+- **The webhook schedules; a worker sends.** Amendment 004 section 10.3.3 restricts the webhook path to RPC calls, and `stripe-webhook.test.ts` enforces it with a stub that throws on any direct table access. So scheduling is Redis-only with no database read, and every lookup happens later in `booking-notification.worker.ts` — the same due-set, per-consultation-lock, ten-second-poll, sixty-second-retry shape as the three existing notification workers. A Mandrill outage cannot affect a payment. **[D]**
+- **Idempotent across Stripe redeliveries.** `booking-notification:done:<id>`, checked when scheduling *and* when processing, thirty-day TTL; payload and due-set entry both written `NX` so a redelivery keeps the original queue position rather than pushing the email further out. **[D]**
+- **No migration and no marker column**, deliberately. Redis already holds this state for every other notification, the marker is disposable operational state rather than a business fact, and a column would have meant a table write from a path not allowed to make one. **[D]**
+- **Suppression is permanent, not a retry.** If the consultant accepted or declined, or the authorization was cancelled, before the worker ran, the job is dropped **and marked done** so a redelivery cannot revive it. Telling a consultant to accept something they already accepted is worse than saying nothing. **[D]**
+- **No finance change.** No ledger row, split, snapshot, payout or refund behaviour; no finance RPC called, altered or reordered. **[D]**
+
+Verification: **745 orchestrator tests pass** (up from 722), `build`, `typecheck` and `typecheck:test` all clean. 19 new tests in `booking-notification.test.ts` cover scheduling, redelivery, the email's recipient/tag/content, HTML escaping, general-vs-country topic, single-send idempotency, all five suppression paths, and Mandrill/database retry. 4 new tests in `stripe-webhook.test.ts` assert the webhook queues it on authorization only — and queues it **without reading a table**, since the section 10.3.3 stub is still in force.
+
+**Not done, and recorded rather than assumed:** the **client** half of the same contract row ("authorized, not charged yet") is still unbuilt, as are the acceptance and both reminder rows. Three of the email map's six rows are implemented. `API_CONTRACT.md` section 6 now carries a **Built** column so this is visible on the contract itself.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -666,6 +684,7 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 - Redis checkout capability design.
 - Google OAuth token encryption and server-only secret handling.
 - Orchestrator ownership of sensitive state transitions.
+- The rule that the Stripe webhook path schedules notifications into Redis and never reads a table for one (Amendment 004 section 10.3.3, Amendment 015), and that every notification is idempotent by a `done` marker checked at both scheduling and processing.
 - One-time invitation URL handling.
 - `src/routeTree.gen.ts` restoration procedure.
 - Service-role key prohibition in the frontend.
@@ -748,6 +767,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_012_CONSULTANT_SLUG_GOVERNANCE.md`
 - `PROJECT_LOCK_AMENDMENT_013_DIRECT_BOOKING_SETTING_OWNERSHIP.md`
 - `PROJECT_LOCK_AMENDMENT_014_DIRECT_BOOKING_ONLY.md`
+- `PROJECT_LOCK_AMENDMENT_015_CONSULTANT_BOOKING_NOTIFICATION.md`
 - `FINANCE_DIRECT_BOOKING_BASELINE.md` — the frozen finance + direct booking release baseline
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`

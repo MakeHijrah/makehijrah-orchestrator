@@ -60,9 +60,77 @@ const { getStripeClient } = await import("../../lib/stripe.js");
 /* Amendment 007: one client per mode. Tests run in test mode. */
 const stripe = getStripeClient("test");
 const { supabaseAdmin } = await import("../../lib/supabase.js");
+const { redis } = await import("../../lib/redis.js");
 const { registerStripeWebhookRoute } = await import(
   "./stripe-webhook.route.js"
 );
+const { BOOKING_NOTIFICATION_DUE_SET } = await import(
+  "../consultations/booking-notification.service.js"
+);
+
+/*
+ * The webhook schedules the consultant's "new booking" email
+ * through Redis alone, so a fake here is enough to observe it.
+ * Any table read the notification needed would trip the direct
+ * table access guard installed below.
+ */
+const bookingNotificationQueue = new Map<string, number>();
+const bookingNotificationStore = new Map<string, string>();
+
+class FakeMulti {
+  private readonly ops: Array<() => void> = [];
+  private readonly results: Array<[unknown, unknown]> = [];
+
+  set(
+    key: string,
+    value: string,
+    _ex: string,
+    _ttl: number,
+    nx?: string,
+  ): this {
+    this.ops.push(() => {
+      if (nx === "NX" && bookingNotificationStore.has(key)) {
+        this.results.push([null, null]);
+
+        return;
+      }
+
+      bookingNotificationStore.set(key, value);
+      this.results.push([null, "OK"]);
+    });
+
+    return this;
+  }
+
+  zadd(key: string, _nx: string, score: number, member: string): this {
+    this.ops.push(() => {
+      assert.equal(key, BOOKING_NOTIFICATION_DUE_SET);
+
+      if (!bookingNotificationQueue.has(member)) {
+        bookingNotificationQueue.set(member, score);
+      }
+
+      this.results.push([null, 1]);
+    });
+
+    return this;
+  }
+
+  async exec(): Promise<Array<[unknown, unknown]>> {
+    for (const op of this.ops) {
+      op();
+    }
+
+    return this.results;
+  }
+}
+
+redis.multi = (() => new FakeMulti()) as unknown as typeof redis.multi;
+
+redis.exists = (async (key: string) =>
+  bookingNotificationStore.has(key)
+    ? 1
+    : 0) as unknown as typeof redis.exists;
 
 type RpcCall = {
   name: string;
@@ -157,6 +225,8 @@ const installStubs = (): void => {
   rpcCalls.length = 0;
   retrievedPaymentIntents.length = 0;
   isDirectBooking = false;
+  bookingNotificationQueue.clear();
+  bookingNotificationStore.clear();
 
   supabaseAdmin.rpc = (async (
     name: string,
@@ -894,5 +964,98 @@ describe("Stripe webhook: unsupported event types", () => {
       "non_consultation_event",
     );
     assertNoConsultationSideEffects();
+  });
+});
+
+/*
+ * The consultant's "new booking to accept" email.
+ *
+ * Scheduled from the webhook, delivered by the booking
+ * notification worker. These assert only that the webhook queues
+ * it — and queues it without reading a table, since the stub above
+ * throws on any direct table access. What the email contains is
+ * asserted in booking-notification.test.ts.
+ */
+describe("Stripe webhook: consultant booking notification", () => {
+  beforeEach(() => {
+    installStubs();
+    refundPaymentIntentMetadata = {};
+    rpcRow = {
+      processed: true,
+      already_processed: false,
+      payment_id: "11111111-1111-1111-1111-111111111111",
+      consultation_status: "pending_acceptance",
+    };
+  });
+
+  it("queues the notification when a payment is authorized", async () => {
+    const consultationId = "77777777-7777-4777-8777-777777777777";
+
+    const response = await post(
+      paymentIntentEvent("payment_intent.amount_capturable_updated", {
+        consultation_id: consultationId,
+      }),
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      [...bookingNotificationQueue.keys()],
+      [consultationId],
+    );
+  });
+
+  it("queues it once across Stripe redeliveries of the same event", async () => {
+    const consultationId = "88888888-8888-4888-8888-888888888888";
+
+    const event = paymentIntentEvent(
+      "payment_intent.amount_capturable_updated",
+      { consultation_id: consultationId },
+    );
+
+    await post(event);
+
+    const firstScore = bookingNotificationQueue.get(consultationId);
+
+    rpcRow = { ...rpcRow, processed: false, already_processed: true };
+
+    await post(event);
+
+    assert.equal(bookingNotificationQueue.size, 1);
+    assert.equal(
+      bookingNotificationQueue.get(consultationId),
+      firstScore,
+    );
+  });
+
+  it("queues nothing for a payment intent with no consultation_id", async () => {
+    const response = await post(
+      paymentIntentEvent(
+        "payment_intent.amount_capturable_updated",
+        {},
+      ),
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(bookingNotificationQueue.size, 0);
+  });
+
+  it("queues nothing for capture, cancellation or refund", async () => {
+    const consultationId = "99999999-9999-4999-8999-999999999999";
+
+    await post(
+      paymentIntentEvent("payment_intent.succeeded", {
+        consultation_id: consultationId,
+      }),
+    );
+    await post(
+      paymentIntentEvent("payment_intent.canceled", {
+        consultation_id: consultationId,
+      }),
+    );
+
+    refundPaymentIntentMetadata = { consultation_id: consultationId };
+    await post(chargeRefundedEvent());
+
+    assert.equal(bookingNotificationQueue.size, 0);
   });
 });

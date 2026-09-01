@@ -937,16 +937,27 @@ All jobs use job-ID-based dedup where a single-fire per consultation matters.
 
 ## 6. Email map (Mandrill — originally specified as Resend — `consultations@makehijrah.com`)
 
-| Trigger | To |
-|---|---|
-| Payment authorized (webhook) | client ("authorized, not charged yet"), consultant ("new booking to accept") |
-| Consultant accepted (accept endpoint) | client (Meet link + `.ics` attachment — replaces Google invite), consultant (confirmation) |
-| Consultant declined / 48h timeout | client ("no charge made"), admin |
-| 24h consultant reminder | consultant |
-| Session reminders | client + consultant |
-| Recommendation sent | client |
+| Trigger | To | Built |
+|---|---|---|
+| Payment authorized (webhook) | client ("authorized, not charged yet") | no |
+| Payment authorized (webhook) | consultant ("new booking to accept") | **yes** — Amendment 015 |
+| Consultant accepted (accept endpoint) | client (Meet link + `.ics` attachment — replaces Google invite), consultant (confirmation) | no |
+| Consultant declined / 48h timeout | client ("no charge made"), admin | **yes** |
+| 24h consultant reminder | consultant | no |
+| Session reminders | client + consultant | no |
+| Recommendation sent | client | **yes** |
 
 Templates are plain HTML in the orchestrator repo. No template service in MVP.
+
+The **Built** column is the honest current state, not the target: three of these rows
+are unimplemented. Every implemented row is scheduled into a Redis due set and
+delivered by a worker, never sent inline — the Stripe webhook path in particular may
+not touch a table (Amendment 004 section 10.3.3), so it schedules only.
+
+The consultant booking email is idempotent across Stripe redeliveries by the
+`booking-notification:done:<id>` marker, and is suppressed rather than sent late if
+the consultant has already accepted or declined by the time the worker runs
+(Amendment 015).
 
 ---
 

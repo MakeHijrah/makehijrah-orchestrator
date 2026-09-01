@@ -1,6 +1,7 @@
 import type Stripe from "stripe";
 
 import { supabaseAdmin } from "../../lib/supabase.js";
+import { scheduleBookingNotification } from "../consultations/booking-notification.service.js";
 import {
   reverseConsultationEarning,
   syncConsultationEarning,
@@ -742,6 +743,51 @@ export const processStripeWebhookEvent =
               normalized.consultationId,
             eventType:
               normalized.eventType,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unknown error",
+          },
+        );
+      }
+    }
+
+    /*
+     * Tell the consultant a client has booked them.
+     *
+     * Redis only — no table is read or written here, because
+     * Amendment 004 section 10.3.3 keeps the webhook path off the
+     * tables and the webhook tests throw on any direct access.
+     * Every lookup the email needs happens later, in the worker.
+     *
+     * Run on replays as well as first delivery, exactly like the
+     * ledger side effects above: the done marker makes a second
+     * scheduling a no-op, and re-running is what lets a redelivery
+     * repair a notification an earlier delivery failed to queue.
+     *
+     * Secondary to the payment. A failure is logged and swallowed;
+     * a non-2xx here would have Stripe redeliver the event and
+     * re-run the payment transition, which is far worse than a
+     * missed email.
+     */
+    if (
+      normalized.eventType ===
+        "payment_intent.amount_capturable_updated" &&
+      normalized.consultationId
+    ) {
+      try {
+        await scheduleBookingNotification(
+          {
+            consultationId:
+              normalized.consultationId,
+          },
+        );
+      } catch (error) {
+        console.error(
+          "Consultant booking notification scheduling threw during webhook processing",
+          {
+            consultationId:
+              normalized.consultationId,
             message:
               error instanceof Error
                 ? error.message
