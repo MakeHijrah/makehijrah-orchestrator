@@ -1,6 +1,7 @@
 import { env } from "../../config/env.js";
 import { decryptOAuthToken } from "../../lib/oauth-token-crypto.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
+import { findMissingScopes } from "./google-oauth.js";
 
 const GOOGLE_TOKEN_ENDPOINT =
   "https://oauth2.googleapis.com/token";
@@ -25,18 +26,24 @@ export type GoogleAccessTokenResult =
       code:
         | "OAUTH_NOT_CONNECTED"
         | "OAUTH_REVOKED"
+        | "OAUTH_INSUFFICIENT_SCOPE"
         | "INTERNAL_ERROR";
       message: string;
     };
 
 export const getGoogleAccessToken = async (
   consultantId: string,
+  /*
+   * Scopes this particular call needs. Defaults to none, so every
+   * existing caller behaves exactly as it did before.
+   */
+  requiredScopes: readonly string[] = [],
 ): Promise<GoogleAccessTokenResult> => {
   const { data: connection, error: connectionError } =
     await supabaseAdmin
       .from("oauth_connections")
       .select(
-        "encrypted_refresh_token, revoked_at",
+        "encrypted_refresh_token, revoked_at, scopes",
       )
       .eq("consultant_id", consultantId)
       .eq("provider", "google")
@@ -74,6 +81,57 @@ export const getGoogleAccessToken = async (
       message:
         "The consultant's Google Calendar connection has been revoked.",
     };
+  }
+
+  /*
+   * A connected grant that cannot do the job the caller needs.
+   *
+   * Google presents its scopes as individual checkboxes, so a
+   * consultant can complete the flow having unticked one and still
+   * look connected everywhere — the row exists, it is not revoked,
+   * the refresh token works. The failure surfaces only when the
+   * token is used, which for event creation is AFTER the client's
+   * payment has been captured.
+   *
+   * Required scopes are per-operation, not global: a grant with
+   * calendar.events.freebusy but not calendar.events can still
+   * answer availability perfectly well, and refusing it outright
+   * would break a consultant's calendar for no reason. Callers ask
+   * for what they actually need.
+   *
+   * Only enforced when scopes were recorded. An empty column means
+   * the grant is unknown, not known-bad.
+   */
+  const grantedScopes =
+    (connection.scopes as string[] | null) ?? [];
+
+  if (
+    requiredScopes.length > 0 &&
+    grantedScopes.length > 0
+  ) {
+    const missingScopes =
+      findMissingScopes(
+        grantedScopes,
+        requiredScopes,
+      );
+
+    if (missingScopes.length > 0) {
+      console.error(
+        "Google connection is missing a scope the caller requires",
+        {
+          consultantId,
+          missingScopes,
+          grantedScopes,
+        },
+      );
+
+      return {
+        ok: false,
+        code: "OAUTH_INSUFFICIENT_SCOPE",
+        message:
+          "Reconnect Google Calendar and allow calendar access — the current connection cannot create calendar events.",
+      };
+    }
   }
 
   let refreshToken: string;

@@ -5,6 +5,7 @@ import {
 } from "./consultation-stripe-mode.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import { getGoogleAccessToken } from "../oauth/google-access-token.js";
+import { GOOGLE_EVENT_WRITE_SCOPE } from "../oauth/google-oauth.js";
 import { createConsultationCalendarEvent } from "./google-calendar-event.service.js";
 
 const ACCEPTANCE_WINDOW_MILLISECONDS =
@@ -522,9 +523,19 @@ export const acceptConsultation =
       };
     }
 
+    /*
+     * The pre-capture gate.
+     *
+     * Requiring the event-write scope HERE, before
+     * capturePaymentIntent, is the whole point: a grant missing it
+     * used to pass this check, let the capture take the client's
+     * money, and only then fail at the calendar call. Consultation
+     * 549beff0 was captured for $97 and stranded exactly that way.
+     */
     const googleAccessResult =
       await getGoogleAccessToken(
         consultantId,
+        [GOOGLE_EVENT_WRITE_SCOPE],
       );
 
     if (!googleAccessResult.ok) {

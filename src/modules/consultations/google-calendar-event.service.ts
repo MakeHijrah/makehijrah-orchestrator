@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getGoogleAccessToken } from "../oauth/google-access-token.js";
+import { GOOGLE_EVENT_WRITE_SCOPE } from "../oauth/google-oauth.js";
 
 const GOOGLE_CALENDAR_EVENTS_ENDPOINT =
   "https://www.googleapis.com/calendar/v3/calendars/primary/events";
@@ -46,6 +47,7 @@ export type CreateConsultationCalendarEventResult =
       code:
         | "OAUTH_NOT_CONNECTED"
         | "OAUTH_REVOKED"
+        | "OAUTH_INSUFFICIENT_SCOPE"
         | "GOOGLE_ERROR"
         | "INTERNAL_ERROR";
       message: string;
@@ -227,9 +229,16 @@ export const createConsultationCalendarEvent =
       };
     }
 
+    /*
+     * Creating the event needs write access, so demand it here.
+     * In the acceptance flow this call happens after the payment
+     * is captured, which is exactly why the requirement is stated
+     * rather than discovered from a 403.
+     */
     const accessTokenResult =
       await getGoogleAccessToken(
         consultantId,
+        [GOOGLE_EVENT_WRITE_SCOPE],
       );
 
     if (!accessTokenResult.ok) {
@@ -420,6 +429,7 @@ export type DeleteConsultationCalendarEventResult =
       code:
         | "OAUTH_NOT_CONNECTED"
         | "OAUTH_REVOKED"
+        | "OAUTH_INSUFFICIENT_SCOPE"
         | "GOOGLE_ERROR"
         | "INTERNAL_ERROR";
       message: string;

@@ -10,7 +10,10 @@ import {
 import { requireRole } from "../../lib/auth.js";
 import { verifyOAuthState } from "../../lib/oauth-state.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
-import { createGoogleAuthorizationUrl } from "./google-oauth.js";
+import {
+  createGoogleAuthorizationUrl,
+  findMissingGoogleScopes,
+} from "./google-oauth.js";
 import { exchangeGoogleAuthorizationCode } from "./google-token.js";
 import { saveGoogleConnection } from "./oauth.repository.js";
 
@@ -83,6 +86,7 @@ const getConsultantIdForProfile = async (
 
 const createProfileRedirectUrl = (
   result: "connected" | "error",
+  reason?: string,
 ): string => {
   const redirectUrl = new URL(
     "/consultant/profile",
@@ -90,6 +94,15 @@ const createProfileRedirectUrl = (
   );
 
   redirectUrl.searchParams.set("google", result);
+
+  /*
+   * Kept as google=error so the existing profile screen still
+   * shows a failure; the reason is additive, for a screen that
+   * wants to say which permission was missing.
+   */
+  if (reason) {
+    redirectUrl.searchParams.set("reason", reason);
+  }
 
   return redirectUrl.toString();
 };
@@ -295,6 +308,43 @@ export const registerOAuthRoutes = async (
         );
 
         return reply.redirect(errorRedirect);
+      }
+
+      /*
+       * Refuse a grant that cannot do the job.
+       *
+       * Google lets a consultant untick the calendar permission
+       * and still complete the flow. Saving that grant produces a
+       * connection which looks healthy everywhere — the row
+       * exists, the refresh token works — and fails only when it
+       * is used to create the calendar event, which happens AFTER
+       * the client's payment has been captured.
+       *
+       * Nothing is saved when a scope is missing, so a consultant
+       * who already has a good grant and re-runs the flow badly
+       * keeps the good one rather than overwriting it.
+       */
+      const missingScopes = findMissingGoogleScopes(
+        exchangeResult.scopes,
+      );
+
+      if (missingScopes.length > 0) {
+        request.log.error(
+          {
+            consultantId: consultant.id,
+            missingScopes,
+            grantedScopes:
+              exchangeResult.scopes,
+          },
+          "Google OAuth grant is missing required calendar scopes",
+        );
+
+        return reply.redirect(
+          createProfileRedirectUrl(
+            "error",
+            "missing_calendar_permission",
+          ),
+        );
       }
 
       const saveResult = await saveGoogleConnection({

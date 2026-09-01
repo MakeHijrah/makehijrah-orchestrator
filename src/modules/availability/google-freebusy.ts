@@ -36,6 +36,7 @@ export type GoogleFreeBusyResult =
       code:
         | "OAUTH_NOT_CONNECTED"
         | "OAUTH_REVOKED"
+        | "OAUTH_INSUFFICIENT_SCOPE"
         | "GOOGLE_ERROR"
         | "INTERNAL_ERROR";
       message: string;
