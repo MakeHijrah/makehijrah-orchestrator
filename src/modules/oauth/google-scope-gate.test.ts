@@ -251,3 +251,45 @@ describe("getGoogleAccessToken: the pre-capture gate", () => {
     );
   });
 });
+
+/*
+ * The status endpoint decides whether the profile screen offers a
+ * Connect control at all, so an incomplete grant reported as
+ * "connected" leaves the consultant with no way to fix it. That is
+ * the state consultation 549beff0 was booked in.
+ */
+describe("oauth-status: an incomplete grant is not connected", () => {
+  const statusFor = (scopes: string[]) => {
+    const missing = findMissingGoogleScopes(scopes);
+
+    return missing.length > 0
+      ? {
+          connected: false,
+          requires_reconnect: true,
+          missing_scopes: missing,
+        }
+      : { connected: true };
+  };
+
+  it("reports the incident grant as not connected", () => {
+    assert.deepEqual(statusFor(BROKEN_GRANT), {
+      connected: false,
+      requires_reconnect: true,
+      missing_scopes: [EVENTS],
+    });
+  });
+
+  it("reports a grant with no calendar scopes as not connected", () => {
+    const status = statusFor([
+      "openid",
+      "https://www.googleapis.com/auth/userinfo.email",
+    ]);
+
+    assert.equal(status.connected, false);
+    assert.deepEqual(status.missing_scopes, [EVENTS, FREEBUSY]);
+  });
+
+  it("still reports a complete grant as connected", () => {
+    assert.deepEqual(statusFor(GOOD_GRANT), { connected: true });
+  });
+});

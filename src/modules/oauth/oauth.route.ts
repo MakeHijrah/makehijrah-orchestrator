@@ -145,7 +145,7 @@ export const registerOAuthRoutes = async (
       const { data: connection, error } =
         await supabaseAdmin
           .from("oauth_connections")
-          .select("google_email")
+          .select("google_email, scopes")
           .eq(
             "consultant_id",
             consultantResult.consultantId,
@@ -180,6 +180,38 @@ export const registerOAuthRoutes = async (
       if (!connection) {
         return sendSuccess(reply, {
           connected: false,
+        });
+      }
+
+      /*
+       * A grant missing the calendar permission is reported as
+       * NOT connected, and that is the honest answer rather than a
+       * convenience.
+       *
+       * Saying "connected" for a grant that cannot create a
+       * calendar event tells a consultant their bookings will work
+       * when they will not — and it hides the Connect control,
+       * which the profile screen shows only when this endpoint
+       * reports false. That is precisely the state consultation
+       * 549beff0 was booked in: connected by this endpoint,
+       * unusable in practice, and no way for the consultant to put
+       * it right.
+       *
+       * The extra fields are additive, for a screen that wants to
+       * name the missing permission. A client that ignores them
+       * still shows its Connect button, which is the behaviour
+       * that matters.
+       */
+      const missingScopes = findMissingGoogleScopes(
+        (connection.scopes as string[] | null) ?? [],
+      );
+
+      if (missingScopes.length > 0) {
+        return sendSuccess(reply, {
+          connected: false,
+          requires_reconnect: true,
+          google_email: connection.google_email,
+          missing_scopes: missingScopes,
         });
       }
 

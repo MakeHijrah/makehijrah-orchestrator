@@ -54,9 +54,17 @@ So callers state what they need. Availability passes nothing and behaves exactly
 
 **Checked against the two calendar scopes, never against `GOOGLE_OAUTH_SCOPES`.** Google normalises the requested `email` to `.../auth/userinfo.email` in its response, so matching the requested list verbatim would reject **every** grant, good ones included. A test pins this.
 
-## 5. What this does not do
+## 5. The third gate — the consultant must be able to act
 
-- **It does not repair the two existing broken connections.** Those consultants must reconnect; the connect-time gate is what makes that reconnect trustworthy.
+The two gates above are worthless if the consultant cannot reach the connect flow, and they could not: the profile screen shows its Connect control **only when `/api/consultant/oauth-status` reports `connected: false`**, and that endpoint checked for a row that was not revoked — nothing more. An incomplete grant was reported as **connected**, so the screen said "Google Calendar connected" and offered no way to change it.
+
+That endpoint now applies the same scope check and reports `connected: false`, with additive `requires_reconnect` and `missing_scopes` fields for a screen that wants to name the permission. A client that ignores them still shows its Connect button, which is the behaviour that matters.
+
+This is the honest answer, not a convenience. Telling a consultant they are connected when their next booking will capture a client's money and then fail is worse than telling them to reconnect.
+
+## 6. What this does not do
+
+- **It does not repair the two existing broken connections.** Those consultants must reconnect; §5 gives them the control to do it and §2 makes the reconnect trustworthy.
 - **No migration**, no schema change, no new table, column, status, route or endpoint.
 - **No finance change**, and no change to availability behaviour.
 - **No frontend change required.** The redirect stays `google=error`, which the profile screen already handles; `reason` is additive for a screen that wants to name the missing permission.
