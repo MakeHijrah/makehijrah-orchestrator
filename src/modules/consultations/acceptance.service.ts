@@ -10,6 +10,28 @@ import { createConsultationCalendarEvent } from "./google-calendar-event.service
 const ACCEPTANCE_WINDOW_MILLISECONDS =
   48 * 60 * 60 * 1000;
 
+/*
+ * The two admin_attention reasons an acceptance retry can clear.
+ *
+ * Both are set by this file, both mean the same thing — the
+ * consultant accepted, the payment was CAPTURED, and an
+ * infrastructure step after the capture failed — and both leave a
+ * consultation that only needs the rest of the flow to be run
+ * again. Retrying is safe: capture is idempotent (an already
+ * succeeded PaymentIntent short-circuits), and
+ * finalize_consultation_acceptance is idempotent on a replay.
+ *
+ * Every other reason is terminal and must never be acceptable
+ * here: 'declined' and 'timeout' both cancelled the
+ * authorization, and an admin cancellation note means the money
+ * was refunded. This stays a whitelist for that reason.
+ */
+const RECOVERABLE_ADMIN_ATTENTION_REASONS =
+  new Set([
+    "calendar_failed",
+    "calendar_created_confirmation_failed",
+  ]);
+
 type AcceptanceConsultationRow = {
   id: string;
   consultant_id: string;
@@ -18,6 +40,7 @@ type AcceptanceConsultationRow = {
   scheduled_end_at: string;
   client_timezone: string;
   stripe_payment_intent_id: string | null;
+  admin_attention_reason: string | null;
   stripe_mode: string | null;
   payment_authorized_at: string | null;
   google_event_id: string | null;
@@ -63,7 +86,7 @@ const loadAcceptanceConsultation = async (
     await supabaseAdmin
       .from("consultations")
       .select(
-        "id, consultant_id, status, scheduled_start_at, scheduled_end_at, client_timezone, stripe_payment_intent_id, stripe_mode, payment_authorized_at, google_event_id, meet_link",
+        "id, consultant_id, status, scheduled_start_at, scheduled_end_at, client_timezone, stripe_payment_intent_id, stripe_mode, payment_authorized_at, google_event_id, meet_link, admin_attention_reason",
       )
       .eq("id", consultationId)
       .maybeSingle();
@@ -409,7 +432,26 @@ export const acceptConsultation =
       };
     }
 
+    /*
+     * A retry after a post-capture failure.
+     *
+     * finalize_consultation_acceptance has accepted this recovery
+     * since migration 008, but this guard used to refuse
+     * admin_attention outright, so the retry never reached the
+     * RPC and the consultant was locked out of a consultation
+     * whose payment had already been captured.
+     */
+    const isRecovery =
+      consultation.status ===
+        "admin_attention" &&
+      RECOVERABLE_ADMIN_ATTENTION_REASONS.has(
+        consultation
+          .admin_attention_reason ??
+          "",
+      );
+
     if (
+      !isRecovery &&
       consultation.status !==
         "pending_acceptance" &&
       consultation.status !==
@@ -443,10 +485,20 @@ export const acceptConsultation =
       };
     }
 
+    /*
+     * The 48-hour window governs whether a consultant may accept.
+     * A recovery is not a new acceptance: they already accepted
+     * inside the window and their client's money was taken. If
+     * the window closed while the consultation sat in
+     * admin_attention, applying it here would strand a captured
+     * payment with no calendar event and no way to finish, which
+     * is the opposite of what the window is for.
+     */
     if (
+      !isRecovery &&
       Date.now() >
-      paymentAuthorizedAt +
-        ACCEPTANCE_WINDOW_MILLISECONDS
+        paymentAuthorizedAt +
+          ACCEPTANCE_WINDOW_MILLISECONDS
     ) {
       return {
         ok: false,

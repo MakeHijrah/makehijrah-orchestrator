@@ -643,6 +643,24 @@ Verification: **745 orchestrator tests pass** (up from 722), `build`, `typecheck
 
 ---
 
+## 9q. Acceptance recovery after a post-capture failure — migration 051 **[D]**
+
+A consultant whose acceptance captured the payment and then failed to create the Google Calendar event was **permanently locked out** of that consultation. PROJECT_LOCK Amendment 016. **Production defect fix, v1.0.x patch.**
+
+- **Reported from production**, with the consultant's screen showing "Payment may have been captured, but calendar setup failed. Admin review is required." beside an Accept button that returned an error every time. **[D]**
+- **The client had paid.** The capture happens *before* the calendar call, so `calendar_failed` always means the money was taken. No calendar event, no Meet link, and no route in the product to move it forward — the admin console can only cancel and refund. **[D]**
+- **Two layers disagreed, and both were wrong.** `finalize_consultation_acceptance` has allowed recovery from `admin_attention` since **migration 008** — but the service guard refused `admin_attention` outright, so the retry never reached the RPC, and migration 008's recovery branch was **unreachable dead code that had never once run**. Meanwhile the RPC whitelisted only `calendar_created_confirmation_failed`, never `calendar_failed` — the earlier and more common of the two post-capture failures. **[D]**
+- **Both reasons are now recoverable, and the whitelist stays a whitelist.** Both mean the consultant accepted, the money was captured, and an infrastructure step after the capture failed. Retrying is safe because capture short-circuits on an already succeeded PaymentIntent and the RPC is idempotent on replay. `declined`, `timeout` and an admin cancellation note stay refused — each cancelled or refunded the payment. **[D]**
+- **A latent NULL hole closed.** Migration 008 compared with `<>`, which is NULL against a NULL reason, so the guard was NULL and fell through to a status check that admits `admin_attention`. `coalesce(...) not in (...)` now refuses it. **[D]**
+- **The 48-hour window does not apply to a recovery.** The consultant already accepted inside it and the money is already captured; applying it on retry would strand a captured payment permanently. Unchanged for every first acceptance. **[D]**
+- **No finance change.** No ledger row, split, snapshot, payout or refund behaviour; no finance RPC called, altered or reordered. **[D]**
+
+Verification: `MIGRATION_051_VERIFICATION.sql`, **17 checks against PostgreSQL 16**, which **invoke** the RPC and assert its five-column runtime contract per the standing rule from migration 046, on a clean replay of 001–051; 051 re-run for idempotency. **The defect was reproduced before it was fixed**: with migration 008 loaded the same fixture returns *"Consultation cannot be recovered from admin attention reason calendar_failed"*; with 051 it returns `confirmed`. Orchestrator: **759 tests pass** (up from 745), including 14 in `acceptance-recovery.test.ts` — verified to fail on exactly the three recovery cases when the service guard is reverted.
+
+**Not fixed here, and it matters:** *why* Google failed is not known from the code. It is recorded in the production logs under `"Google Calendar event creation failed"` with Google's HTTP status, error code, message and status. This work makes the consultation recoverable; a persistent Google fault will still fail the retry until that cause is addressed.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -684,6 +702,7 @@ Combine into a later frontend refinement pass; do not interrupt core work:
 - Redis checkout capability design.
 - Google OAuth token encryption and server-only secret handling.
 - Orchestrator ownership of sensitive state transitions.
+- The recoverable `admin_attention` whitelist — `calendar_failed` and `calendar_created_confirmation_failed` only, the two failures that happen *after* the payment is captured. It is enforced in both `acceptance.service.ts` and `finalize_consultation_acceptance`, and the two must be widened together or not at all (Amendment 016, migration 051).
 - The rule that the Stripe webhook path schedules notifications into Redis and never reads a table for one (Amendment 004 section 10.3.3, Amendment 015), and that every notification is idempotent by a `done` marker checked at both scheduling and processing.
 - One-time invitation URL handling.
 - `src/routeTree.gen.ts` restoration procedure.
@@ -768,12 +787,13 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_013_DIRECT_BOOKING_SETTING_OWNERSHIP.md`
 - `PROJECT_LOCK_AMENDMENT_014_DIRECT_BOOKING_ONLY.md`
 - `PROJECT_LOCK_AMENDMENT_015_CONSULTANT_BOOKING_NOTIFICATION.md`
+- `PROJECT_LOCK_AMENDMENT_016_ACCEPTANCE_CALENDAR_RECOVERY.md`
 - `FINANCE_DIRECT_BOOKING_BASELINE.md` — the frozen finance + direct booking release baseline
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 050
+- `supabase/migrations/` — migrations 001 through 051
 
 ---
 
