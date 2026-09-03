@@ -19,6 +19,52 @@ type CheckoutConsultationRow = {
   currency: string;
   stripe_payment_intent_id: string | null;
   created_at: string;
+  country_id: string | null;
+  /*
+   * Embedded rows. PostgREST returns an object for a
+   * to-one embed, or null when the foreign key is null —
+   * country_id is null for a general consultation.
+   */
+  consultants: { display_name: string | null } | null;
+  countries: { name: string | null } | null;
+};
+
+/*
+ * Analytics facts carried to Stripe so the webhook can build the
+ * GA4 purchase event without reading a table. Every value is a
+ * plain string because Stripe metadata holds nothing else, and
+ * every one is optional because analytics must never be able to
+ * stop a checkout.
+ */
+const buildAnalyticsMetadata = ({
+  consultation,
+  gaClientId,
+}: {
+  consultation: CheckoutConsultationRow;
+  gaClientId: string | null;
+}): Record<string, string> => {
+  const consultantName =
+    consultation.consultants?.display_name ?? null;
+
+  const destination =
+    consultation.countries?.name ?? null;
+
+  return {
+    /* item_id for the GA4 purchase event. */
+    consultant_id: consultation.consultant_id,
+    ...(gaClientId
+      ? { ga_client_id: gaClientId }
+      : {}),
+    ...(consultantName
+      ? {
+          consultant_name:
+            consultantName.slice(0, 200),
+        }
+      : {}),
+    ...(destination
+      ? { destination: destination.slice(0, 200) }
+      : {}),
+  };
 };
 
 /*
@@ -126,7 +172,16 @@ const loadCheckoutRecord = async (
        * on the consultant's own page, not the generic one. See
        * buildCancelUrl below.
        */
-      "id, client_profile_id, consultant_id, booking_source, status, price_cents, currency, stripe_payment_intent_id, created_at",
+      /*
+       * consultants.display_name and countries.name are read for
+       * the GA4 purchase event's item, which reports which
+       * consultant and which destination converted. Both are
+       * already public on the booking surface. They are embedded
+       * here rather than looked up in the webhook because the
+       * webhook may not read tables at all (Amendment 004
+       * section 10.3.3), so they travel in Stripe metadata.
+       */
+      "id, client_profile_id, consultant_id, booking_source, status, price_cents, currency, stripe_payment_intent_id, created_at, country_id, consultants(display_name), countries(name)",
     )
     .eq("id", consultationId)
     .maybeSingle();
@@ -256,6 +311,7 @@ const loadCheckoutRecord = async (
 export const createStripeCheckout =
   async (
     consultationId: string,
+    gaClientId: string | null = null,
   ): Promise<CreateStripeCheckoutResult> => {
     const checkoutRecordResult =
       await loadCheckoutRecord(
@@ -271,6 +327,12 @@ export const createStripeCheckout =
       intake,
       holdExpiresAt,
     } = checkoutRecordResult.record;
+
+    const analyticsMetadata =
+      buildAnalyticsMetadata({
+        consultation,
+        gaClientId,
+      });
 
     if (
       consultation.status !== "draft"
@@ -429,11 +491,18 @@ export const createStripeCheckout =
               capture_method: "manual",
               receipt_email:
                 intake.email,
+              /*
+               * The webhook reads its whole world from here. The
+               * analytics keys are additive: consultation_id and
+               * client_profile_id are unchanged and still the only
+               * two anything transactional depends on.
+               */
               metadata: {
                 consultation_id:
                   consultation.id,
                 client_profile_id:
                   consultation.client_profile_id,
+                ...analyticsMetadata,
               },
             },
 

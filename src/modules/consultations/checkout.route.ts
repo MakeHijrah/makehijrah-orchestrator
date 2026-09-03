@@ -26,6 +26,25 @@ const checkoutBodySchema = z
       .trim()
       .min(1)
       .optional(),
+
+    /*
+     * The browser's GA4 client id, read from the _ga cookie by
+     * the frontend immediately before it sends the visitor to
+     * Stripe. It is what lets the server-side `purchase` event
+     * join the session and campaign that produced the booking
+     * instead of opening a new unattributed one.
+     *
+     * Optional and analytics-only. A booking must never fail
+     * because a cookie was blocked, so anything that does not
+     * look like a GA client id is dropped rather than rejected.
+     */
+    ga_client_id: z
+      .string()
+      .trim()
+      .max(64)
+      .regex(/^[0-9]+\.[0-9]+$/)
+      .optional()
+      .catch(undefined),
   })
   .default({});
 
@@ -280,6 +299,7 @@ export const registerCheckoutRoute = async (
       const checkoutResult =
         await createStripeCheckout(
           consultationId,
+          parsedBody.data.ga_client_id ?? null,
         );
 
       if (!checkoutResult.ok) {

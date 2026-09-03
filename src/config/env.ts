@@ -190,6 +190,31 @@ const envSchema = z.object({
 
   OAUTH_STATE_SECRET: z.string().min(32),
 
+  /*
+   * GA4 server-side analytics. Both optional and both required
+   * together: the Measurement Protocol needs a measurement id AND
+   * an API secret, and with either missing the sender reports
+   * "not configured" and posts nothing. That is what lets this
+   * ship before the secret is created in GA4 Admin.
+   *
+   * The secret is a credential. It lives in Railway only, exactly
+   * like the Stripe and Mandrill keys, and never in app_settings.
+   */
+  GA4_MEASUREMENT_ID: z
+    .string()
+    .trim()
+    .regex(
+      /^G-[A-Z0-9]+$/,
+      "GA4_MEASUREMENT_ID must look like G-XXXXXXXXXX.",
+    )
+    .optional(),
+
+  GA4_API_SECRET: z
+    .string()
+    .trim()
+    .min(1)
+    .optional(),
+
   MANDRILL_API_KEY: z.string().min(1),
 
   MANDRILL_FROM_EMAIL: z.string().email(),

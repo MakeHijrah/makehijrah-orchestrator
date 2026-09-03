@@ -7,6 +7,10 @@ import {
   syncConsultationEarning,
 } from "../finance/finance.service.js";
 import { processServicePurchaseEvent } from "./service-purchase-webhook.js";
+import {
+  sendConsultationPurchaseEvent,
+  shouldSendPurchaseEvent,
+} from "../analytics/purchase.service.js";
 
 type ConsultationStatus =
   | "pending_acceptance"
@@ -27,6 +31,38 @@ type NormalizedStripeEvent = {
   capturedAt: string | null;
   cancelledAt: string | null;
   rawJson: Stripe.Event;
+  /*
+   * Analytics facts written into PaymentIntent metadata at
+   * checkout. They exist here so the GA4 purchase event can be
+   * built without a table read, which this path may not do
+   * (Amendment 004 section 10.3.3). Every one is optional and
+   * nothing transactional reads them.
+   */
+  analytics: PurchaseAnalyticsMetadata;
+};
+
+type PurchaseAnalyticsMetadata = {
+  gaClientId: string | null;
+  consultantId: string | null;
+  consultantName: string | null;
+  destination: string | null;
+};
+
+const readAnalyticsMetadata = (
+  metadata:
+    | Stripe.Metadata
+    | null
+    | undefined,
+): PurchaseAnalyticsMetadata => {
+  const read = (key: string): string | null =>
+    metadata?.[key]?.trim() || null;
+
+  return {
+    gaClientId: read("ga_client_id"),
+    consultantId: read("consultant_id"),
+    consultantName: read("consultant_name"),
+    destination: read("destination"),
+  };
 };
 
 /*
@@ -150,6 +186,10 @@ const normalizePaymentIntentEvent = (
         capturedAt: null,
         cancelledAt: null,
         rawJson: event,
+        analytics:
+          readAnalyticsMetadata(
+            paymentIntent.metadata,
+          ),
       };
 
     case "payment_intent.canceled":
@@ -172,6 +212,10 @@ const normalizePaymentIntentEvent = (
         cancelledAt:
           eventTimestamp,
         rawJson: event,
+        analytics:
+          readAnalyticsMetadata(
+            paymentIntent.metadata,
+          ),
       };
 
     case "payment_intent.succeeded":
@@ -194,6 +238,10 @@ const normalizePaymentIntentEvent = (
           eventTimestamp,
         cancelledAt: null,
         rawJson: event,
+        analytics:
+          readAnalyticsMetadata(
+            paymentIntent.metadata,
+          ),
       };
 
     default:
@@ -316,6 +364,9 @@ const normalizeRefundEvent = async (
       capturedAt: null,
       cancelledAt: null,
       rawJson: event,
+      analytics: readAnalyticsMetadata(
+        paymentIntent.metadata,
+      ),
     },
   };
 };
@@ -785,6 +836,93 @@ export const processStripeWebhookEvent =
       } catch (error) {
         console.error(
           "Consultant booking notification scheduling threw during webhook processing",
+          {
+            consultationId:
+              normalized.consultationId,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unknown error",
+          },
+        );
+      }
+    }
+
+    /*
+     * GA4 `purchase`, on CAPTURE.
+     *
+     * Not on authorization. A consultation can be authorized and
+     * then declined or timed out and never captured, so reporting
+     * authorization as revenue reports money that was not
+     * collected. Capture is also what the finance ledger credits,
+     * so the analytics and the ledger agree by construction.
+     *
+     * Gated on this delivery having done the work, which is the
+     * opposite of the finance and notification hooks above. Those
+     * re-run on redelivery because repeating them repairs; this
+     * one must not, because GA4 does not reliably discard a
+     * duplicate purchase and a redelivered event would book the
+     * revenue twice. row.processed with already_processed false
+     * means exactly one delivery reaches here per Stripe event,
+     * and the payments table's unique stripe_event_id is what
+     * makes that true.
+     *
+     * Secondary to the payment and swallowed on failure, like
+     * every other side effect here: analytics must never be the
+     * reason Stripe redelivers a payment.
+     */
+    if (
+      shouldSendPurchaseEvent({
+        eventType: normalized.eventType,
+        consultationId:
+          normalized.consultationId,
+        processed: row.processed,
+        alreadyProcessed:
+          row.already_processed,
+      })
+    ) {
+      try {
+        const outcome =
+          await sendConsultationPurchaseEvent({
+            consultationId:
+              normalized.consultationId,
+            amountMinor:
+              normalized.amountCents,
+            currency: normalized.currency,
+            gaClientId:
+              normalized.analytics.gaClientId,
+            consultantId:
+              normalized.analytics.consultantId,
+            consultantName:
+              normalized.analytics
+                .consultantName,
+            destination:
+              normalized.analytics.destination,
+          });
+
+        /*
+         * Logged so the unattributed slice is measurable from
+         * the server as well as from GA: a booking whose
+         * checkout carried no _ga value cannot join the session
+         * that produced it.
+         */
+        if (
+          outcome.clientIdSource ===
+          "server_fallback"
+        ) {
+          console.warn(
+            "GA4 purchase sent without a browser client id",
+            {
+              consultationId:
+                normalized.consultationId,
+              sent: outcome.sent,
+              reason: outcome.reason,
+            },
+          );
+        }
+      } catch (error) {
+        console.error(
+          "GA4 purchase event threw during webhook processing",
           {
             consultationId:
               normalized.consultationId,
