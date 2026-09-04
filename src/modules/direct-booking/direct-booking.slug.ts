@@ -125,6 +125,31 @@ const RESERVED_SLUGS: readonly string[] = [
   "webhook",
   "webhooks",
   "www",
+
+  /*
+   * The blog surface.
+   *
+   * /blog is a top-level route the frontend owns, so a consultant
+   * claiming the slug "blog" would shadow the entire blog. The
+   * syndication roots are reserved with it because the blog owns
+   * them too: a feed served from /rss.xml cannot coexist with a
+   * consultant at the same path. sitemap.xml and robots.txt are
+   * already reserved above and are not repeated here.
+   *
+   * The dotted forms are not redundant. Reserved names are matched
+   * after normalization, and "rss.xml" normalizes to "rss-xml",
+   * which is a different string from "rss" — so a consultant could
+   * otherwise claim the hyphenated form of a real file path.
+   */
+  "blog",
+  "blogs",
+  "feed",
+  "feeds",
+  "rss",
+  "atom",
+  "rss.xml",
+  "feed.xml",
+  "atom.xml",
 ];
 
 export const SLUG_MIN_LENGTH = 3;

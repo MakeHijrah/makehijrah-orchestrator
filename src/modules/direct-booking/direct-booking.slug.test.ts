@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  buildDefaultSlugCandidates,
   buildDirectBookingUrl,
   isReservedSlug,
   normalizeSlug,
@@ -168,6 +169,121 @@ describe("Reserved slugs", () => {
         isReservedSlug(name),
         false,
         `${name} must not be reserved`,
+      );
+    }
+  });
+});
+
+/*
+ * The blog is a top-level surface added after Amendment 011, so
+ * its routes need the same protection every other top-level route
+ * has. A consultant at /blog would shadow the whole blog.
+ */
+describe("Reserved slugs: the blog surface", () => {
+  it("reserves blog and its near misses", () => {
+    for (const value of ["blog", "blogs"]) {
+      assert.equal(
+        isReservedSlug(value),
+        true,
+        `${value} must be reserved`,
+      );
+    }
+  });
+
+  it("reserves the syndication roots the blog owns", () => {
+    for (const value of [
+      "feed",
+      "feeds",
+      "rss",
+      "atom",
+      "rss.xml",
+      "feed.xml",
+      "atom.xml",
+    ]) {
+      assert.equal(
+        isReservedSlug(value),
+        true,
+        `${value} must be reserved`,
+      );
+    }
+  });
+
+  it("reserves them however they are typed", () => {
+    /*
+     * Reservation is matched after normalization, so casing,
+     * padding and the dotted form all have to land on the same
+     * reserved value.
+     */
+    for (const value of [
+      "Blog",
+      "  blog  ",
+      "BLOG",
+      "rss.xml",
+      "RSS.XML",
+    ]) {
+      assert.equal(
+        isReservedSlug(value),
+        true,
+        `${value} must be reserved`,
+      );
+    }
+  });
+
+  it("rejects blog through the validator with SLUG_RESERVED", () => {
+    const result = validateConsultantSlug("blog");
+
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.ok === false && result.code,
+      "SLUG_RESERVED",
+    );
+  });
+
+  it("never offers blog to a consultant named Blog", () => {
+    /*
+     * The generator validates every candidate, so reserving the
+     * name is what makes it skip it rather than a second list
+     * that could drift.
+     */
+    const candidates =
+      buildDefaultSlugCandidates("Blog");
+
+    assert.ok(
+      candidates.length > 0,
+      "a consultant named Blog must still get a slug",
+    );
+
+    assert.equal(
+      candidates.includes("blog"),
+      false,
+      "the generator offered the reserved slug",
+    );
+  });
+
+  it("leaves ordinary consultant slugs alone", () => {
+    /*
+     * The reserved set is a cost: every entry is a name no
+     * consultant can have. These must not have been caught by the
+     * new entries.
+     */
+    for (const value of [
+      "aisha",
+      "blogger",
+      "bloggs",
+      "feedback",
+      "atomic",
+      "russell",
+    ]) {
+      assert.equal(
+        isReservedSlug(value),
+        false,
+        `${value} must remain available`,
+      );
+
+      assert.equal(
+        validateConsultantSlug(value).ok,
+        true,
+        `${value} must still validate`,
       );
     }
   });
