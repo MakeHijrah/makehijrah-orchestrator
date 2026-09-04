@@ -806,6 +806,22 @@ Generic dashboard purchases show only a generic success message; **no consultati
 
 ---
 
+## 3e. Blog manager invite — admin role, PROJECT_LOCK Amendment 018
+
+### `POST /api/admin/blog-managers/invite` — admin
+
+Body, strict — `{ email, note? }`. `note` is optional, free text, stored on the grant for the admin's own reference.
+
+Resolves or creates the Supabase auth account **server-side**, using the service role. The account's `role` stays `client` — this endpoint never sets `role = 'admin'` or any other value, because blog authorship is a capability grant (`blog_managers`), never a `user_role`. See DATABASE_SCHEMA.md §22–29 and Amendment 018 §5.
+
+A repeat invite for an address that already holds a grant **re-sends the email**; it is not an error. The Mandrill email links to `/login?redirect=%2Fblog%2Fadmin`.
+
+Every failure — account creation, account lookup — returns a reason without any raw Supabase or PostgreSQL text.
+
+No other blog endpoint exists on the orchestrator. Reading and writing posts, taxonomy and redirects is Supabase-direct, under the RLS policies in DATABASE_SCHEMA.md §22–29 — see §4 below.
+
+---
+
 ## 3b. Application settings — public read, admin write
 
 Added by PROJECT_LOCK Amendment 007, applied as migration 025. `public.app_settings` has RLS enabled with **zero policies** and `anon`/`authenticated` revoked, so it is unreachable from the browser by construction. These four endpoints are the only access path. There is deliberately **no** generic settings endpoint accepting arbitrary keys.
@@ -902,6 +918,11 @@ service_requests (own / admin)                   → dashboards
 messages (participant)                           → consultation room, 30s polling
 profiles (own)                                   → account settings
 consultant_payout_settings (own / admin)         → payout method section, admin finance
+blog_posts (published, or all for a manager)     → public blog, manager editor
+blog_authors, blog_categories, blog_tags,
+  blog_post_tags, blog_redirects                 → public blog, manager editor (full write for a manager)
+blog_post_revisions (manager/admin select only)   → manager editor, revision history
+blog_managers (own grant / admin)                → manager's own grant visibility, admin manager list
 ```
 
 **`consultant_payout_settings` is the one finance table Lovable writes (migration 039).** A consultant reads, inserts and updates **their own** row — that is the Payout Method section of the consultant profile — and an admin reads every row, which is the "Current payout method" line on Consultant Finance Detail. A client and an anonymous visitor get nothing: `anon` holds no privilege on the table at all, and every policy scopes through `my_consultant_id()`, which is null for a client. Upsert on the `consultant_id` primary key; do **not** send a `consultant_id` belonging to anyone else, because the `INSERT` policy's `WITH CHECK` overrules it rather than trusting it. `payout_method` is `'paypal'` or `'wise'`; `payout_email` is required whenever a method is set. There is no `DELETE` — clearing a method is an update to null. No other finance table is writable from the browser.
@@ -920,12 +941,15 @@ consultant_payout_settings (own / admin)         → payout method section, admi
 
 `services` is read-only for every authenticated role, admin included — the database enforces this, not just convention (migration 022). Catalog changes go through §3a.
 
+**The editorial blog (PROJECT_LOCK Amendment 018) is almost entirely Supabase-direct** — `§3e` above is the only orchestrator endpoint the blog has. A manager's full write access to `blog_posts` and its taxonomy is `is_blog_manager()`-gated RLS, not an admin endpoint; `blog_post_revisions` is written only by the `blog_posts_after_write()` trigger and is never directly insertable, updatable or deletable by any client role, manager or admin included (migration 054). `blog_managers` writes are admin-only by RLS. No sitemap, RSS or robots route exists on the orchestrator — that surface is frontend/infra, reading the same public policies directly.
+
 ---
 
 ## 5. Background jobs (BullMQ, not endpoints — listed so nobody invents endpoints for them)
 
 | Job | Schedule | Action |
 |---|---|---|
+| `blog-publishing` | every 5 min | `scheduled` blog post with `scheduled_for <= now()` → `published`, `published_at = coalesce(published_at, scheduled_for, now())`, via `publish_due_blog_posts()` (migration 052; grant hardened by migration 056). One set-based `UPDATE`, no `FOR UPDATE SKIP LOCKED` needed — ordinary row locking makes concurrent instances safe by construction. Not BullMQ: `setInterval` plus an optional Redis `SET NX` cycle lock, matching `draft-expiry`'s own pattern rather than the aspirational BullMQ label this table's header carries for the older rows below. |
 | `expire-drafts` | **every 60 s** | `draft` with `created_at + 30 min <= now()` → `cancelled`, oldest first, in batches, via `expire_stale_draft_consultations` (migration 047). One set-based statement with `FOR UPDATE SKIP LOCKED`, so replicas divide the work; `status = 'draft'` is the only status it can read and `cancelled` the only one it can write. Runs without any browser request. |
 | `authorization-timeout` | every 15 min | `pending_acceptance` + `payment_authorized_at < now()-48h` → cancel Stripe auth → `admin_attention` (reason `timeout`) → email admin + client |
 | `consultant-reminder` | every 15 min | `pending_acceptance` at 24h mark → reminder email to consultant (once, tracked via jsonb flag or sent-window logic) |

@@ -35,6 +35,10 @@ import {
   startDraftExpiryWorker,
   stopDraftExpiryWorker,
 } from "./modules/consultations/draft-expiry.worker.js";
+import {
+  startBlogPublishingWorker,
+  stopBlogPublishingWorker,
+} from "./modules/blog/blog-publishing.worker.js";
 import { registerDeclineRoute } from "./modules/consultations/decline.route.js";
 import { registerDirectBookingRoutes } from "./modules/direct-booking/direct-booking.route.js";
 import { registerDraftConsultationRoute } from "./modules/consultations/draft.route.js";
@@ -296,6 +300,7 @@ const start =
       startAuthorizationTimeoutNotificationWorker();
       startAuthorizationTimeoutWorker();
       startDraftExpiryWorker();
+      startBlogPublishingWorker();
       startOAuthHealthWorker();
       startOAuthHealthAlertWorker();
     } catch (error) {
@@ -308,6 +313,7 @@ const shutdown =
   async (): Promise<void> => {
     await stopOAuthHealthAlertWorker();
     await stopOAuthHealthWorker();
+    await stopBlogPublishingWorker();
     await stopDraftExpiryWorker();
     await stopAuthorizationTimeoutWorker();
     await stopAuthorizationTimeoutNotificationWorker();

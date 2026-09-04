@@ -661,6 +661,32 @@ Verification: `MIGRATION_051_VERIFICATION.sql`, **17 checks against PostgreSQL 1
 
 ---
 
+## 9r. Editorial blog backend recovery — migrations 052–056, PROJECT_LOCK Amendment 018 **[D]**
+
+The blog subsystem existed only in the frontend repository: two migrations authored and applied to production from there, numbered 051 and 052, colliding with this repository's own history at 051. This repository's own migration history therefore could not reproduce the blog schema in a fresh environment, and one live defect — blog post creation and editing failing outright — could not be fixed from here until the source was available.
+
+**Canonicalized, not reapplied.** The two frontend migrations were imported byte-for-byte (save for renumbered header cross-references) as migrations 052 and 053. **They are historical record. Applying them to production would attempt to recreate objects that already exist there and must not be run.** A fresh replay of migrations 001 through 056 was proven clean, and produces the eight blog tables, `blog_post_status`, and the migration-053 email-aware `is_blog_manager()` — confirmed by inspecting the function body after replay, not assumed from the file.
+
+**The reported defect, fixed — migration 054, authored, not yet applied.** `blog_posts_after_write()` ran as the calling role with no `SECURITY` clause; `authenticated` holds only `SELECT` on `blog_post_revisions`; every post create or edit failed the moment the trigger tried to write a revision. Reproduced against a clean replay before fixing it — the write fails as an RLS violation on a fresh database (no matching write policy exists for `authenticated` on that table), which is the same class of failure as the literal "permission denied" text originally reported, reached by a slightly different path depending on the exact grant state in production, which this workspace cannot inspect directly. The fix (`SECURITY DEFINER`, pinned `search_path`) resolves both. `MIGRATION_054_VERIFICATION.sql`, 16 checks against PostgreSQL 16: a manager can create and edit a post, a revision is created automatically and attributed to the caller, a non-editorial edit creates none, a manager and an anon key both fail to write `blog_post_revisions` directly, a non-manager client cannot write a post, an admin can.
+
+**Two further live grant leaks found by re-running this repository's own migration 036 verification suite against the newly-canonicalized blog schema** — the audit this task required, not a hunt: `blog_posts_before_write()`, `blog_touch_updated_at()` and `link_blog_manager_profile()` (all postdating migration 036) still carried Supabase's ambient default `EXECUTE` grant to `anon`/`authenticated`, closed alongside the primary fix in migration 054; and `publish_due_blog_posts()`'s own `REVOKE ALL FROM PUBLIC` never removed the same ambient grant held by name, closed by migration 056 (authored, not yet applied), which also proves the publication lifecycle end to end — a due post publishes with `published_at` set from `scheduled_for`, a not-yet-due post and a draft are left alone, and a second call publishes nothing further.
+
+**An open redirect closed — migration 055, authored, not yet applied.** `blog_redirects`' leading-slash constraint (`like '/%'`) accepted `//evil.example`, a scheme-relative URL. Replaced with a shared `is_safe_internal_path()` function rejecting a `//` prefix, an embedded `://`, a backslash (the same open-redirect class, reachable through browser URL normalization even without a literal `//`), and any control character. Before installing the constraint the migration scans existing rows and refuses to apply over an unsafe one, naming it — proven by seeding an unsafe row against a database with 001–054 applied, confirming the real migration file aborts with nothing committed, and confirming it then succeeds once corrected. This repository owns no redirect-*serving* code to harden as defense in depth; that is frontend/infra, named as a follow-up rather than silently skipped.
+
+**Scheduled publishing wired.** `publish_due_blog_posts()` existed with no caller anywhere in this backend. `src/modules/blog/blog-publishing.worker.ts`, modelled on `draft-expiry.worker.ts`, polls every 5 minutes; the RPC's own single-statement `UPDATE` makes concurrent orchestrator instances safe without a Redis lock being load-bearing.
+
+**`blog` reserved as a consultant slug**, alongside `blogs`, `feed`, `feeds`, `rss`, `atom` and their `.xml` forms — landed in an earlier pass of this same recovery, `commit b66ca9a`.
+
+**Audited and left alone, matching what "do not widen access merely to make tests pass" asks for in the other direction too:** `POST /api/admin/blog-managers/invite` — admin-only, strict body, service-role account provisioning, `role` stays `client`, re-invite re-sends, correct Mandrill redirect. No code changed.
+
+**Governance:** PROJECT_LOCK Amendment 018 (new). `DATABASE_SCHEMA.md` §22–29, `API_CONTRACT.md` §3e/§4/§5 updated.
+
+**840 tests pass** (up from 827 before this recovery — 6 reserved-slug tests, 7 blog-publishing tests). Typecheck, build and `git diff --check` clean.
+
+**Not fixed here:** production has not been inspected directly from this workspace — no `pg_cron` access, no live `blog_redirects` data to scan. Migrations 054, 055 and 056 must be applied to staging, then production, in that order, before the reported defect is actually resolved live; until then the blog remains broken exactly as reported. The redirect-serving edge handler (frontend/infra) is not hardened by any change here.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -788,12 +814,14 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `PROJECT_LOCK_AMENDMENT_014_DIRECT_BOOKING_ONLY.md`
 - `PROJECT_LOCK_AMENDMENT_015_CONSULTANT_BOOKING_NOTIFICATION.md`
 - `PROJECT_LOCK_AMENDMENT_016_ACCEPTANCE_CALENDAR_RECOVERY.md`
+- `PROJECT_LOCK_AMENDMENT_017_GOOGLE_SCOPE_GATE.md`
+- `PROJECT_LOCK_AMENDMENT_018_EDITORIAL_BLOG_SUBSYSTEM.md`
 - `FINANCE_DIRECT_BOOKING_BASELINE.md` — the frozen finance + direct booking release baseline
 - `DATABASE_SCHEMA.md`
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 051
+- `supabase/migrations/` — migrations 001 through 056 (052–053 canonicalized from the frontend repository and already live in production; 054–056 authored, not yet applied)
 
 ---
 

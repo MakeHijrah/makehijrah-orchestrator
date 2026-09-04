@@ -869,6 +869,152 @@ RLS on, exactly one `SELECT` policy each, no write policy anywhere. `anon` holds
 
 ---
 
+## 22–29. Editorial blog (migrations 052–053; 054–056 authored, not applied)
+
+Eight tables, taking the model to 29. Migrations 052 and 053 are the canonical, byte-for-byte copies of SQL authored in the frontend repository and already applied to production from there (`migration_051_blog.sql` and `migration_052_blog_grants_and_email_invites.sql`, renumbered on import so their numbers do not collide with this repository's own history) — **imported for reproducibility, never to be reapplied**. See PROJECT_LOCK Amendment 018 for the full access model and rationale; this section is the schema reference.
+
+```sql
+create type blog_post_status as enum
+  ('draft', 'scheduled', 'published', 'archived');
+
+create table blog_managers (
+  id          uuid primary key default gen_random_uuid(),
+  profile_id  uuid references profiles(id) on delete cascade,  -- nullable; informational
+  email       text not null,                                    -- the grant's real identity
+  granted_by  uuid not null references profiles(id),
+  granted_at  timestamptz not null default now(),
+  note        text
+);
+-- unique index on lower(btrim(email))
+
+create table blog_authors (
+  id          uuid primary key default gen_random_uuid(),
+  profile_id  uuid references profiles(id) on delete set null,  -- nullable; a byline need not be a login
+  name        text not null,
+  slug        text not null unique,
+  bio         text,
+  avatar_url  text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+create table blog_categories (
+  id               uuid primary key default gen_random_uuid(),
+  name             text not null,
+  slug             text not null unique,
+  description      text,
+  seo_title        text,
+  seo_description  text,
+  sort_order       int  not null default 0,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+
+create table blog_tags (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  slug        text not null unique,
+  created_at  timestamptz not null default now()
+);
+
+create table blog_posts (
+  id                  uuid primary key default gen_random_uuid(),
+  slug                text not null unique,
+  status              blog_post_status not null default 'draft',
+  title               text not null,
+  excerpt             text,
+  body_html           text not null default '',
+  body_text           text not null default '',   -- derived by trigger, never written directly
+  reading_minutes     int  not null default 1,     -- derived by trigger
+  featured_image_url  text,
+  featured_image_alt  text,
+  seo_title           text,
+  seo_description     text,
+  canonical_url       text,
+  noindex             boolean not null default false,
+  og_title            text,
+  og_description      text,
+  og_image_url        text,
+  author_id           uuid references blog_authors(id) on delete set null,
+  category_id         uuid references blog_categories(id) on delete set null,
+  published_at        timestamptz,   -- required when status = 'published'
+  scheduled_for       timestamptz,   -- required when status = 'scheduled'
+  created_by          uuid references profiles(id),
+  updated_by          uuid references profiles(id),
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+
+create table blog_post_tags (
+  post_id uuid not null references blog_posts(id) on delete cascade,
+  tag_id  uuid not null references blog_tags(id) on delete cascade,
+  primary key (post_id, tag_id)
+);
+
+create table blog_post_revisions (
+  id          uuid primary key default gen_random_uuid(),
+  post_id     uuid not null references blog_posts(id) on delete cascade,
+  title       text not null,
+  excerpt     text,
+  body_html   text not null,
+  edited_by   uuid references profiles(id),
+  created_at  timestamptz not null default now()
+);
+
+create table blog_redirects (
+  id           uuid primary key default gen_random_uuid(),
+  from_path    text not null unique,
+  to_path      text not null,
+  status_code  int  not null default 301,     -- in (301, 302, 308)
+  created_at   timestamptz not null default now(),
+  created_by   uuid references profiles(id)
+);
+```
+
+**`blog_post_status`.** `published` requires `published_at`; `scheduled` requires `scheduled_for` — both are table `CHECK` constraints, not application discipline. `published_at` is stamped once, by `blog_posts_before_write()`, and never restamped: an edit is not a new publication.
+
+**`blog_managers` is keyed on email, not `profile_id`.** `profile_id` is nullable and merely informational, filled in by a trigger on `profiles` the first time the person signs in; the grant itself is decided by `is_blog_manager()` matching either identity. See Amendment 018 §5 for why — no public sign-up exists, so a grant issued before the account does is the only way an outside contractor gets one at all.
+
+**`blog_post_revisions.edited_by` and every INSERT into this table is written only by `blog_posts_after_write()`, a trigger on `blog_posts`.** No role, manager or admin included, holds `INSERT`, `UPDATE`, `DELETE` or `TRUNCATE` on it directly (migration 054). See "Revision trigger security" below.
+
+### Revision trigger security (migration 054)
+
+As imported, `blog_posts_after_write()` carried no `SECURITY` clause and ran as the calling role (`authenticated`), which migration 053 grants `SELECT` only on `blog_post_revisions` — so every post create and every editorial update failed the moment the trigger tried to write a revision. Migration 054:
+
+- makes the function `security definer` with `set search_path = pg_catalog, public`, so the write happens as the function's owner (the same role that owns `blog_post_revisions`) regardless of the caller's grant;
+- revokes `EXECUTE` on the function itself from `anon` and `authenticated` — firing a trigger does not consult it, matching the convention migration 036 established for every other trigger function in this schema;
+- revokes `ALL` (not only `INSERT`/`UPDATE`/`DELETE`) on `blog_post_revisions` from `anon` and `authenticated`, then restates `SELECT` for `authenticated` explicitly. `TRUNCATE` is not filtered by RLS — there is no `FOR TRUNCATE` policy type — so the table grant is the only thing that can stop an authenticated caller wiping the entire table in one statement, and a narrower revoke would have left that open;
+- applies the identical `EXECUTE` revoke to the blog's three other trigger functions (`blog_posts_before_write`, `blog_touch_updated_at`, `link_blog_manager_profile`), none of which needed a `SECURITY` change but all of which postdate migration 036 and had never been brought into its pattern.
+
+The revision decision logic — skip a revision when nothing editorial changed, attribute to `auth.uid()` — is byte-for-byte unchanged.
+
+### Redirect hardening (migration 055)
+
+The imported constraint (`from_path like '/%'`, `to_path like '/%'`) accepts `//evil.example` — a scheme-relative URL a browser resolves against the current protocol. Migration 055 replaces both with `is_safe_internal_path(text)`, an `IMMUTABLE` SQL function requiring exactly one leading slash, no embedded `://`, no backslash (some browsers normalize `\` to `/`, which can produce the same scheme-relative result through a string that is never literally `//`), no control character, non-empty. Applied identically to `from_path` and `to_path`. `blog_redirects_no_self` and `blog_redirects_status` are unchanged. Before installing the constraint the migration scans existing rows and raises, naming any that would fail it, rather than applying anything over unsafe data.
+
+This backend owns the constraint; it owns no redirect-serving code. The edge handler that actually issues the 301/302/308 is frontend/infra and is not hardened by this migration — see Amendment 018 §11.
+
+### Scheduled publishing (migration 052's function; migration 056 hardens its grant)
+
+`publish_due_blog_posts() returns integer`, `security definer`: one `UPDATE` over every row where `status = 'scheduled' and scheduled_for <= now()`, setting `published_at = coalesce(published_at, scheduled_for, now())`. Idempotent — a second call finds nothing left matching the predicate for a post it already published.
+
+As imported, `revoke all on function publish_due_blog_posts() from public;` did not remove Supabase's ambient default `EXECUTE` grant to `anon`/`authenticated` held **by name** — the identical fact migration 036 exists to correct elsewhere, made by an author who had not seen that migration. Confirmed against a fresh replay of migrations 001–055: an anon key could call this function directly. Migration 056 revokes it from `PUBLIC`, `anon` and `authenticated` by name.
+
+`src/modules/blog/blog-publishing.worker.ts` calls it every five minutes, modelled on `draft-expiry.worker.ts`: the RPC's own single-statement `UPDATE` is what makes concurrent orchestrator instances safe, and the Redis cycle lock is an optimisation against redundant calls, not a correctness dependency.
+
+### Access
+
+| Table | anon | authenticated (non-manager) | blog manager | admin |
+|---|---|---|---|---|
+| `blog_posts` | published only | published only | full | full |
+| `blog_authors`, `blog_categories`, `blog_tags`, `blog_post_tags`, `blog_redirects` | read | read | full | full |
+| `blog_post_revisions` | **none** | **none** | **select only** | select only |
+| `blog_managers` | **none** | own grant, by profile or email | own grant | full — the only role that may grant or revoke |
+
+`is_blog_manager()` (`security definer`, `set search_path = public`) returns true for a row in `blog_managers` matching the caller by `profile_id` or by case-insensitive email against the JWT, **or** for `is_admin()` — an admin is an implicit manager. It is deliberately callable by both `anon` and `authenticated`, matching `is_admin()`'s own precedent: `blog_posts_select_public` is `to anon, authenticated` and evaluates it in its `USING` clause, so anon visitors must be able to call it even though the answer for them is always false.
+
+---
+
 ## `updated_at` trigger (shared)
 
 ```sql
