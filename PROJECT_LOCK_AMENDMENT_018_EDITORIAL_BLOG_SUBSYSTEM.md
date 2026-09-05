@@ -85,6 +85,17 @@ A blog manager holds a valid JWT, and that JWT works against PostgREST directly 
 
 **The database now enforces the shape, on every write path, for every role.**
 
+The approved vocabulary is the current frontend contract:
+
+```
+tags        p br strong em b i u ul ol li h2 h3 a
+            s del code pre blockquote hr
+attributes  href title rel target — on <a> only, on nothing else
+schemes     http https mailto, or a safe internal path
+```
+
+The six formatting tags beyond the original set carry no attributes, exactly like the rest. None of them can execute anything; they are typography.
+
 ### It rejects; it never rewrites
 
 PostgreSQL has no HTML parser. A regex sanitizer that *mutates* markup is the classic source of mutation-XSS — the rewriter and the browser disagree about where a tag ends and the attacker engineers the disagreement. `is_safe_blog_html()` answers one question and the write is refused if the answer is no. A rejecter's failure mode is a refused write; a rewriter's is a stored XSS.
@@ -95,6 +106,17 @@ Verified empirically against sanitize-html 2.17.7 with the approved allowlist: *
 
 The rule strips every tag unambiguously on the allowlist and refuses the row if any `<` or `>` survives. Nothing unrecognised is ever silently accepted.
 
+### Vocabulary, not serialization
+
+The validator enforces which elements may exist, which attributes may appear on them, and which URL shapes an `href` may take. It does **not** enforce the frontend's serialization:
+
+| | |
+|---|---|
+| **Database** | safe vocabulary, safe `href`, no executable elements or attributes |
+| **Frontend** | canonicalises surviving links to `target="_blank" rel="noopener noreferrer nofollow"` |
+
+`rel`, `target` and `title` accept any text free of quotes and angle brackets, because none of them can execute. Requiring an exact string or a fixed attribute order would make storage brittle against a harmless editor change while adding nothing to security.
+
 ### Deliberate non-goals
 
 | | |
@@ -103,11 +125,13 @@ The rule strips every tag unambiguously on the allowlist and refuses the row if 
 | **Not a decoder** | `&lt;script&gt;` is accepted because it *is* text — it renders as literal characters. A post explaining HTML stays writable. Holds as long as stored HTML is inserted once, never decoded and re-inserted. |
 | **Not applied to revisions** | The archive is written only by the trigger from an already-validated row, so new revisions are compliant by construction. Historical rows are records of what was published and are not rewritten to satisfy a later rule. All 30 existing revisions were audited and pass anyway. |
 
-### One gap it closes that the frontend does not
+### The two layers agree on protocol-relative hrefs
 
-sanitize-html with this policy **does not strip a protocol-relative `href="//evil.example"`** — it survives the frontend sanitizer today. The backend refuses it, reusing migration 055's `is_safe_internal_path` rather than forming a second opinion about what a safe path is.
+The frontend sets `allowProtocolRelative: false` and strips `href="//evil.example"`. The backend refuses it too, reusing migration 055's `is_safe_internal_path` rather than forming a second opinion about what a safe path is. **Both layers reject it** — this is agreement, not one layer covering for the other.
 
 ### The error contract
+
+service_role holds `EXECUTE` on the validator **explicitly**, not through Supabase's ambient default privileges. The BEFORE trigger calls the validator as the invoking role, and service_role can write `blog_posts` through Supabase's own table grants — so without a stated grant every orchestrator write would break the day that platform default changed. Migration 056's lesson, applied.
 
 A refused write is SQLSTATE `23514` with the message exactly `unsafe_blog_html` and a `HINT` naming the allowed vocabulary. A BEFORE trigger raises it in front of the CHECK constraint deliberately: a bare constraint attaches `DETAIL: Failing row contains (...)`, which PostgREST forwards as `details`, echoing the rejected markup back. That is the writer's own payload so it discloses nothing — but an admin UI that renders an API error into the page would be rendering attacker-authored markup, turning a refused write into self-XSS. The trigger's message carries no echo of the submission.
 

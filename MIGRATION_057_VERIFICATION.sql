@@ -42,6 +42,9 @@
 --   20  scheduled publishing is unaffected
 --   21  update path is enforced, not only insert
 --   22  the BEFORE trigger fronts the constraint
+--   24  service_role holds EXECUTE explicitly, not ambiently
+--   25  service_role CAN write safe HTML
+--   26  service_role CANNOT write unsafe HTML
 --   23  the error carries NO echo of the submitted payload,
 --       in message or in DETAIL
 -- ============================================================
@@ -111,7 +114,17 @@ begin
       ('escaped in attr'  , '<p><a href="https://e.test" title="a &gt; b">x</a></p>'),
       ('non-ascii'        , '<p>As-salāmu ʿalaykum — “quotes”</p>'),
       ('empty'            , ''),
-      ('tabs newlines'    , E'<p>a\tb\nc</p>')
+      ('tabs newlines'    , E'<p>a\tb\nc</p>'),
+      ('blockquote'       , '<blockquote><p>Quoted text</p></blockquote>'),
+      ('pre code block'   , '<pre><code>const x = 1;</code></pre>'),
+      ('inline code'      , '<p><code>inline</code></p>'),
+      ('hr bare'          , '<hr>'),
+      ('hr self-closed'   , '<hr />'),
+      ('strikethrough s'  , '<p><s>old</s></p>'),
+      ('del'              , '<p><del>old</del></p>'),
+      ('code with entity' , '<pre><code>if (a &lt; b) {}</code></pre>'),
+      ('rel arbitrary'    , '<p><a href="https://e.test" rel="me">x</a></p>'),
+      ('target arbitrary' , '<p><a href="https://e.test" target="_self">x</a></p>')
     ) as t(l, h)
   loop
     if not public.is_safe_blog_html(v_html) then
@@ -120,7 +133,7 @@ begin
     end if;
   end loop;
 
-  raise notice 'PASS 3: all 20 legitimate editor constructs are accepted';
+  raise notice 'PASS 3: all 31 legitimate editor constructs are accepted';
 
   -- Check 4: CTA source syntax is literal text and must survive.
   if not public.is_safe_blog_html(
@@ -140,6 +153,7 @@ begin
       ('iframe'            , '<iframe srcdoc="x"></iframe>'),
       ('object'            , '<object data="x"></object>'),
       ('embed'             , '<embed src="x">'),
+      ('table'             , '<table><tr><td>x</td></tr></table>'),
       ('form'              , '<form action="https://evil.example">x</form>'),
       ('input'             , '<input name="a">'),
       ('button'            , '<button>x</button>'),
@@ -149,10 +163,6 @@ begin
       ('math'              , '<math><mtext></mtext></math>'),
       ('video'             , '<video src="x"></video>'),
       ('audio'             , '<audio src="x"></audio>'),
-      ('table'             , '<table><tr><td>x</td></tr></table>'),
-      ('blockquote'        , '<blockquote>x</blockquote>'),
-      ('pre code'          , '<pre><code>x</code></pre>'),
-      ('hr'                , '<p>a</p><hr>'),
       ('div style'         , '<div style="position:fixed">overlay</div>'),
       ('span class'        , '<span class="whatever">text</span>'),
       ('p onclick'         , '<p onclick="alert(1)">text</p>'),
@@ -163,6 +173,13 @@ begin
       ('a with onerror'    , '<a href="https://e.test" onerror="alert(1)">y</a>'),
       ('a no-space attr'   , '<a href="https://e.test"onerror="alert(1)">y</a>'),
       ('a with style'      , '<a href="https://e.test" style="x">y</a>'),
+      ('blockquote class'  , '<blockquote class="x">y</blockquote>'),
+      ('pre style'         , '<pre style="color:red">y</pre>'),
+      ('code onclick'      , '<code onclick="alert(1)">y</code>'),
+      ('hr id'             , '<hr id="x">'),
+      ('s class'           , '<s class="x">y</s>'),
+      ('del data-attr'     , '<del data-a="1">y</del>'),
+      ('blockquote cite'   , '<blockquote cite="https://e.test">y</blockquote>'),
       ('javascript:'       , '<a href="javascript:alert(1)">x</a>'),
       ('JaVaScRiPt:'       , '<a href="JaVaScRiPt:alert(1)">x</a>'),
       ('js with tab'       , E'<a href="java\tscript:alert(1)">x</a>'),
@@ -200,7 +217,7 @@ begin
     end if;
   end loop;
 
-  raise notice 'PASS 5, 6, 7: all 58 hostile payloads are refused';
+  raise notice 'PASS 5, 6, 7: all 62 hostile payloads are refused';
 end $$;
 
 
@@ -433,6 +450,87 @@ begin
   end if;
 
   raise notice 'PASS 15: anon still cannot write';
+end $$;
+
+
+-- Checks 24, 25 and 26: service_role.
+--
+-- The BEFORE trigger calls is_safe_blog_html as the INVOKING
+-- role, so any writer of blog_posts needs EXECUTE on it.
+-- service_role can write blog_posts through Supabase's own
+-- grants, so without that EXECUTE every orchestrator write would
+-- fail with "permission denied for function" the moment this
+-- migration applied.
+
+do $$
+declare
+  v_id uuid;
+  v_refused boolean := false;
+  v_msg text;
+begin
+  if not has_function_privilege(
+       'service_role', 'public.is_safe_blog_html(text)', 'execute') then
+    raise exception
+      'VERIFICATION FAILED 24: service_role cannot execute is_safe_blog_html; every service-role write to blog_posts would fail';
+  end if;
+
+  /*
+   * Explicitly granted, not merely inherited. Migration 056's
+   * lesson: an ambient Supabase default is not something to build
+   * on. Asserted by looking for service_role in the function's
+   * own ACL rather than trusting has_function_privilege, which
+   * cannot tell an explicit grant from an ambient one.
+   */
+  if not exists (
+    select 1
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    cross join lateral unnest(coalesce(p.proacl, '{}')) as acl(entry)
+    where n.nspname = 'public'
+      and p.proname = 'is_safe_blog_html'
+      and acl.entry::text like 'service_role=%'
+  ) then
+    raise exception
+      'VERIFICATION FAILED 24: service_role EXECUTE is not stated in the function ACL, only inherited';
+  end if;
+
+  raise notice 'PASS 24: service_role holds EXECUTE explicitly, not ambiently';
+
+  set local role service_role;
+
+  insert into public.blog_posts (slug, title, body_html)
+  values ('v57-service-safe', 'Service safe',
+          '<blockquote><p>Quoted</p></blockquote><pre><code>const x = 1;</code></pre><hr>')
+  returning id into v_id;
+
+  if v_id is null then
+    raise exception 'VERIFICATION FAILED 25: service_role could not write safe HTML';
+  end if;
+
+  raise notice 'PASS 25: service_role can write safe HTML';
+
+  begin
+    insert into public.blog_posts (slug, title, body_html)
+    values ('v57-service-xss', 'Service XSS', '<img src=x onerror=alert(1)>');
+    v_refused := false;
+  exception
+    when check_violation then
+      v_refused := true;
+      get stacked diagnostics v_msg = message_text;
+  end;
+
+  reset role;
+
+  if not v_refused then
+    raise exception 'VERIFICATION FAILED 26: service_role persisted unsafe HTML';
+  end if;
+
+  if v_msg <> 'unsafe_blog_html' then
+    raise exception
+      'VERIFICATION FAILED 26: service_role rejection message was %, expected unsafe_blog_html', v_msg;
+  end if;
+
+  raise notice 'PASS 26: service_role is refused unsafe HTML, with the same clean error';
 end $$;
 
 

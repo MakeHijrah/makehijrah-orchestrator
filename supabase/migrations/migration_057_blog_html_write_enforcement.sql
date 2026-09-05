@@ -101,8 +101,31 @@
 --
 -- The allowlist is exactly the frontend's approved contract:
 --   tags       p br strong em b i u ul ol li h2 h3 a
+--              s del code pre blockquote hr
 --   attributes href title rel target — on <a> only
 --   schemes    http https mailto, plus an internal path
+--
+-- The six formatting tags beyond the original set (s, del, code,
+-- pre, blockquote, hr) carry NO attributes, exactly like the rest.
+-- None of them can execute anything; they are typography.
+--
+-- WHAT THIS VALIDATOR IS FOR, AND WHAT IT IS NOT FOR.
+--
+-- It enforces a safe VOCABULARY: which elements may exist, which
+-- attributes may appear on them, and which URL shapes an href may
+-- take. It deliberately does NOT enforce the frontend's
+-- serialization. rel, target and title accept any text that
+-- contains no quote or angle bracket, because none of them can
+-- execute; requiring an exact string, or an attribute order,
+-- would make storage brittle against a harmless editor change
+-- while adding no security.
+--
+--   Database  — safe vocabulary, safe href, no executable
+--               elements or attributes.
+--   Frontend  — canonicalises surviving links to
+--               target="_blank" rel="noopener noreferrer nofollow".
+--
+-- Those are different jobs and the split is intentional.
 --
 -- Attributes are permitted on <a> and on nothing else, so
 -- <p onclick="..."> and <span class="..."> are refused by the
@@ -122,9 +145,18 @@ as $$
   stripped as (
     /*
      * Remove every tag that is unambiguously on the allowlist.
+     *
+     * Alternatives are ordered longest-first so the match is
+     * deterministic regardless of how the regex engine resolves
+     * an ambiguous alternation: 'strong' is tried before 's',
+     * 'blockquote' before 'b'.
+     *
      * Case-sensitive on purpose: sanitize-html lowercases tag and
      * attribute names, so <SCRIPT> and <P> are both non-conforming
      * and both must reject.
+     *
+     * br and hr are the two void elements. Both are accepted bare
+     * or self-closed; sanitize-html emits '<br />' and '<hr />'.
      *
      * Attribute values may not contain " < or >, which is what
      * makes the <a> pattern exact — a smuggled '>' inside a title
@@ -134,8 +166,8 @@ as $$
              regexp_replace(
                regexp_replace(
                  h,
-                 '</?(p|strong|em|b|i|u|ul|ol|li|h2|h3)>', '', 'g'),
-               '<br\s*/?>', '', 'g'),
+                 '</?(blockquote|strong|code|pre|del|h2|h3|li|ol|ul|em|b|i|p|s|u)>', '', 'g'),
+               '<(br|hr)\s*/?>', '', 'g'),
              '<a(\s+(href|title|rel|target)="[^"<>]*")*\s*>|</a>', '', 'g'
            ) as rest
     from input
@@ -169,10 +201,12 @@ as $$
         or m[1] ~ '^mailto:[^[:space:]"<>]+$'
         /*
          * Internal links reuse migration 055's rule rather than a
-         * second opinion about what a safe path is. It already
-         * refuses //host, ://, backslashes and control characters,
-         * which is precisely the protocol-relative case that the
-         * frontend's sanitize-html config does NOT strip today.
+         * second opinion about what a safe path is. It refuses
+         * //host, ://, backslashes and control characters.
+         *
+         * The frontend sets allowProtocolRelative: false and also
+         * refuses //evil.example. Both layers reject it; this is
+         * agreement, not one layer covering for the other.
          */
         or public.is_safe_internal_path(m[1])
       )
@@ -182,11 +216,13 @@ $$;
 comment on function public.is_safe_blog_html(text) is
   'Migration 057. True only for blog HTML entirely within the '
   'approved editorial contract: tags p br strong em b i u ul ol '
-  'li h2 h3 a; attributes href title rel target on <a> only; '
-  'hrefs limited to http, https, mailto or a safe internal path. '
-  'Validates, never rewrites. Enforced by the CHECK constraint on '
-  'blog_posts.body_html. Does NOT replace render-time '
-  'sanitization.';
+  'li h2 h3 a s del code pre blockquote hr; attributes href, '
+  'title, rel and target on <a> only and on no other tag; hrefs '
+  'limited to http, https, mailto or a safe internal path. '
+  'Enforces vocabulary, not serialization -- rel/target/title '
+  'take any quote-free, angle-free text, because canonicalising '
+  'them is the frontend sanitizer''s job. Validates, never '
+  'rewrites. Does NOT replace render-time sanitization.';
 
 revoke all on function public.is_safe_blog_html(text)
   from public, anon, authenticated;
@@ -203,6 +239,28 @@ revoke all on function public.is_safe_blog_html(text)
  */
 grant execute on function public.is_safe_blog_html(text)
   to authenticated;
+
+/*
+ * service_role needs this explicitly, and the reason is migration
+ * 056's lesson restated.
+ *
+ * The BEFORE trigger below calls this function as the INVOKING
+ * role, not as the owner. So any writer of blog_posts must be
+ * able to execute it, and service_role can write blog_posts --
+ * verified against production, where Supabase's own grants let
+ * the service key insert into the table directly.
+ *
+ * Today service_role also holds EXECUTE here, but only through
+ * Supabase's ambient default privileges: verified in production
+ * against is_safe_internal_path, which carries this identical
+ * revoke-then-grant pattern and which service_role can call.
+ * That is precisely the kind of ambient grant migration 056 was
+ * written about. Depending on it would mean every orchestrator
+ * write to blog_posts breaks the day the platform default
+ * changes -- so the grant is stated here rather than inherited.
+ */
+grant execute on function public.is_safe_blog_html(text)
+  to service_role;
 
 
 -- ------------------------------------------------------------
@@ -320,11 +378,18 @@ begin
     /*
      * The message is the whole contract: a stable token the
      * frontend can map, and nothing else. No offsets, no excerpt,
-     * no echo of what was submitted.
+     * no echo of what was submitted, and no HINT.
+     *
+     * The allowed vocabulary is deliberately NOT stated here. A
+     * database error is client-visible, and reciting the allowlist
+     * to an unauthenticated-in-spirit caller hands an attacker the
+     * exact shape of what passes without them having to probe for
+     * it. The contract is published where it belongs — in
+     * API_CONTRACT.md and Amendment 018 — for the people entitled
+     * to read it.
      */
     raise exception 'unsafe_blog_html'
-      using errcode = 'check_violation',
-            hint = 'Blog HTML must contain only p, br, strong, em, b, i, u, ul, ol, li, h2, h3 and a; attributes href, title, rel and target are permitted on a only; hrefs must be http, https, mailto or an internal path.';
+      using errcode = 'check_violation';
   end if;
 
   return new;
@@ -333,9 +398,10 @@ $$;
 
 comment on function public.blog_posts_validate_html() is
   'Migration 057. Refuses an unsafe body_html with the '
-  'deterministic message unsafe_blog_html and no echo of the '
-  'submitted content. The CHECK constraint of the same name is '
-  'the backstop beneath it.';
+  'deterministic message unsafe_blog_html and nothing else: no '
+  'echo of the submitted content, and no statement of the allowed '
+  'vocabulary. The CHECK constraint of the same name is the '
+  'backstop beneath it.';
 
 revoke all on function public.blog_posts_validate_html()
   from public, anon, authenticated;
