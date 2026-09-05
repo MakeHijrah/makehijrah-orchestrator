@@ -941,6 +941,21 @@ blog_managers (own grant / admin)                → manager's own grant visibil
 
 `services` is read-only for every authenticated role, admin included — the database enforces this, not just convention (migration 022). Catalog changes go through §3a.
 
+**Writing a blog post is subject to a database-enforced HTML contract (migration 057).** Because the blog is Supabase-direct, a manager's JWT can be used against PostgREST without the editor, so `blog_posts.body_html` is validated by the database rather than trusted from the client. A write carrying anything outside the approved vocabulary — tags `p br strong em b i u ul ol li h2 h3 a s del code pre blockquote hr`, attributes `href title rel target` on `<a>` only, hrefs limited to `http`, `https`, `mailto` or an internal path (protocol-relative `//host` is refused) — is refused on every path, for every role including admin and `service_role`.
+
+The rejection is deterministic and safe to map in a client:
+
+```
+SQLSTATE 23514
+message   unsafe_blog_html
+```
+
+Surfaced by PostgREST as HTTP **400** with `code: "23514"` and that exact `message`. Match on `message === "unsafe_blog_html"`, not on prose.
+
+**The error carries nothing else — no hint, and no echo of the rejected content.** The allowed vocabulary is documented here and in Amendment 018 for the people entitled to read it; a client-visible database error is not the place to recite it to a caller who would otherwise have to probe for it. A client mapping this code should supply its own guidance text from the contract above.
+
+Validation, never rewriting: the database refuses a bad write rather than silently altering an editor's markup. **This does not replace render-time sanitization** — stored HTML remains untrusted at every rendering sink. See Amendment 018 §10a.
+
 **The editorial blog (PROJECT_LOCK Amendment 018) is almost entirely Supabase-direct** — `§3e` above is the only orchestrator endpoint the blog has. A manager's full write access to `blog_posts` and its taxonomy is `is_blog_manager()`-gated RLS, not an admin endpoint; `blog_post_revisions` is written only by the `blog_posts_after_write()` trigger and is never directly insertable, updatable or deletable by any client role, manager or admin included (migration 054). `blog_managers` writes are admin-only by RLS. No sitemap, RSS or robots route exists on the orchestrator — that surface is frontend/infra, reading the same public policies directly.
 
 ---

@@ -971,6 +971,12 @@ create table blog_redirects (
 );
 ```
 
+**`blog_posts.body_html` is constrained, not merely conventional (migration 057).** The `unsafe_blog_html` CHECK constraint, fronted by the `trg_blog_posts_validate_html` BEFORE trigger, calls `is_safe_blog_html(text)` and refuses anything outside the approved editorial contract: tags `p br strong em b i u ul ol li h2 h3 a s del code pre blockquote hr`; attributes `href title rel target` on `<a>` only and on no other tag; hrefs limited to `http`, `https`, `mailto` or a safe internal path (reusing `is_safe_internal_path` from migration 055, so protocol-relative hrefs are refused — as they also are by the frontend, which sets `allowProtocolRelative: false`).
+
+It enforces **vocabulary, not serialization**: `rel`, `target` and `title` accept any quote-free, angle-free text, because none can execute and canonicalising them to `target="_blank" rel="noopener noreferrer nofollow"` is the frontend sanitizer's job. `service_role` is granted `EXECUTE` explicitly, since the BEFORE trigger calls the validator as the invoking role. It **validates and never rewrites** — PostgreSQL has no HTML parser, and a mutating regex sanitizer is how mutation-XSS happens. A refused write is SQLSTATE `23514`, message exactly `unsafe_blog_html`, with no echo of the submitted markup.
+
+This binds every writer identically — blog manager, admin, `service_role`, direct PostgREST — because RLS governs *who* writes and this governs *what*. `blog_post_revisions.body_html` is deliberately **not** constrained: it is an archive written only by the trigger from an already-validated row. Stored HTML must still be sanitized at render time; see Amendment 018 §10a.
+
 **`blog_post_status`.** `published` requires `published_at`; `scheduled` requires `scheduled_for` — both are table `CHECK` constraints, not application discipline. `published_at` is stamped once, by `blog_posts_before_write()`, and never restamped: an edit is not a new publication.
 
 **`blog_managers` is keyed on email, not `profile_id`.** `profile_id` is nullable and merely informational, filled in by a trigger on `profiles` the first time the person signs in; the grant itself is decided by `is_blog_manager()` matching either identity. See Amendment 018 §5 for why — no public sign-up exists, so a grant issued before the account does is the only way an outside contractor gets one at all.
