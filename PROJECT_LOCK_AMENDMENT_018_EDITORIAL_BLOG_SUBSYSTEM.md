@@ -77,6 +77,46 @@ This repository has no redirect-serving code of its own — see §11.
 
 Owned entirely by the frontend/edge layer, reading `blog_posts`, `blog_categories` and `blog_redirects` directly under the public RLS policies in §3. This backend defines no sitemap, feed or robots route and generates none of that content.
 
+## 10a. HTML at the write boundary — migration 057
+
+RLS on `blog_posts` decides **who** may write. Until migration 057 nothing decided **what**.
+
+A blog manager holds a valid JWT, and that JWT works against PostgREST directly — curl, a fetch from any origin, the Supabase client in a browser console. The editor's sanitizer is a frontend convenience the writer can simply skip, so any manager could persist `<img src=x onerror=alert(1)>` into `body_html`, and every reader of that post was protected only by the frontend remembering to sanitize on the way out.
+
+**The database now enforces the shape, on every write path, for every role.**
+
+### It rejects; it never rewrites
+
+PostgreSQL has no HTML parser. A regex sanitizer that *mutates* markup is the classic source of mutation-XSS — the rewriter and the browser disagree about where a tag ends and the attacker engineers the disagreement. `is_safe_blog_html()` answers one question and the write is refused if the answer is no. A rejecter's failure mode is a refused write; a rewriter's is a stored XSS.
+
+### Why regex tokenising is sound *here*
+
+Verified empirically against sanitize-html 2.17.7 with the approved allowlist: **every `<` and `>` not part of a tag is emitted as `&lt;`/`&gt;`, including inside attribute values, where `>` is escaped and `"` becomes `&quot;`.** So in conforming content `<` always begins a tag and `"` always delimits an attribute value — tokenising is exact, not approximate. Content lacking that property fails the check, which is the safe direction.
+
+The rule strips every tag unambiguously on the allowlist and refuses the row if any `<` or `>` survives. Nothing unrecognised is ever silently accepted.
+
+### Deliberate non-goals
+
+| | |
+|---|---|
+| **Not well-formedness** | `<p>x` unclosed is accepted. Unbalanced markup is a rendering concern; refusing it would reject legitimate content over a fault no reader can be harmed by. |
+| **Not a decoder** | `&lt;script&gt;` is accepted because it *is* text — it renders as literal characters. A post explaining HTML stays writable. Holds as long as stored HTML is inserted once, never decoded and re-inserted. |
+| **Not applied to revisions** | The archive is written only by the trigger from an already-validated row, so new revisions are compliant by construction. Historical rows are records of what was published and are not rewritten to satisfy a later rule. All 30 existing revisions were audited and pass anyway. |
+
+### One gap it closes that the frontend does not
+
+sanitize-html with this policy **does not strip a protocol-relative `href="//evil.example"`** — it survives the frontend sanitizer today. The backend refuses it, reusing migration 055's `is_safe_internal_path` rather than forming a second opinion about what a safe path is.
+
+### The error contract
+
+A refused write is SQLSTATE `23514` with the message exactly `unsafe_blog_html` and a `HINT` naming the allowed vocabulary. A BEFORE trigger raises it in front of the CHECK constraint deliberately: a bare constraint attaches `DETAIL: Failing row contains (...)`, which PostgREST forwards as `details`, echoing the rejected markup back. That is the writer's own payload so it discloses nothing — but an admin UI that renders an API error into the page would be rendering attacker-authored markup, turning a refused write into self-XSS. The trigger's message carries no echo of the submission.
+
+The CHECK constraint stays underneath as the structural backstop: it validates existing rows when added, and unlike a trigger a table owner cannot disable it.
+
+### This does not replace frontend sanitization
+
+**Database enforcement is persistence integrity. Frontend sanitization is rendering security.** Both are intentional, and `sanitizeBlogHtml(post.body_html)` before `dangerouslySetInnerHTML` remains mandatory — revisions are unconstrained, imports and manual SQL bypass application assumptions, and every rendering sink must keep treating stored HTML as untrusted.
+
 ## 11. Migration ownership and the frontend/backend boundary
 
 **This repository owns canonical migration history**, for the blog exactly as for every other table. Migrations 052 and 053 are the canonical, byte-for-byte (save for renumbered header cross-references) copies of the SQL that was authored and already applied to production from the frontend repository — imported here specifically so a fresh environment can reproduce the blog schema from this repository alone. **They are historical record, not pending work: they must never be reapplied to the production database that already ran them under their original numbers.**

@@ -687,6 +687,25 @@ The blog subsystem existed only in the frontend repository: two migrations autho
 
 ---
 
+## 9s. Blog HTML write-boundary enforcement — migration 057 **[D]**
+
+RLS decided who could write a blog post; nothing decided what HTML they could write. PROJECT_LOCK Amendment 018 §10a. **Security hardening, defence in depth.**
+
+- **The gap.** A blog manager's JWT works against PostgREST directly, so the editor's sanitizer was skippable. Any manager could persist `<img src=x onerror=alert(1)>` into `body_html`, leaving every reader dependent on the frontend remembering to sanitize on the way out. **[D]**
+- **Rejects, never rewrites.** PostgreSQL has no HTML parser, and a regex sanitizer that mutates markup is the classic mutation-XSS source. `is_safe_blog_html()` answers one question and refuses the write. A rejecter's failure mode is a refused write; a rewriter's is a stored XSS. **[D]**
+- **Regex tokenising is sound here, and that was verified rather than assumed.** sanitize-html 2.17.7 was installed and run against the approved allowlist: it escapes every `<`, `>` and `"` in text *and* in attribute values, so in conforming content `<` always begins a tag. Tokenising is exact. Non-conforming content fails, which is the safe direction. **[D]**
+- **Every existing row was audited before anything was enforced.** All 15 production posts and all 30 revisions were exported and run through the exact rule: **45 of 45 pass**, so the §9 stop condition never triggered and nothing was rewritten. A guard block in the migration re-runs that check at apply time and aborts the whole transaction, naming offending slugs, if production has drifted. **[D]**
+- **It closes a gap the frontend has.** sanitize-html does **not** strip a protocol-relative `href="//evil.example"`; the backend refuses it, reusing migration 055's `is_safe_internal_path`. **[D]**
+- **The error contract is clean.** SQLSTATE `23514`, message exactly `unsafe_blog_html`, plus a `HINT` naming the allowed vocabulary. A BEFORE trigger fronts the CHECK constraint on purpose: a bare constraint attaches `DETAIL: Failing row contains (...)`, which PostgREST forwards as `details` — echoing attacker-authored markup that an admin UI might render. The constraint stays beneath as the structural backstop. **[D]**
+- **Deliberate non-goals**, each documented: unbalanced markup is accepted (a rendering concern, not a security one); `&lt;script&gt;` is accepted because it is text; the revision archive is left unconstrained. **[D]**
+- **Frontend sanitization is not replaced.** Database enforcement is persistence integrity; `sanitizeBlogHtml()` before `dangerouslySetInnerHTML` is rendering security. Both are intentional. **[D]**
+
+Verification: `MIGRATION_057_VERIFICATION.sql`, **23 checks against PostgreSQL 16**, which perform real writes as `authenticated` under a blog-manager grant, as an admin, as an ordinary user and as `anon` rather than reading the constraint and inferring — 20 legitimate editor constructs accepted, **58 hostile payloads refused**, CTA markdown source preserved, UPDATE enforced as well as INSERT, revision trigger and scheduled publishing regression-tested. Clean replay 001–057 from an empty database; 057 re-run for idempotency; the guard block proven to abort on planted unsafe rows. Orchestrator: **840 tests pass**.
+
+**Not done:** the migration is not yet applied to production. No orchestrator code changed, so there is no deploy ordering constraint — the migration stands alone.
+
+---
+
 ## 10. Technical cautions
 
 ### Generated route file (frontend)
@@ -821,7 +840,7 @@ Frontend      v1.0.0  -> 775716769e40a3131c5d6d913d0d7fc1b40abdfd
 - `RLS_POLICY_PLAN.md`
 - `ROLE_ACCESS_MATRIX.md`
 - `API_CONTRACT.md`
-- `supabase/migrations/` — migrations 001 through 056 (052–053 canonicalized from the frontend repository and already live in production; 054–056 authored, not yet applied)
+- `supabase/migrations/` — migrations 001 through 057 (052–053 canonicalized from the frontend repository and already live in production; 054–056 authored, not yet applied)
 
 ---
 
