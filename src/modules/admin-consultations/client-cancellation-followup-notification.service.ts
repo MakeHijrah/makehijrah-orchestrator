@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { env } from "../../config/env.js";
 import { sendTransactionalEmail } from "../../lib/mandrill.js";
 import { redis } from "../../lib/redis.js";
@@ -31,6 +32,52 @@ const DELIVERY_PREFIX =
 
 const DELIVERY_TTL_SECONDS =
   30 * 24 * 60 * 60;
+
+/*
+ * How long a reservation may hold the delivery key before it is
+ * eligible to be reclaimed. Deliberately much shorter than
+ * DELIVERY_TTL_SECONDS: that TTL protects the durable "sent"
+ * record for a month, but a "pending" reservation only needs to
+ * outlive one Supabase read plus one Mandrill call. A crashed or
+ * hung process must not be able to block a legitimate retry for
+ * anywhere near that long. 90 seconds mirrors the reasoning in
+ * admin-service.locks.ts's SERVICE_LOCK_TTL_SECONDS: generous
+ * enough to cover retries on a slow Mandrill call, short enough
+ * that an abandoned reservation self-heals quickly.
+ */
+const RESERVATION_TTL_SECONDS = 90;
+
+/*
+ * Compare-and-delete: releases the reservation only if it still
+ * holds the exact token this call acquired. Without this check, a
+ * slow call could delete a reservation a different, later call
+ * already took over after the first one expired — exactly the
+ * "wrong invocation deletes someone else's lock" bug this guards
+ * against. Same shape as admin-service.locks.ts's
+ * RELEASE_LOCK_SCRIPT, kept local rather than shared because this
+ * key space belongs to this notification only.
+ */
+const RELEASE_RESERVATION_SCRIPT = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+  end
+
+  return 0
+`;
+
+/*
+ * Compare-and-set: commits the reservation to the durable "sent"
+ * state only if it still holds the exact token this call acquired,
+ * for the same reason the release script checks it.
+ */
+const FINALIZE_RESERVATION_SCRIPT = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    redis.call("set", KEYS[1], ARGV[2], "EX", ARGV[3])
+    return 1
+  end
+
+  return 0
+`;
 
 type ConsultationRow = {
   id: string;
@@ -105,18 +152,59 @@ const deliveryKey = (
 ): string =>
   `${DELIVERY_PREFIX}${consultationId}`;
 
-const deliveryWasRecorded = async (
+/*
+ * The value stored while a reservation is held, not yet a durable
+ * "sent" record. Carries the owning call's token so the finalize
+ * and release scripts can tell "still mine" from "someone else
+ * holds it now" without a second round trip.
+ */
+const reservationValue = (
+  token: string,
+): string => `pending:${token}`;
+
+type AcquireReservationResult =
+  | { ok: true; token: string }
+  | {
+      ok: false;
+      reason: "exists" | "unavailable";
+    };
+
+/*
+ * The single atomic operation this whole fix exists to introduce.
+ * SET ... NX either creates the key and returns "OK", or does
+ * nothing and returns null if the key is already held — by a
+ * prior successful send, or by a concurrent call's own in-flight
+ * reservation. Either way, "not OK" means this call must not send.
+ *
+ * A Redis error here fails closed: no reservation, no send. The
+ * alternative — proceeding without protection — is exactly the
+ * silent-duplicate-email risk section 7 of the brief forbids.
+ */
+const acquireReservation = async (
   consultationId: string,
-): Promise<boolean> => {
+): Promise<AcquireReservationResult> => {
+  const token = randomUUID();
+
   try {
-    return (
-      (await redis.get(
-        deliveryKey(consultationId),
-      )) === "sent"
+    const claimed = await redis.set(
+      deliveryKey(consultationId),
+      reservationValue(token),
+      "EX",
+      RESERVATION_TTL_SECONDS,
+      "NX",
     );
+
+    if (claimed !== "OK") {
+      return {
+        ok: false,
+        reason: "exists",
+      };
+    }
+
+    return { ok: true, token };
   } catch (error) {
     console.error(
-      "Client cancellation follow-up delivery lookup failed",
+      "Client cancellation follow-up reservation failed",
       {
         consultationId,
         message:
@@ -126,22 +214,34 @@ const deliveryWasRecorded = async (
       },
     );
 
-    return false;
+    return {
+      ok: false,
+      reason: "unavailable",
+    };
   }
 };
 
-const recordDelivery = async (
+/*
+ * Commits a held reservation to the durable "sent" record after
+ * Mandrill has actually confirmed delivery. Guarded by the token
+ * so a reservation that expired and was reclaimed by a later call
+ * cannot be overwritten by this call reporting success late.
+ */
+const finalizeReservation = async (
   consultationId: string,
+  token: string,
 ): Promise<boolean> => {
   try {
-    await redis.set(
+    const result = await redis.eval(
+      FINALIZE_RESERVATION_SCRIPT,
+      1,
       deliveryKey(consultationId),
+      reservationValue(token),
       "sent",
-      "EX",
-      DELIVERY_TTL_SECONDS,
+      String(DELIVERY_TTL_SECONDS),
     );
 
-    return true;
+    return result === 1;
   } catch (error) {
     console.error(
       "Client cancellation follow-up delivery write failed",
@@ -155,6 +255,38 @@ const recordDelivery = async (
     );
 
     return false;
+  }
+};
+
+/*
+ * Releases a held reservation after Mandrill failed to deliver, so
+ * a legitimate retry can acquire the key again instead of waiting
+ * out the full reservation TTL. Token-guarded for the same reason
+ * as finalizeReservation — this call must never delete a
+ * reservation it does not still own.
+ */
+const releaseReservation = async (
+  consultationId: string,
+  token: string,
+): Promise<void> => {
+  try {
+    await redis.eval(
+      RELEASE_RESERVATION_SCRIPT,
+      1,
+      deliveryKey(consultationId),
+      reservationValue(token),
+    );
+  } catch (error) {
+    console.error(
+      "Client cancellation follow-up reservation release failed",
+      {
+        consultationId,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unknown Redis error",
+      },
+    );
   }
 };
 
@@ -308,14 +440,6 @@ export const sendClientCancellationFollowUpEmail =
   }: {
     consultationId: string;
   }): Promise<ClientCancellationFollowUpResult> => {
-    if (
-      await deliveryWasRecorded(
-        consultationId,
-      )
-    ) {
-      return "already_sent";
-    }
-
     const context =
       await loadContext(consultationId);
 
@@ -329,6 +453,27 @@ export const sendClientCancellationFollowUpEmail =
       )
     ) {
       return "skipped";
+    }
+
+    /*
+     * The one atomic gate. Eligibility (above) is checked before
+     * this so an admin/system cancellation, or one with no usable
+     * recipient, never claims a reservation it has no intention of
+     * using. From here on, exactly one caller can hold the key —
+     * that is what makes two concurrent invocations for the same
+     * consultation produce exactly one Mandrill request instead of
+     * a race between a GET and a later SET.
+     */
+    const reservation =
+      await acquireReservation(
+        consultationId,
+      );
+
+    if (!reservation.ok) {
+      return reservation.reason ===
+        "exists"
+        ? "already_sent"
+        : "failed";
     }
 
     const firstName = firstNameFrom(
@@ -402,12 +547,43 @@ export const sendClientCancellationFollowUpEmail =
         },
       );
 
+      /*
+       * Release, don't leave "pending" sitting until its TTL
+       * expires: a legitimate retry (admin retries the API call,
+       * the frontend resubmits) should be able to send as soon as
+       * the underlying Mandrill problem clears, not up to 90
+       * seconds later.
+       */
+      await releaseReservation(
+        consultationId,
+        reservation.token,
+      );
+
       return "failed";
     }
 
-    return (await recordDelivery(
-      consultationId,
-    ))
-      ? "sent"
-      : "failed";
+    const finalized =
+      await finalizeReservation(
+        consultationId,
+        reservation.token,
+      );
+
+    if (!finalized) {
+      /*
+       * The email genuinely sent — Mandrill confirmed it — so this
+       * is reported as "sent" regardless. A finalize failure here
+       * only means the durable "sent" bookkeeping did not land
+       * (Redis died between the send and this call, or the
+       * reservation's 90 second TTL was outlived by an unusually
+       * slow Mandrill round trip and a later call already reclaimed
+       * the key). Both are rare and worth an error log, but neither
+       * makes the send that already happened false.
+       */
+      console.error(
+        "Client cancellation follow-up sent but delivery record could not be finalized",
+        { consultationId },
+      );
+    }
+
+    return "sent";
   };

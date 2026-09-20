@@ -295,17 +295,68 @@ supabaseAdmin.rpc = (async (
 const redisStore = new Map<string, string>();
 const redisHashes = new Map<string, Map<string, string>>();
 
-redis.get = (async (key: string) =>
-  redisStore.get(key) ?? null) as unknown as typeof redis.get;
+let redisAvailable = true;
+
+redis.get = (async (key: string) => {
+  if (!redisAvailable) {
+    throw new Error("Simulated Redis outage");
+  }
+
+  return redisStore.get(key) ?? null;
+}) as unknown as typeof redis.get;
 
 redis.set = (async (
   key: string,
   value: string,
-  ..._rest: unknown[]
+  ...rest: unknown[]
 ) => {
+  if (!redisAvailable) {
+    throw new Error("Simulated Redis outage");
+  }
+
+  const nx = rest.includes("NX");
+
+  if (nx && redisStore.has(key)) {
+    return null;
+  }
+
   redisStore.set(key, value);
   return "OK";
 }) as unknown as typeof redis.set;
+
+/*
+ * Interprets the follow-up notification service's two local Lua
+ * scripts (compare-and-set, compare-and-delete) by shape: same
+ * convention as client-cancellation-followup-notification.test.ts's
+ * own fake, kept in sync deliberately since both exercise the same
+ * production script text.
+ */
+redis.eval = (async (
+  _script: string,
+  _numKeys: number,
+  key: string,
+  expected: string,
+  ...rest: unknown[]
+) => {
+  if (!redisAvailable) {
+    throw new Error("Simulated Redis outage");
+  }
+
+  const current = redisStore.get(key) ?? null;
+
+  if (current !== expected) {
+    return 0;
+  }
+
+  if (rest.length === 0) {
+    redisStore.delete(key);
+    return 1;
+  }
+
+  const [nextValue] = rest as [string];
+  redisStore.set(key, nextValue);
+  return 1;
+}) as unknown as typeof redis.eval;
 
 redis.hget = (async (
   key: string,
@@ -432,6 +483,7 @@ beforeEach(() => {
   db.profiles = [];
   rpcCalls.length = 0;
   redisStore.clear();
+  redisAvailable = true;
   mandrillRequests = [];
 });
 
@@ -712,6 +764,34 @@ describe("Admin cancellation: Mandrill failure does not affect the cancellation"
       db.consultations[0]!.status,
       "cancelled",
       "the cancellation itself must still have committed",
+    );
+  });
+
+  it("a client_requested cancellation still succeeds even if Redis is unavailable for the follow-up reservation", async () => {
+    seedConfirmedConsultation();
+
+    redisAvailable = false;
+
+    const result = await adminCancelConsultation({
+      consultationId: CONSULTATION_ID,
+      refund: false,
+      note: null,
+      cancellationSource: "client_requested",
+    });
+
+    redisAvailable = true;
+
+    assert.equal(result.ok, true);
+    assert.ok(result.ok && result.status === "cancelled");
+    assert.equal(
+      db.consultations[0]!.status,
+      "cancelled",
+      "the cancellation itself must still have committed",
+    );
+    assert.equal(
+      followUpRequests().length,
+      0,
+      "no email is sent without idempotency protection — this proves the reservation failed closed, not that it was skipped for some other reason",
     );
   });
 });
