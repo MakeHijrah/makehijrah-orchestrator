@@ -311,6 +311,42 @@ export const buildDirectBookingUrl = ({
   `${origin.replace(/\/+$/, "")}/${slug}`;
 
 /*
+ * Where a booking type sends a visitor who wants to book again.
+ *
+ * A direct booking has one specific consultant; a standard
+ * booking does not, so it goes to the generic chooser. This is
+ * the same branch checkout.service.ts's buildCancelUrl already
+ * makes for "where does a visitor who changes their mind go back
+ * to" — extracted here so a second caller (the cancellation
+ * follow-up email) computes the identical destination rather than
+ * a second implementation that could quietly disagree with the
+ * first about a trailing slash or which branch applies.
+ *
+ * Returns a bare destination URL with no query string. A caller
+ * that needs to decorate it — checkout's own ?booking=cancelled&
+ * cid=... — does that on top of this, not inside it.
+ */
+export const buildPublicBookingDestinationUrl = ({
+  appUrl,
+  consultantSlug,
+}: {
+  appUrl: string;
+  /*
+   * Present only for a direct booking, and read from the
+   * consultant's stored row — never re-derived from a name, which
+   * could point at a different consultant than the one the
+   * booking actually belongs to.
+   */
+  consultantSlug: string | null;
+}): string =>
+  consultantSlug
+    ? buildDirectBookingUrl({
+        origin: appUrl,
+        slug: consultantSlug,
+      })
+    : `${appUrl.replace(/\/+$/, "")}/consultation`;
+
+/*
  * DEFAULT SLUG GENERATION. PROJECT_LOCK Amendment 012.
  *
  * A consultant no longer chooses their own booking link — slugs are

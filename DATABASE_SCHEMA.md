@@ -257,6 +257,7 @@ create table consultations (
   google_event_id text,
   meet_link text,
   admin_attention_reason text,                -- 'declined' | 'timeout' | manual note
+  cancellation_source text,                   -- migration 058; null | 'client_requested' | 'admin' | 'system'
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint consultation_end_after_start check (scheduled_end_at > scheduled_start_at),
@@ -264,7 +265,10 @@ create table consultations (
   constraint consultations_stripe_mode_check
     check (stripe_mode is null or stripe_mode in ('test', 'live')),
   constraint consultations_booking_source_check
-    check (booking_source in ('standard', 'direct_booking'))
+    check (booking_source in ('standard', 'direct_booking')),
+  constraint consultations_cancellation_source_check
+    check (cancellation_source is null
+           or cancellation_source in ('client_requested', 'admin', 'system'))
 );
 ```
 
@@ -273,6 +277,12 @@ create table consultations (
 This column is the **only** thing that distinguishes a direct booking. There is no `direct_consultations` table and no parallel payment record: same statuses, same draft hold, same double-booking exclusion, same checkout, capture, completion, refund and timeout. See Amendment 011 §2.
 
 **`stripe_mode` (Amendment 007, migration 025).** Records the Stripe mode under which this consultation's PaymentIntent was created. It is the authoritative selector for every later capture, cancellation or refund, so a change to the global `app_settings.stripe_mode` never redirects an existing payment to the wrong Stripe account. Null when no PaymentIntent exists. Existing rows carrying a PaymentIntent were backfilled to `'test'`.
+
+**`cancellation_source` (migration 058 — authored, not applied; PROJECT_LOCK Amendment 019).** Structured, and only ever set by `finalize_admin_consultation_cancel`, never inferred from `admin_attention_reason`'s free text. `'client_requested'` means the admin performing the cancellation is acting because the client asked them to; `'admin'` is the admin's own decision, and is also what an existing caller that omits the new RPC argument gets, by the RPC's own SQL-level default. `'system'` is reserved for the two automated cancellation paths — `abandon_draft_consultation` (migration 046) and `expire_stale_draft_consultations` (migration 047) — but neither writes it: both cancel a `draft` row with no payment and frequently no completed intake, which is not something a client would recognise as "cancelling a booking," so migration 058 deliberately left them alone rather than widen its own scope. Every consultation cancelled before this migration, and every row cancelled by a path other than the admin RPC, reads `null` — which is honest, not a gap to backfill.
+
+Immutable once set: `finalize_admin_consultation_cancel`'s `UPDATE` reads `coalesce(consultations.cancellation_source, v_source)`, so a repeat call — the RPC's own existing idempotent-replay branches, already in place before this migration — can report the stored value but can never overwrite it, even if the repeat call supplies a different one. This is what makes `cancellation_source = 'client_requested'` a safe, non-inferred trigger for a downstream action: the value a reader sees is always the one the *first* successful cancellation actually recorded.
+
+The sole consumer today is `sendClientCancellationFollowUpEmail` (`src/modules/admin-consultations/client-cancellation-followup-notification.service.ts`), fired from `admin-consultation-cancel.service.ts` immediately after a `client_requested` cancellation commits — see `API_CONTRACT.md` §3 for the endpoint contract and the email itself.
 
 **The draft hold (migrations 046 and 047).** A `draft` row **is** the slot hold — it appears in the index below, so while it exists nobody else can book that time. The hold is **30 minutes** from `created_at`, defined once in SQL: `create_draft_consultation` returns it as `hold_expires_at`, and `expire_stale_draft_consultations` cancels drafts past the same cutoff. The two live beside each other deliberately — a worker that disagreed with `hold_expires_at` would either cancel live bookings or leave dead ones standing.
 

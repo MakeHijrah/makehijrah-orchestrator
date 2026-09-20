@@ -6,7 +6,7 @@ import {
 } from "../../lib/stripe.js";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import { loadDirectBookingSettingsById } from "../direct-booking/direct-booking.repository.js";
-import { buildDirectBookingUrl } from "../direct-booking/direct-booking.slug.js";
+import { buildPublicBookingDestinationUrl } from "../direct-booking/direct-booking.slug.js";
 import { calculateHoldExpiration } from "./draft-hold.js";
 
 type CheckoutConsultationRow = {
@@ -104,12 +104,10 @@ const buildCancelUrl = ({
    */
   consultantSlug: string | null;
 }): string => {
-  const base = consultantSlug
-    ? buildDirectBookingUrl({
-        origin: appUrl,
-        slug: consultantSlug,
-      })
-    : `${appUrl.replace(/\/+$/, "")}/consultation`;
+  const base = buildPublicBookingDestinationUrl({
+    appUrl,
+    consultantSlug,
+  });
 
   return (
     `${base}?booking=cancelled` +

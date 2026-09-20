@@ -10,6 +10,9 @@ import {
 import {
   sendAdminCancellationNotifications,
 } from "./admin-consultation-cancel-notification.service.js";
+import {
+  sendClientCancellationFollowUpEmail,
+} from "./client-cancellation-followup-notification.service.js";
 
 type AdminCancellationRow = {
   id: string;
@@ -20,6 +23,11 @@ type AdminCancellationRow = {
   google_event_id: string | null;
   cancelled_at: string | null;
   admin_attention_reason: string | null;
+  cancellation_source:
+    | "client_requested"
+    | "admin"
+    | "system"
+    | null;
 };
 
 export type AdminCancelConsultationResult =
@@ -29,6 +37,17 @@ export type AdminCancelConsultationResult =
       status: string;
       cancelledAt: string | null;
       adminAttentionReason: string | null;
+      /*
+       * Migration 058. Never inferred — exactly what the RPC
+       * persisted, which on a repeat call is whatever was stored
+       * by the FIRST successful call, not necessarily what this
+       * particular call supplied.
+       */
+      cancellationSource:
+        | "client_requested"
+        | "admin"
+        | "system"
+        | null;
       refunded: boolean;
       stripeAction:
         | "none"
@@ -69,7 +88,7 @@ const loadConsultation = async (
     await supabaseAdmin
       .from("consultations")
       .select(
-        "id, consultant_id, status, stripe_payment_intent_id, stripe_mode, google_event_id, cancelled_at, admin_attention_reason",
+        "id, consultant_id, status, stripe_payment_intent_id, stripe_mode, google_event_id, cancelled_at, admin_attention_reason, cancellation_source",
       )
       .eq("id", consultationId)
       .maybeSingle();
@@ -387,16 +406,33 @@ const finalizeCancellation = async ({
   consultationId,
   refund,
   note,
+  cancellationSource,
 }: {
   consultationId: string;
   refund: boolean;
   note: string | null;
+  /*
+   * Always an explicit string, never omitted and never null —
+   * the caller (adminCancelConsultation) resolves a missing
+   * request value to "admin" before this is ever called, so the
+   * RPC's own SQL-level default is a second line of defence, not
+   * the mechanism this layer relies on.
+   */
+  cancellationSource:
+    | "client_requested"
+    | "admin"
+    | "system";
 }): Promise<
   | {
       ok: true;
       status: string;
       cancelledAt: string | null;
       adminAttentionReason: string | null;
+      cancellationSource:
+        | "client_requested"
+        | "admin"
+        | "system"
+        | null;
     }
   | {
       ok: false;
@@ -416,6 +452,8 @@ const finalizeCancellation = async ({
           refund,
         p_note:
           note,
+        p_cancellation_source:
+          cancellationSource,
       },
     );
 
@@ -467,6 +505,11 @@ const finalizeCancellation = async ({
             consultation_status: string;
             cancelled_at: string | null;
             admin_attention_reason: string | null;
+            cancellation_source:
+              | "client_requested"
+              | "admin"
+              | "system"
+              | null;
           }>
         | null
     )?.[0];
@@ -488,6 +531,8 @@ const finalizeCancellation = async ({
       row.cancelled_at,
     adminAttentionReason:
       row.admin_attention_reason,
+    cancellationSource:
+      row.cancellation_source,
   };
 };
 
@@ -509,11 +554,27 @@ export const adminCancelConsultation =
     consultationId,
     refund,
     note,
+    cancellationSource,
   }: {
     consultationId: string;
     refund: boolean;
     note: string | null;
+    /*
+     * Structured, never inferred from `note`. A caller that has
+     * not been updated to send this yet omits it — undefined —
+     * and it resolves to "admin" below, matching migration 058's
+     * own RPC default exactly, so the two layers cannot disagree
+     * about what a legacy caller means.
+     */
+    cancellationSource?:
+      | "client_requested"
+      | "admin"
+      | "system"
+      | null;
   }): Promise<AdminCancelConsultationResult> => {
+    const resolvedCancellationSource =
+      cancellationSource ?? "admin";
+
     const loaded =
       await loadConsultation(
         consultationId,
@@ -539,6 +600,8 @@ export const adminCancelConsultation =
           consultation.cancelled_at,
         adminAttentionReason:
           consultation.admin_attention_reason,
+        cancellationSource:
+          consultation.cancellation_source,
         refunded: true,
         stripeAction: "none",
         calendarAction: "none",
@@ -559,6 +622,8 @@ export const adminCancelConsultation =
           consultation.cancelled_at,
         adminAttentionReason:
           consultation.admin_attention_reason,
+        cancellationSource:
+          consultation.cancellation_source,
         refunded: false,
         stripeAction: "none",
         calendarAction: "none",
@@ -744,6 +809,8 @@ export const adminCancelConsultation =
           consultation.id,
         refund,
         note,
+        cancellationSource:
+          resolvedCancellationSource,
       });
 
     if (!finalized.ok) {
@@ -786,6 +853,56 @@ export const adminCancelConsultation =
       );
     }
 
+    /*
+     * Migration 058. Gated on the RPC's OWN returned/stored
+     * value, never on the request that just came in: on a repeat
+     * call this is whatever the FIRST successful call persisted,
+     * which is what makes a retry unable to fire this off a
+     * request that merely happens to pass client_requested for a
+     * consultation someone else already cancelled for a different
+     * reason. The send itself is separately idempotent (its own
+     * Redis delivery key) on top of this, matching every other
+     * notification in this module.
+     *
+     * The cancellation itself already committed above; a failure
+     * here is logged and never turns a successful cancellation
+     * into an error response.
+     */
+    if (
+      finalized.cancellationSource ===
+      "client_requested"
+    ) {
+      try {
+        const followUp =
+          await sendClientCancellationFollowUpEmail({
+            consultationId:
+              consultation.id,
+          });
+
+        if (followUp === "failed") {
+          console.error(
+            "Client cancellation follow-up email failed after a client-requested cancellation",
+            {
+              consultationId:
+                consultation.id,
+            },
+          );
+        }
+      } catch (error) {
+        console.error(
+          "Client cancellation follow-up processing threw after a client-requested cancellation",
+          {
+            consultationId:
+              consultation.id,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unknown notification error",
+          },
+        );
+      }
+    }
+
     return {
       ok: true,
       consultationId:
@@ -796,6 +913,8 @@ export const adminCancelConsultation =
         finalized.cancelledAt,
       adminAttentionReason:
         finalized.adminAttentionReason,
+      cancellationSource:
+        finalized.cancellationSource,
       refunded:
         finalized.status === "refunded",
       stripeAction,

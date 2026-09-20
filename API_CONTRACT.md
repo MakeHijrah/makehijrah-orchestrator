@@ -552,8 +552,18 @@ google_calendar
 **Google requirement.** An active Google Calendar connection is required for activation and for a consultant's initial profile submission. It is **not** required for an already-completed consultant's profile update — see §2b and Amendment 003. `deactivate` has no completeness requirement.
 
 ### `POST /api/admin/consultations/:id/cancel`
-Body: `{ "refund": true | false, "note": "…" }`
+Body: `{ "refund": true | false, "note": "…", "cancellation_source"?: "client_requested" | "admin" | "system" }`
+
 Server by current status: `pending_acceptance` → cancel authorization; `confirmed`/`captured` → refund if `refund: true`, delete/patch Google event; always → status `cancelled` (or `refunded`), payments log, emails to both parties.
+
+**`cancellation_source` (migration 058 — authored, not applied; PROJECT_LOCK Amendment 019).** Structured, never inferred from `note` — a plain enum, not free text the server parses for phrases like "client asked." **Optional, for backward compatibility with an existing caller that has not been updated yet**: omitted, it resolves to `"admin"`, both in the orchestrator and, independently, in the RPC's own SQL-level default — the two cannot disagree about what an old caller means. A value present but not one of the three known ones is `400 VALIDATION_ERROR`, never silently coerced.
+
+Response `data` now also includes `"cancellation_source"`, echoing back whichever value was actually stored — which, on a repeat call against an already-cancelled consultation, is whatever the *first* successful call recorded, never what the repeat call supplied. `cancellation_source` cannot be changed once set; the field exists to state a fact once, not to be edited.
+
+- `cancellation_source: "client_requested"` — the admin is cancelling because the client asked them to (a phone call, a support email, however that reached the admin). **This is the only value that makes the consultation eligible for the client-requested cancellation follow-up email** (see below), and eligibility is decided solely by this stored field, never by the free-text `note`.
+- `cancellation_source: "admin"` or `"system"`, or the field omitted entirely — **no follow-up email is sent.** `"system"` is accepted by the schema but is not written by any automated path today (draft supersede and draft expiry cancel a `draft` with no payment, which is not a client-recognisable "cancelled booking," so migration 058 left them unclassified rather than widen its own scope — see `DATABASE_SCHEMA.md` §7).
+
+**The client-requested cancellation follow-up email.** Fired once, from `admin-consultation-cancel.service.ts`, immediately *after* the cancellation itself has committed — never before, and a delivery failure never turns a successful cancellation into an HTTP error. Sent to `consultation_intake.email` for the cancelled consultation, **never `profiles.email`**, matching every other client-facing consultation notification. Subject: *"We noticed you cancelled your Make Hijrah consultation."* Personalised with the client's first name only. Includes a "book another consultation here" link only when a safe destination is resolvable — the consultant's own slug page for a direct booking, `/consultation` for a standard one — using the same URL logic checkout's own cancel-and-return redirect already uses (`buildPublicBookingDestinationUrl`, `src/modules/direct-booking/direct-booking.slug.ts`); omitted entirely rather than guessed if a direct booking's consultant has no usable slug. Carries no discount, no urgency, and no internal cancellation metadata (no `note`, no `admin_attention_reason`, no cancellation source, no consultation id). Idempotent per consultation via a Redis delivery key (`client-cancellation-followup:delivery:<consultationId>`, 30-day TTL), matching this endpoint's existing client/consultant cancellation-notification pattern exactly — a retried request, a duplicate frontend submission, an admin page refresh, or a worker restart cannot produce a second copy. **No historical backfill**: only a cancellation performed through this endpoint *after* migration 058 is applied can ever carry `cancellation_source`, so no consultation cancelled before that point can trigger this email, regardless of its current status.
 
 ### `POST /api/admin/recommendations/:id/send` — admin
 Guard: recommendation status `proposed`, parent consultation `completed`.
@@ -985,13 +995,19 @@ All jobs use job-ID-based dedup where a single-fire per consultation matters.
 | 24h consultant reminder | consultant | no |
 | Session reminders | client + consultant | no |
 | Recommendation sent | client | **yes** |
+| Admin cancels a consultation | client, consultant | **yes** |
+| Admin cancels **because the client asked** (`cancellation_source: "client_requested"`) | client only, follow-up asking what happened | **yes** — migration 058 |
 
 Templates are plain HTML in the orchestrator repo. No template service in MVP.
 
 The **Built** column is the honest current state, not the target: three of these rows
 are unimplemented. Every implemented row is scheduled into a Redis due set and
 delivered by a worker, never sent inline — the Stripe webhook path in particular may
-not touch a table (Amendment 004 section 10.3.3), so it schedules only.
+not touch a table (Amendment 004 section 10.3.3), so it schedules only. The two admin
+cancellation rows are the exception: `POST /api/admin/consultations/:id/cancel` is an
+ordinary authenticated endpoint, not the Stripe webhook, so both send inline —
+awaited, after the cancellation itself has already committed, never blocking or
+reversing it on a delivery failure.
 
 The consultant booking email is idempotent across Stripe redeliveries by the
 `booking-notification:done:<id>` marker, and is suppressed rather than sent late if

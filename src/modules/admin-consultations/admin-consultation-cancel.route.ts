@@ -22,6 +22,19 @@ const bodySchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value || null),
+  /*
+   * Migration 058. Structured, never inferred from `note`.
+   * Optional so an existing caller that has not been updated yet
+   * keeps working exactly as before; the service resolves an
+   * omitted value to "admin". A value that is present but not one
+   * of the three known ones is a 400, same as any other malformed
+   * request — never silently coerced.
+   */
+  cancellation_source: z
+    .enum(["client_requested", "admin", "system"])
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
 });
 
 export const registerAdminConsultationCancelRoute =
@@ -84,6 +97,9 @@ export const registerAdminConsultationCancelRoute =
               parsedBody.data.refund,
             note:
               parsedBody.data.note,
+            cancellationSource:
+              parsedBody.data
+                .cancellation_source,
           });
 
         if (!result.ok) {
@@ -134,6 +150,8 @@ export const registerAdminConsultationCancelRoute =
             result.cancelledAt,
           admin_attention_reason:
             result.adminAttentionReason,
+          cancellation_source:
+            result.cancellationSource,
           refunded:
             result.refunded,
           stripe_action:
